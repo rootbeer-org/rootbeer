@@ -26,8 +26,8 @@
         let
           craneLib = inputs.crane.mkLib pkgs;
 
-          # build.rs embeds the stdlib and package definitions.
-          luaFilter = path: _type: builtins.match ".*(lua|packages)/.*" path != null;
+          # build.rs embeds the stdlib and package definitions; `rb licenses` embeds licenses/.
+          luaFilter = path: _type: builtins.match ".*(lua|packages|licenses)/.*" path != null;
           src = lib.cleanSourceWith {
             src = ./.;
             filter = path: type: (luaFilter path type) || (craneLib.filterCargoSources path type);
