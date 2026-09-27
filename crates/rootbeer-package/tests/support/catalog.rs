@@ -68,29 +68,3 @@ pub fn catalog() -> &'static PackageCatalog {
         catalog
     })
 }
-
-/// Reaching into a version's platforms, for tests that predate platform-first recipes.
-#[allow(dead_code)]
-pub trait VersionTestExt {
-    /// A platform's contract, for assertions that hold on every platform alike.
-    fn any(&self) -> &rootbeer_package::CatalogRecipe;
-    /// Every platform, so a mutation applies wherever resolution later looks.
-    fn all_mut(
-        &mut self,
-    ) -> std::collections::btree_map::ValuesMut<'_, String, rootbeer_package::CatalogRecipe>;
-}
-
-impl VersionTestExt for rootbeer_package::CatalogVersion {
-    fn any(&self) -> &rootbeer_package::CatalogRecipe {
-        self.platforms
-            .values()
-            .next()
-            .expect("a version builds at least one platform")
-    }
-
-    fn all_mut(
-        &mut self,
-    ) -> std::collections::btree_map::ValuesMut<'_, String, rootbeer_package::CatalogRecipe> {
-        self.platforms.values_mut()
-    }
-}

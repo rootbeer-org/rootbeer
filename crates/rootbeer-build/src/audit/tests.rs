@@ -1,6 +1,4 @@
 use super::*;
-#[allow(unused_imports)]
-use crate::test_catalog::VersionTestExt;
 use std::process::Command;
 
 fn compile(args: &[String]) {
@@ -209,11 +207,13 @@ fn source_build_rejects_unsafe_binary_before_checks_or_cache_publication() {
         "steps": {"configure": [], "build": [["sh", "-c", "exit 0"]], "check": [["sh", "-c", "exit 0"]],
             "install": [["sh", "-c", "cp -R bin lib \"$1/\"", "install", "{prefix}"]]}
     })).unwrap());
-    for platform in recipe.all_mut() {
-        platform.bins = rootbeer_package::Bins::Names(vec!["main".into()]);
-        platform.checks = vec![vec!["main".into()]];
-        platform.build = build.clone();
-    }
+    let platform = recipe
+        .platforms
+        .get_mut(&ResolveContext::current().system)
+        .unwrap();
+    platform.bins = rootbeer_package::Bins::Names(vec!["main".into()]);
+    platform.checks = vec![vec!["main".into()]];
+    platform.build = build.clone();
     catalog.packages.clear();
     catalog.packages.insert(
         "fixture".into(),

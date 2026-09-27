@@ -1,6 +1,4 @@
 use super::*;
-#[allow(unused_imports)]
-use crate::test_catalog::VersionTestExt;
 use rootbeer_package::lockfile::RootbeerLock;
 
 #[test]
@@ -66,10 +64,12 @@ fn runtime_chain_survives_cache_reuse_and_installation_without_build_trees() {
         } else {
             vec![vec![name.into()]]
         };
-        for platform in recipe.all_mut() {
-            platform.bins = bins.clone();
-            platform.checks = checks.clone();
-        }
+        let platform = recipe
+            .platforms
+            .get_mut(&ResolveContext::current().system)
+            .unwrap();
+        platform.bins = bins.clone();
+        platform.checks = checks.clone();
         let filename = if is_library {
             format!("lib{name}.{extension}")
         } else {
@@ -112,9 +112,11 @@ fn runtime_chain_survives_cache_reuse_and_installation_without_build_trees() {
             "steps": {"configure": [], "build": [command], "check": [["sh", "-c", "exit 0"]],
                 "install": [["mkdir", "-p", format!("{{prefix}}/{output_dir}")], ["cp", filename, format!("{{prefix}}/{output_dir}/")]]}
         })).unwrap();
-        for platform in recipe.all_mut() {
-            platform.build = Some(runtime_build.clone());
-        }
+        let platform = recipe
+            .platforms
+            .get_mut(&ResolveContext::current().system)
+            .unwrap();
+        platform.build = Some(runtime_build.clone());
         package.versions = BTreeMap::from([("1".into(), recipe)]);
         catalog.packages.insert(name.into(), package);
     }

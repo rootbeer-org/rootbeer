@@ -3,8 +3,6 @@ use rootbeer_package::graph::DependencyGraph;
 use std::os::unix::fs::PermissionsExt;
 
 use super::*;
-#[allow(unused_imports)]
-use crate::test_catalog::VersionTestExt;
 
 fn source_catalog() -> PackageCatalog {
     let catalog = crate::test_catalog::catalog();
@@ -17,8 +15,8 @@ fn source_catalog() -> PackageCatalog {
 #[test]
 fn validates_backend_options_and_patch_inputs() {
     let catalog = source_catalog();
-    let mut build = catalog.packages["xz"].versions["5.8.3"]
-        .any()
+    let mut build = catalog.packages["xz"].versions["5.8.3"].platforms
+        [&ResolveContext::current().system]
         .build
         .clone()
         .unwrap();
@@ -42,51 +40,51 @@ fn build_graph_orders_dependencies_once_and_rejects_cycles() {
     let mut dependency = catalog.packages["xz"].clone();
     dependency.name = "build-tool".into();
     catalog.packages.insert("build-tool".into(), dependency);
-    catalog
+    let platform = catalog
         .packages
         .get_mut("xz")
         .unwrap()
         .versions
         .get_mut("5.8.3")
         .unwrap()
-        .all_mut()
-        .for_each(|platform| {
-            platform.build.as_mut().unwrap().dependencies = vec!["build-tool@5.8.3".into()]
-        });
+        .platforms
+        .get_mut(&ResolveContext::current().system)
+        .unwrap();
+    platform.build.as_mut().unwrap().dependencies = vec!["build-tool@5.8.3".into()];
     catalog.validate().unwrap();
     let order = DependencyGraph::new(&catalog, &["xz".into()], &ResolveContext::current().system)
         .unwrap()
         .order;
     assert_eq!(order, ["build-tool@5.8.3", "xz@5.8.3"]);
-    catalog
+    let platform = catalog
         .packages
         .get_mut("build-tool")
         .unwrap()
         .versions
         .get_mut("5.8.3")
         .unwrap()
-        .all_mut()
-        .for_each(|platform| {
-            platform.build.as_mut().unwrap().dependencies = vec!["xz@5.8.3".into()]
-        });
+        .platforms
+        .get_mut(&ResolveContext::current().system)
+        .unwrap();
+    platform.build.as_mut().unwrap().dependencies = vec!["xz@5.8.3".into()];
     assert!(catalog.validate().unwrap_err().contains("cycle"));
 }
 
 #[test]
 fn invalid_build_inputs_fail_before_creating_output() {
     let mut catalog = source_catalog();
-    for platform in catalog
+    let platform = catalog
         .packages
         .get_mut("xz")
         .unwrap()
         .versions
         .get_mut("5.8.3")
         .unwrap()
-        .all_mut()
-    {
-        let build = platform.build.as_mut().unwrap();
-        build.strip_prefix = "../outside".into();
-    }
+        .platforms
+        .get_mut(&ResolveContext::current().system)
+        .unwrap();
+    let build = platform.build.as_mut().unwrap();
+    build.strip_prefix = "../outside".into();
     let directory = tempfile::tempdir().unwrap();
     let output = directory.path().join("output");
     assert!(
@@ -96,17 +94,17 @@ fn invalid_build_inputs_fail_before_creating_output() {
     );
     assert!(!output.exists());
     let mut catalog = source_catalog();
-    catalog
+    let platform = catalog
         .packages
         .get_mut("xz")
         .unwrap()
         .versions
         .get_mut("5.8.3")
         .unwrap()
-        .all_mut()
-        .for_each(|platform| {
-            platform.build.as_mut().unwrap().dependencies = vec!["missing@1".into()]
-        });
+        .platforms
+        .get_mut(&ResolveContext::current().system)
+        .unwrap();
+    platform.build.as_mut().unwrap().dependencies = vec!["missing@1".into()];
     assert!(catalog
         .validate()
         .unwrap_err()
@@ -245,15 +243,21 @@ EOF
         name: "fixture".into(),
         ..package
     };
-    for platform in package.versions.get_mut("5.8.3").unwrap().all_mut() {
-        platform.bins = rootbeer_package::Bins::Names(vec!["fixture".into()]);
-        platform.checks = vec![vec!["fixture".into()]];
-        let build = platform.build.as_mut().unwrap();
-        build.url = "https://source.invalid/fixture.tar.gz".into();
-        build.sha256 = cached.sha256.clone();
-        build.strip_prefix = "fixture".into();
-        build.configure.clear();
-        build.patches = vec![r#"--- a/configure
+    let platform = package
+        .versions
+        .get_mut("5.8.3")
+        .unwrap()
+        .platforms
+        .get_mut(&ResolveContext::current().system)
+        .unwrap();
+    platform.bins = rootbeer_package::Bins::Names(vec!["fixture".into()]);
+    platform.checks = vec![vec!["fixture".into()]];
+    let build = platform.build.as_mut().unwrap();
+    build.url = "https://source.invalid/fixture.tar.gz".into();
+    build.sha256 = cached.sha256.clone();
+    build.strip_prefix = "fixture".into();
+    build.configure.clear();
+    build.patches = vec![r#"--- a/configure
 +++ b/configure
 @@ -1,4 +1,5 @@
  #!/bin/sh
@@ -262,8 +266,7 @@ EOF
 +printf 'source-patch-applied\n'
  cat > Makefile <<'EOF'
 "#
-        .into()];
-    }
+    .into()];
     catalog.packages.insert("fixture".into(), package);
     catalog.validate().unwrap();
     let tools = directory.path().join("tools");
@@ -333,26 +336,31 @@ EOF
         .unwrap();
     let mut dependency = catalog.packages["fixture"].clone();
     dependency.name = "tool".into();
-    for platform in dependency.versions.get_mut("5.8.3").unwrap().all_mut() {
-        platform.bins = rootbeer_package::Bins::Names(vec!["fixture-tool".into()]);
-        platform.checks = vec![vec!["fixture-tool".into()]];
-        let build = platform.build.as_mut().unwrap();
-        build.sha256 = cached.sha256.clone();
-        build.strip_prefix = "tool".into();
-        build.patches.clear();
-    }
+    let platform = dependency
+        .versions
+        .get_mut("5.8.3")
+        .unwrap()
+        .platforms
+        .get_mut(&ResolveContext::current().system)
+        .unwrap();
+    platform.bins = rootbeer_package::Bins::Names(vec!["fixture-tool".into()]);
+    platform.checks = vec![vec!["fixture-tool".into()]];
+    let build = platform.build.as_mut().unwrap();
+    build.sha256 = cached.sha256.clone();
+    build.strip_prefix = "tool".into();
+    build.patches.clear();
     catalog.packages.insert("tool".into(), dependency);
-    catalog
+    let platform = catalog
         .packages
         .get_mut("fixture")
         .unwrap()
         .versions
         .get_mut("5.8.3")
         .unwrap()
-        .all_mut()
-        .for_each(|platform| {
-            platform.build.as_mut().unwrap().dependencies = vec!["tool@5.8.3".into()]
-        });
+        .platforms
+        .get_mut(&ResolveContext::current().system)
+        .unwrap();
+    platform.build.as_mut().unwrap().dependencies = vec!["tool@5.8.3".into()];
     let inputs = PackageResolverInputs {
         resolvers: BTreeMap::from([(
             "rootbeer".into(),
@@ -506,17 +514,17 @@ EOF
     assert!(output.join("build.log").is_file());
 
     let mut failing_catalog = catalog.clone();
-    failing_catalog
+    let platform = failing_catalog
         .packages
         .get_mut("fixture")
         .unwrap()
         .versions
         .get_mut("5.8.3")
         .unwrap()
-        .all_mut()
-        .for_each(|platform| {
-            platform.build.as_mut().unwrap().patches = vec!["invalid patch".into()]
-        });
+        .platforms
+        .get_mut(&ResolveContext::current().system)
+        .unwrap();
+    platform.build.as_mut().unwrap().patches = vec!["invalid patch".into()];
     let failing_inputs = PackageResolverInputs {
         resolvers: BTreeMap::from([(
             "rootbeer".into(),
@@ -661,7 +669,7 @@ EOF
     let key = cache::key(
         "tool@5.8.3",
         catalog.packages["tool"].versions["5.8.3"].revision,
-        catalog.packages["tool"].versions["5.8.3"].any(),
+        &catalog.packages["tool"].versions["5.8.3"].platforms[&ResolveContext::current().system],
         &ResolveContext::current().system,
         &BTreeMap::new(),
         &environment
@@ -741,11 +749,13 @@ fn isolated_builds_and_cache_hits_use_distinct_policy_keys() {
             "check": [["sh", "-c", "exit 0"]], "install": [["sh", "-c", "mkdir -p \"$1/bin\"; printf '#!/bin/sh\\nif (read value < \"$SECRET\") 2>/dev/null; then printf host-visible; else printf isolated; fi\\n' > \"$1/bin/xz\"; chmod +x \"$1/bin/xz\"", "install", "{prefix}"]]
         }
     })).unwrap();
-    for platform in recipe.all_mut() {
-        platform.bins = rootbeer_package::Bins::Names(vec!["xz".into()]);
-        platform.checks = vec![vec!["xz".into()]];
-        platform.build = Some(isolation_build.clone());
-    }
+    let platform = recipe
+        .platforms
+        .get_mut(&ResolveContext::current().system)
+        .unwrap();
+    platform.bins = rootbeer_package::Bins::Names(vec!["xz".into()]);
+    platform.checks = vec![vec!["xz".into()]];
+    platform.build = Some(isolation_build.clone());
     let tools: BTreeMap<String, PathBuf> = ["sh", "cc", "as", "make", "patch", "mkdir", "chmod"]
         .into_iter()
         .map(|name| {
@@ -856,17 +866,17 @@ fn failed_configure_retains_diagnostics_without_publishing_a_result() {
             "build": [["sh", "-c", "exit 0"]], "check": [["sh", "-c", "exit 0"]], "install": [["sh", "-c", "exit 0"]]
         }
     })).unwrap();
-    for platform in catalog
+    let platform = catalog
         .packages
         .get_mut("xz")
         .unwrap()
         .versions
         .get_mut("5.8.3")
         .unwrap()
-        .all_mut()
-    {
-        platform.build = Some(diagnostics_build.clone());
-    }
+        .platforms
+        .get_mut(&ResolveContext::current().system)
+        .unwrap();
+    platform.build = Some(diagnostics_build.clone());
     let output = directory.path().join("output");
     let cache = directory.path().join("cache");
     let error = build_package(

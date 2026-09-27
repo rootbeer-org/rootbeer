@@ -210,15 +210,13 @@ impl Entry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[allow(unused_imports)]
-    use crate::test_catalog::VersionTestExt;
-    use rootbeer_package::{LockedInstall, Provides};
+    use rootbeer_package::{LockedInstall, Provides, ResolveContext};
 
     #[test]
     fn keys_track_build_inputs_without_tracking_dependency_locations() {
         let catalog = crate::test_catalog::catalog();
         let version = catalog.packages["xz"].versions.values().next().unwrap();
-        let recipe = version.any();
+        let recipe = &version.platforms[&ResolveContext::current().system];
         let mut dependencies = BTreeMap::from([(
             "compiler@1".into(),
             LockedPackage {

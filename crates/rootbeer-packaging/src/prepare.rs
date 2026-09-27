@@ -152,7 +152,6 @@ fn package_inputs(catalog: &PackageCatalog) -> PackageResolverInputs {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_catalog::VersionTestExt;
     use ring::signature::{Ed25519KeyPair, KeyPair};
     use rootbeer_package::distribution::{verify_record, PackageProvenance};
     use rootbeer_package::{
@@ -459,17 +458,17 @@ mod tests {
             )
             .is_err());
             let mut failing = catalog.clone();
-            failing
+            let platform = failing
                 .packages
                 .get_mut("demo")
                 .unwrap()
                 .versions
                 .get_mut("1")
                 .unwrap()
-                .all_mut()
-                .for_each(|platform| {
-                    platform.checks = vec![vec!["demo".into(), "fail".into()]];
-                });
+                .platforms
+                .get_mut(&ResolveContext::current().system)
+                .unwrap();
+            platform.checks = vec![vec!["demo".into(), "fail".into()]];
             assert!(prepare_binary(
                 &failing,
                 "demo@1",

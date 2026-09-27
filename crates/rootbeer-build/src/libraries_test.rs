@@ -1,6 +1,4 @@
 use super::*;
-#[allow(unused_imports)]
-use crate::test_catalog::VersionTestExt;
 
 #[test]
 fn static_library_chain_builds_and_runs_after_dependencies_are_removed() {
@@ -93,11 +91,13 @@ fn static_library_chain_builds_and_runs_after_dependencies_are_removed() {
             }))
             .unwrap(),
         );
-        for platform in recipe.all_mut() {
-            platform.bins = bins.clone();
-            platform.checks = checks.clone();
-            platform.build = build.clone();
-        }
+        let platform = recipe
+            .platforms
+            .get_mut(&ResolveContext::current().system)
+            .unwrap();
+        platform.bins = bins.clone();
+        platform.checks = checks.clone();
+        platform.build = build.clone();
         package.versions = BTreeMap::from([("1".into(), recipe)]);
         catalog.packages.insert(name.into(), package);
     }
@@ -217,8 +217,8 @@ fn library_recipes_separate_inputs_builds_and_exports() {
         PackageCatalog::from_directory(directory.path())
     };
     let catalog = load(source).unwrap();
-    let build = catalog.packages["library"].versions["1"]
-        .any()
+    let build = catalog.packages["library"].versions["1"].platforms
+        [&ResolveContext::current().system]
         .build
         .as_ref()
         .unwrap();

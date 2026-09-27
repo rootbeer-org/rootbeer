@@ -1,8 +1,6 @@
 use std::collections::BTreeMap;
 use std::fs;
 
-#[allow(unused_imports)]
-use crate::test_catalog::VersionTestExt;
 use rootbeer_package::*;
 
 use crate::consumer::SourceResolver;
@@ -44,15 +42,17 @@ EOF
         .versions
         .get_mut("5.8.3")
         .unwrap();
-    for platform in recipe.all_mut() {
-        platform.bins = rootbeer_package::Bins::Names(vec!["xz".into()]);
-        platform.checks = vec![vec!["xz".into()]];
-        let build = platform.build.as_mut().unwrap();
-        build.url = "https://source.invalid/archive.tar.gz".into();
-        build.sha256 = cached.sha256.clone();
-        build.strip_prefix = "fixture".into();
-        build.configure.clear();
-    }
+    let platform = recipe
+        .platforms
+        .get_mut(&ResolveContext::current().system)
+        .unwrap();
+    platform.bins = rootbeer_package::Bins::Names(vec!["xz".into()]);
+    platform.checks = vec![vec!["xz".into()]];
+    let build = platform.build.as_mut().unwrap();
+    build.url = "https://source.invalid/archive.tar.gz".into();
+    build.sha256 = cached.sha256.clone();
+    build.strip_prefix = "fixture".into();
+    build.configure.clear();
     let repository = |catalog: &PackageCatalog, name: &str| {
         let mut inputs = PackageResolverInputs::default();
         let pin = crate::test_repository::publish(catalog, &root.path().join(name));
@@ -105,14 +105,14 @@ EOF
     let mut local_tool = catalog.packages["xz"].clone();
     local_tool.name = "local-tool".into();
     local_tool.aliases.clear();
-    local_tool
+    let platform = local_tool
         .versions
         .get_mut("5.8.3")
         .unwrap()
-        .all_mut()
-        .for_each(|platform| {
-            platform.build.as_mut().unwrap().dependencies = vec![BuildDependency::from("xz@5.8.3")];
-        });
+        .platforms
+        .get_mut(&ResolveContext::current().system)
+        .unwrap();
+    platform.build.as_mut().unwrap().dependencies = vec![BuildDependency::from("xz@5.8.3")];
     let local = PackageCatalog {
         extra: Default::default(),
         packages: BTreeMap::from([("local-tool".into(), local_tool)]),
@@ -134,20 +134,20 @@ EOF
     assert_eq!(dependent.package.name, "local-tool");
 
     let mut prebuilt = catalog.clone();
-    prebuilt
+    let platform = prebuilt
         .packages
         .get_mut("xz")
         .unwrap()
         .versions
         .get_mut("5.8.3")
         .unwrap()
-        .all_mut()
-        .for_each(|platform| {
-            platform.build = None;
-            platform.source = Some("github:owner/xz@5.8.3".into());
-            platform.asset = Some("xz-5.8.3.tar.gz".into());
-            platform.sha256 = Some("d".repeat(64));
-        });
+        .platforms
+        .get_mut(&ResolveContext::current().system)
+        .unwrap();
+    platform.build = None;
+    platform.source = Some("github:owner/xz@5.8.3".into());
+    platform.asset = Some("xz-5.8.3.tar.gz".into());
+    platform.sha256 = Some("d".repeat(64));
     let resolver = SourceResolver::with_inputs(&repository(&prebuilt, "prebuilt"), &state);
     assert!(resolver
         .resolve(&PackageRequest::parse("xz@HEAD"), &context)

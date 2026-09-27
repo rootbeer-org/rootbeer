@@ -310,7 +310,6 @@ pub fn push_package(release: &Path, public_key: &str) -> Result<String, String> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_catalog::VersionTestExt;
     use ring::signature::{Ed25519KeyPair, KeyPair};
     use rootbeer_package::{BuildEnvironmentInput, BuildEnvironmentLock};
     use std::collections::BTreeMap;
@@ -414,18 +413,18 @@ mod tests {
         assert!(!wrong_inputs.exists());
 
         let mut changed = catalog.clone();
-        changed
+        let platform = changed
             .packages
             .get_mut(&build.package.name)
             .unwrap()
             .versions
             .get_mut(&build.package.version)
             .unwrap()
-            .all_mut()
-            .for_each(|platform| {
-                let command = platform.bins.names().into_iter().next().unwrap().clone();
-                platform.checks.push(vec![command, "--help".into()]);
-            });
+            .platforms
+            .get_mut(&build.system)
+            .unwrap();
+        let command = platform.bins.names().into_iter().next().unwrap().clone();
+        platform.checks.push(vec![command, "--help".into()]);
         assert!(release_package(
             &changed,
             &receipt,
