@@ -12,7 +12,7 @@ checkout to every Forge command that reads recipes.
 ```sh
 cargo build --bin rootbeer-forge
 rootbeer-forge --catalog ../pdr/packages check
-rootbeer-forge --catalog ../pdr/packages build jq --output /tmp/jq-build
+rootbeer-forge --catalog ../pdr/packages prepare jq --output /tmp/jq-build
 ```
 
 ## Write a recipe
@@ -435,7 +435,7 @@ together when moving builds.
 rootbeer-forge --catalog packages check           # validate every recipe, print the catalog digest
 rootbeer-forge --catalog packages show jq         # one package's resolved recipes
 rootbeer-forge --catalog packages plan curl       # dependency graph, without fetching
-rootbeer-forge --catalog packages build curl --output /tmp/curl-build \
+rootbeer-forge --catalog packages prepare curl --output /tmp/curl-build \
   --cache /tmp/rootbeer-builds --cache-context "$BUILD_ENVIRONMENT_ID"
 ```
 
@@ -491,7 +491,7 @@ resolve within their input root.
 
 ```sh
 rootbeer-forge pin-environment environment.json > environment.lock.json
-rootbeer-forge --catalog packages build xz --output /tmp/xz-build \
+rootbeer-forge --catalog packages prepare xz --output /tmp/xz-build \
   --environment environment.lock.json \
   --cache /tmp/rootbeer-builds --cache-context "$BUILD_ENVIRONMENT_ID"
 ```
@@ -566,7 +566,7 @@ runs the same commands you can run by hand:
 ```sh
 pdr=(--pdr https://pdr.rbpkg.com/v3/current.json --pdr-public-key "$PDR_PUBLIC_KEY")
 rootbeer-forge --catalog packages package-plan curl@8.22.0 --context "$BUILD_CONTEXT" "${pdr[@]}"
-rootbeer-forge --catalog packages build curl@8.22.0 --input-key "$INPUT_KEY" \
+rootbeer-forge --catalog packages prepare curl@8.22.0 --input-key "$INPUT_KEY" \
   --output result --cache "$CACHE" --cache-context "$BUILD_CONTEXT" \
   "${pdr[@]}" --pdr-root "$PDR_ROOT"
 ```

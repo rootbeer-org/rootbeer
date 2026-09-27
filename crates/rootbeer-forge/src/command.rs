@@ -118,7 +118,6 @@ enum Command {
     /// Inspect the dependency graph without executing builds
     Plan { name: String },
     /// Prepare a source or upstream binary recipe as an installable local artifact
-    #[command(visible_alias = "build")]
     Prepare {
         name: String,
         /// Fail before building if this machine differs from the work plan
