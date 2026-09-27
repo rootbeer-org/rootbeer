@@ -35,30 +35,85 @@ pub mod dependencies;
 #[cfg(test)]
 mod libraries_test;
 
-/// Identifies shared build behavior and the selected backend, independently of other backends.
+/// An engine as fingerprinted by its build script: shared build code and each backend.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Generation {
+    pub shared: String,
+    pub autotools: String,
+    pub custom: String,
+    pub go: String,
+    pub rust: String,
+    pub zig: String,
+}
+
+impl Generation {
+    pub fn current() -> Self {
+        Self {
+            shared: env!("ROOTBEER_ENGINE_IDENTITY").into(),
+            autotools: env!("ROOTBEER_BACKEND_AUTOTOOLS").into(),
+            custom: env!("ROOTBEER_BACKEND_CUSTOM").into(),
+            go: env!("ROOTBEER_BACKEND_GO").into(),
+            rust: env!("ROOTBEER_BACKEND_RUST").into(),
+            zig: env!("ROOTBEER_BACKEND_ZIG").into(),
+        }
+    }
+
+    /// Identifies shared build behavior and the selected backend, independently of other backends.
+    pub fn engine_identity(&self, backend: Option<&BuildBackend>) -> String {
+        let implementation = match backend {
+            Some(BuildBackend::Autotools) => &self.autotools,
+            Some(BuildBackend::Custom) => &self.custom,
+            Some(BuildBackend::Go) => &self.go,
+            Some(BuildBackend::Rust) => &self.rust,
+            Some(BuildBackend::Zig) => &self.zig,
+            None => "",
+        };
+        rootbeer_store::hash_bytes(
+            format!("rootbeer-engine-v2\0{}\0{implementation}", self.shared).as_bytes(),
+        )
+    }
+
+    /// The fields a `scripts/cache-compatibility` record lists for this engine as a predecessor.
+    pub fn record(&self) -> String {
+        [
+            &self.shared,
+            &self.autotools,
+            &self.custom,
+            &self.go,
+            &self.rust,
+            &self.zig,
+        ]
+        .map(String::as_str)
+        .join(" ")
+    }
+}
+
 pub fn engine_identity(backend: Option<&BuildBackend>) -> String {
-    backend_identity(backend, env!("ROOTBEER_ENGINE_IDENTITY"))
+    Generation::current().engine_identity(backend)
 }
 
-/// Reviewed predecessors for unchanged backends, guarded by the exact current source digest.
-pub fn compatible_engine_identities(backend: Option<&BuildBackend>) -> Vec<String> {
-    env!("ROOTBEER_COMPATIBLE_ENGINE_IDENTITY")
+/// Digest of this engine's shared code and every backend, which compatibility records guard on.
+pub fn engine_generation() -> &'static str {
+    env!("ROOTBEER_ENGINE_GENERATION")
+}
+
+/// Reviewed predecessor engines whose results remain valid, guarded by this exact generation.
+pub fn compatible_generations() -> Vec<Generation> {
+    env!("ROOTBEER_COMPATIBLE_GENERATIONS")
         .split(',')
-        .filter(|shared| !shared.is_empty())
-        .map(|shared| backend_identity(backend, shared))
+        .filter(|record| !record.is_empty())
+        .map(|record| {
+            let fields: Vec<&str> = record.split(':').collect();
+            Generation {
+                shared: fields[0].into(),
+                autotools: fields[1].into(),
+                custom: fields[2].into(),
+                go: fields[3].into(),
+                rust: fields[4].into(),
+                zig: fields[5].into(),
+            }
+        })
         .collect()
-}
-
-fn backend_identity(backend: Option<&BuildBackend>, shared: &str) -> String {
-    let implementation = match backend {
-        Some(BuildBackend::Autotools) => env!("ROOTBEER_BACKEND_AUTOTOOLS"),
-        Some(BuildBackend::Custom) => env!("ROOTBEER_BACKEND_CUSTOM"),
-        Some(BuildBackend::Go) => env!("ROOTBEER_BACKEND_GO"),
-        Some(BuildBackend::Rust) => env!("ROOTBEER_BACKEND_RUST"),
-        Some(BuildBackend::Zig) => env!("ROOTBEER_BACKEND_ZIG"),
-        None => "",
-    };
-    rootbeer_store::hash_bytes(format!("rootbeer-engine-v2\0{shared}\0{implementation}").as_bytes())
 }
 
 /// Resource limits and storage locations for a build execution.

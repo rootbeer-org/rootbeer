@@ -7,6 +7,7 @@ use rootbeer_package::{PackageCatalog, ResolveContext};
 use rootbeer_package::repository::RepositoryResolver;
 
 use crate::{BuildOptions, PublishedDependencies};
+use rootbeer_build::Generation;
 
 /// One package to qualify on the current platform.
 #[derive(Debug, serde::Serialize)]
@@ -18,6 +19,9 @@ pub struct PackageTask {
     /// The PDR root whose published dependencies the key names, so a builder reads the same one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pdr_root: Option<String>,
+    /// Keys the same inputs had under reviewed predecessor engines, whose results remain valid.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub compatible_keys: Vec<String>,
 }
 
 /// What identifies every package in a build's closure, so a change to any of them is a new build.
@@ -27,6 +31,16 @@ pub(crate) fn dependency_inputs(
     id: &str,
     system: &str,
     published: &PublishedDependencies,
+) -> Result<BTreeMap<String, DependencyInputs>, String> {
+    generation_dependency_inputs(catalog, id, system, published, &Generation::current())
+}
+
+fn generation_dependency_inputs(
+    catalog: &PackageCatalog,
+    id: &str,
+    system: &str,
+    published: &PublishedDependencies,
+    generation: &Generation,
 ) -> Result<BTreeMap<String, DependencyInputs>, String> {
     let graph = DependencyGraph::new(catalog, &[id.to_string()], system)?;
     graph.nodes[id]
@@ -40,9 +54,8 @@ pub(crate) fn dependency_inputs(
             let inputs = DependencyInputs {
                 revision: package.versions[version].revision,
                 recipe_sha256: recipe.sha256(),
-                engine_sha256: rootbeer_build::engine_identity(
-                    recipe.build.as_ref().map(|build| &build.backend),
-                ),
+                engine_sha256: generation
+                    .engine_identity(recipe.build.as_ref().map(|build| &build.backend)),
             };
             Ok((dependency.clone(), inputs))
         })
@@ -74,8 +87,8 @@ pub fn plan_packages(
         if *request != id {
             return Err(format!("use the exact canonical request {id}"));
         }
-        let engine =
-            rootbeer_build::engine_identity(recipe.build.as_ref().map(|build| &build.backend));
+        let backend = recipe.build.as_ref().map(|build| &build.backend);
+        let engine = rootbeer_build::engine_identity(backend);
         let published = match pdr {
             Some(pdr) if recipe.build.is_some() => {
                 PublishedDependencies::find(catalog, &id, &system, pdr)?
@@ -89,6 +102,20 @@ pub fn plan_packages(
                 environments.entry(engine.clone()).or_insert(identity)
             }
         };
+        let compatible_keys = rootbeer_build::compatible_generations()
+            .iter()
+            .map(|generation| {
+                Ok(input_key(
+                    &id,
+                    &system,
+                    revision,
+                    &recipe,
+                    &generation.engine_identity(backend),
+                    environment,
+                    &generation_dependency_inputs(catalog, &id, &system, &published, generation)?,
+                ))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
         tasks.insert(
             id.clone(),
             PackageTask {
@@ -107,6 +134,7 @@ pub fn plan_packages(
                 pdr_root: pdr
                     .filter(|_| recipe.build.is_some())
                     .map(|pdr| pdr.pin().root.clone()),
+                compatible_keys,
             },
         );
     }

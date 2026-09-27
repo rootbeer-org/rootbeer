@@ -106,6 +106,8 @@ enum Command {
     Catalog,
     /// Hash a build environment specification and write its lock to stdout
     PinEnvironment { specification: PathBuf },
+    /// Print this engine's generation and the fields naming it in cache compatibility records
+    EngineGeneration,
     /// Audit native loader references in an installed package directory
     Audit {
         directory: PathBuf,
@@ -462,6 +464,15 @@ fn execute(args: Args) -> Result<(), String> {
                 "{}",
                 serde_json::to_string_pretty(&specification.pin()?)
                     .map_err(|error| error.to_string())?
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        Command::EngineGeneration => {
+            writeln!(
+                output,
+                "{}\n{}",
+                rootbeer_packaging::engine_generation(),
+                rootbeer_packaging::Generation::current().record()
             )
             .map_err(|error| error.to_string())?;
         }

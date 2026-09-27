@@ -177,36 +177,49 @@ fn is_test_module(item: &syn::Item) -> bool {
     }))
 }
 
-fn compatible_identity(workspace: &Path, identity: &str) -> std::io::Result<String> {
+/// Digest naming the shared engine together with every backend, so any engine change is a new generation.
+fn generation(shared: &str, backends: &[String]) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"rootbeer-engine-generation-v1\0");
+    hash.update(shared.as_bytes());
+    for backend in backends {
+        hash.update(b"\0");
+        hash.update(backend.as_bytes());
+    }
+    format!("{:x}", hash.finalize())
+}
+
+/// Reviewed predecessor generations of the exact current one, each as its shared and backend digests.
+fn compatible_generations(workspace: &Path, current: &str) -> std::io::Result<String> {
     let path = workspace.join("scripts/cache-compatibility");
     let records = match fs::read_to_string(path) {
         Ok(records) => records,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(String::new()),
         Err(error) => return Err(error),
     };
-    let mut result = String::new();
+    let mut predecessors = Vec::new();
     let mut seen = BTreeSet::new();
     for line in records
         .lines()
         .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
     {
         let fields: Vec<_> = line.split_whitespace().collect();
-        if fields.len() < 2
+        if fields.len() != 2 + BACKENDS.len()
             || fields.iter().any(|field| {
                 field.len() != 64
                     || !field
                         .bytes()
                         .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
             })
-            || !seen.insert(fields[0])
+            || !seen.insert(fields.clone())
         {
             return Err(std::io::Error::other("invalid cache compatibility record"));
         }
-        if fields[0] == identity {
-            result = fields[1..].join(",");
+        if fields[0] == current {
+            predecessors.push(fields[1..].join(":"));
         }
     }
-    Ok(result)
+    Ok(predecessors.join(","))
 }
 
 #[cfg(not(test))]
@@ -224,24 +237,29 @@ pub fn emit(crates: &[&str]) {
     }
     let identity = fingerprint(workspace, crates).expect("cannot fingerprint engine inputs");
     println!("cargo:rustc-env=ROOTBEER_ENGINE_IDENTITY={identity}");
+    if !crates.contains(&"rootbeer-build") {
+        return;
+    }
+    let mut backends = Vec::new();
+    for name in BACKENDS {
+        let path = workspace.join(format!("crates/rootbeer-build/src/backend/{name}.rs"));
+        let backend =
+            fingerprint_paths(workspace, vec![path]).expect("cannot fingerprint backend inputs");
+        println!(
+            "cargo:rustc-env=ROOTBEER_BACKEND_{}={backend}",
+            name.to_uppercase()
+        );
+        backends.push(backend);
+    }
+    let current = generation(&identity, &backends);
+    println!("cargo:rustc-env=ROOTBEER_ENGINE_GENERATION={current}");
     println!(
         "cargo:rerun-if-changed={}",
         workspace.join("scripts/cache-compatibility").display()
     );
     let compatible =
-        compatible_identity(workspace, &identity).expect("cannot read cache compatibility");
-    println!("cargo:rustc-env=ROOTBEER_COMPATIBLE_ENGINE_IDENTITY={compatible}");
-    if crates.contains(&"rootbeer-build") {
-        for name in BACKENDS {
-            let path = workspace.join(format!("crates/rootbeer-build/src/backend/{name}.rs"));
-            let identity = fingerprint_paths(workspace, vec![path])
-                .expect("cannot fingerprint backend inputs");
-            println!(
-                "cargo:rustc-env=ROOTBEER_BACKEND_{}={identity}",
-                name.to_uppercase()
-            );
-        }
-    }
+        compatible_generations(workspace, &current).expect("cannot read cache compatibility");
+    println!("cargo:rustc-env=ROOTBEER_COMPATIBLE_GENERATIONS={compatible}");
 }
 
 #[cfg(test)]
@@ -249,34 +267,40 @@ mod tests {
     use super::*;
 
     #[test]
-    fn compatibility_requires_an_exact_reviewed_source_digest() {
+    fn compatibility_requires_the_exact_reviewed_generation() {
         let root = tempfile::tempdir().unwrap();
         fs::create_dir(root.path().join("scripts")).unwrap();
-        let current = "a".repeat(64);
-        let previous = "b".repeat(64);
+        let backends: Vec<String> = BACKENDS.iter().map(|_| "b".repeat(64)).collect();
+        let current = generation(&"a".repeat(64), &backends);
+        let previous = vec!["c".repeat(64); 1 + BACKENDS.len()].join(" ");
+        let older = vec!["d".repeat(64); 1 + BACKENDS.len()].join(" ");
         let path = root.path().join("scripts/cache-compatibility");
         fs::write(&path, format!("{current} {previous}\n")).unwrap();
         assert_eq!(
-            compatible_identity(root.path(), &current).unwrap(),
-            previous
+            compatible_generations(root.path(), &current).unwrap(),
+            previous.replace(' ', ":")
         );
-        assert!(compatible_identity(root.path(), &"c".repeat(64))
+        assert!(compatible_generations(root.path(), &"e".repeat(64))
             .unwrap()
             .is_empty());
-        let older = "d".repeat(64);
-        fs::write(&path, format!("{current} {previous} {older}\n")).unwrap();
+        fs::write(&path, format!("{current} {previous}\n{current} {older}\n")).unwrap();
         assert_eq!(
-            compatible_identity(root.path(), &current).unwrap(),
-            format!("{previous},{older}")
+            compatible_generations(root.path(), &current).unwrap(),
+            format!("{},{}", previous.replace(' ', ":"), older.replace(' ', ":"))
         );
         fs::write(
             &path,
             format!("{current} {previous}\n{current} {previous}\n"),
         )
         .unwrap();
-        assert!(compatible_identity(root.path(), &current).is_err());
+        assert!(compatible_generations(root.path(), &current).is_err());
+        fs::write(&path, format!("{current} {}\n", "c".repeat(64))).unwrap();
+        assert!(compatible_generations(root.path(), &current).is_err());
         fs::write(&path, "invalid record").unwrap();
-        assert!(compatible_identity(root.path(), &current).is_err());
+        assert!(compatible_generations(root.path(), &current).is_err());
+        let mut changed = backends.clone();
+        changed[2] = "f".repeat(64);
+        assert_ne!(current, generation(&"a".repeat(64), &changed));
     }
 
     #[test]

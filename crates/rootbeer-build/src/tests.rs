@@ -940,3 +940,37 @@ fn execution_deadlines_stop_descendants_before_returning() {
         fs::remove_file(&writes).unwrap();
     }
 }
+
+#[test]
+fn predecessor_generations_reproduce_identities_per_backend() {
+    let backends = [
+        None,
+        Some(BuildBackend::Autotools),
+        Some(BuildBackend::Custom),
+        Some(BuildBackend::Go),
+        Some(BuildBackend::Rust),
+        Some(BuildBackend::Zig),
+    ];
+    let current = Generation::current();
+    for backend in &backends {
+        assert_eq!(
+            current.engine_identity(backend.as_ref()),
+            engine_identity(backend.as_ref())
+        );
+    }
+    assert_eq!(current.record().split(' ').count(), 6);
+    let older = Generation {
+        go: "0".repeat(64),
+        ..current.clone()
+    };
+    for backend in &backends {
+        let is_go = backend == &Some(BuildBackend::Go);
+        assert_eq!(
+            older.engine_identity(backend.as_ref()) != current.engine_identity(backend.as_ref()),
+            is_go
+        );
+    }
+    assert!(compatible_generations()
+        .iter()
+        .all(|generation| generation != &current));
+}

@@ -1,5 +1,7 @@
-# Exact current shared digest -> reviewed predecessors; qualification reuse only.
-# Compiler cache location and checkpoint retention do not change package contracts.
-# Original qualification inputs and receipts are preserved without relabeling.
-9db9ebca332e6135e5fb2f44223447bd7b23209be6232f31868f1f8f7f459556 5caf51728068048b610c7b75905c57ff10b059b4be5dfbe0665b4a700bc10ce3 ed5d738e0e873c095ef66d8933ff453fa8352db73ac97cd64444aac779b02e7d
-c7ed25e6005b0859a9149b94bfea5eeeb7df18e2b1b04b4aef8e93449f900500 2b0cc4c54df1e7f6724941262632dc7d7fc7e2cccc6e69f70ecc793bde40968f c09b8be42d07c409d1b7ce21e5968a9555dfeb761ae14cfb054ef1c96990c9bb
+# Exact current generation -> one reviewed predecessor engine per record; qualification reuse only.
+# Fields: generation, then the predecessor's shared, autotools, custom, go, rust, and zig digests.
+# `rootbeer-forge engine-generation` prints an engine's generation and its predecessor fields.
+# A predecessor is admissible only when its results satisfy every contract this engine enforces.
+# 51990cf: later changes are client-side (store, lockfile, download progress) or drop go vet and
+# cargo test gating, so every result it qualified satisfies this engine's contracts.
+daed8fb66b593d06681ac52433d962223ab1bbac3319ad5b6a20fd1adbc41993 31a94d621fe252bcbd94313bd3fb47f481becdce21f1d2a9f572b02d33db9489 79013e8b4b52e85a9f0696d4d3336eb274cb4fd5a7e57e322c2c322a3016daf6 c00931e4ce0a965b20f5e5b141296745a80198e9614a99d4aa52ba26716f2faa 04abe3ef60cfb4ba3677923958b4317b18461a44fa0a9ae68cd8fc07142defcf c7c49f1661e34de9192d5222d41d0d2294c525bfef4b470d29c8a121c4b399c7 af69e0168e5a93ff22b9c6c27951ec2e7afd971206f57bceff446d97e8cc1e86
