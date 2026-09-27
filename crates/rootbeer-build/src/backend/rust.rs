@@ -47,8 +47,6 @@ pub(super) fn plan(options: &RustBuild, context: &Context<'_>) -> Result<Vec<Pha
     for bin in context.bins {
         build.extend(["--bin".into(), bin.clone()]);
     }
-    let mut check = command("test");
-    check.push("--all-targets".into());
     let bin_directory = context.prefix.join("bin");
     let mut install = vec![vec![
         "mkdir".into(),
@@ -80,7 +78,6 @@ pub(super) fn plan(options: &RustBuild, context: &Context<'_>) -> Result<Vec<Pha
             ]],
         },
         Phase { name: "build", requires_network: false, commands: vec![build] },
-        Phase { name: "check", requires_network: false, commands: vec![check] },
         Phase { name: "install", requires_network: false, commands: install },
     ])
 }
@@ -91,7 +88,7 @@ mod tests {
     use std::{collections::BTreeMap, fs, process::Command, time::Duration};
 
     #[test]
-    fn builds_tests_and_installs_a_locked_workspace_without_host_cargo_state() {
+    fn builds_and_installs_a_locked_workspace_without_host_cargo_state() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("workspace with spaces");
         fs::create_dir(&root).unwrap();
@@ -106,7 +103,11 @@ mod tests {
             "version = 4\n[[package]]\nname = \"backend-probe\"\nversion = \"0.1.0\"\n",
         )
         .unwrap();
-        fs::write(root.join("src/main.rs"), "fn main() { println!(\"{}\", env!(\"PROBE_VALUE\")); }\n#[test] fn configured() { assert_eq!(env!(\"PROBE_VALUE\"), \"configured\"); }\n").unwrap();
+        fs::write(
+            root.join("src/main.rs"),
+            "fn main() { println!(\"{}\", env!(\"PROBE_VALUE\")); }\n",
+        )
+        .unwrap();
         let environment = crate::environment::Environment::resolve(None)
             .unwrap()
             .with_rust()

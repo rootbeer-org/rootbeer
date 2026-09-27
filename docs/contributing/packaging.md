@@ -300,7 +300,8 @@ build = {
 
 `packages` names the workspace packages to install. `features` and
 `no_default_features` select Cargo features; `environment` sets build-time variables.
-The pinned Rust sysroot is part of the build identity.
+The pinned Rust sysroot is part of the build identity. Upstream test suites don't run;
+`outputs.checks` verify the installed commands.
 
 ### Go
 
@@ -317,8 +318,9 @@ build = {
 
 `binaries` must match `outputs.bins`. CGO is disabled unless `cgo = true`. The source
 archive must contain `go.mod` and `go.sum`. Fetch vendors dependencies and verifies
-their checksums, rejecting changes to either module file. Build and `go vet` use that
-vendor tree with module downloads disabled, followed by the recipe's checks.
+their checksums, rejecting changes to either module file. The build uses that vendor
+tree with module downloads disabled, followed by the recipe's checks. Upstream lint and
+test suites don't run; `outputs.checks` verify the installed commands.
 `generate` selects local packages whose `go generate` directives run offline before
 compilation; generators must already be vendored or declared build dependencies.
 `experiments` selects `GOEXPERIMENT` values. Projects needing frontend assets must

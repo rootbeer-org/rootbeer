@@ -77,15 +77,6 @@ pub(super) fn plan(options: &GoBuild, context: &Context<'_>) -> Result<Vec<Phase
             bin_directory.join(bin).to_string_lossy().into_owned(),
         ]);
     }
-    let mut check = command("vet");
-    check.extend(
-        options
-            .binaries
-            .values()
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .cloned(),
-    );
     Ok(vec![
         Phase {
             name: "fetch",
@@ -98,7 +89,6 @@ pub(super) fn plan(options: &GoBuild, context: &Context<'_>) -> Result<Vec<Phase
             ]],
         },
         Phase { name: "build", requires_network: false, commands: build },
-        Phase { name: "check", requires_network: false, commands: vec![check] },
         Phase { name: "install", requires_network: false, commands: install },
     ])
 }
@@ -109,7 +99,7 @@ mod tests {
     use std::{collections::BTreeMap, fs, process::Command, time::Duration};
 
     #[test]
-    fn builds_and_checks_a_module_with_pinned_tools_and_rejects_missing_sums() {
+    fn builds_a_module_with_pinned_tools_and_rejects_missing_sums() {
         let directory = tempfile::tempdir().unwrap();
         let workspace = directory.path().join("workspace with spaces");
         let source = workspace.join("source");
