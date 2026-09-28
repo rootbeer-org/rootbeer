@@ -217,10 +217,9 @@ pub fn run(args: Args) {
 
 fn execute(args: Args) -> Result<(), String> {
     let config = crate::config::Config::load()?;
-    let definitions = args
-        .catalog
+    let catalog_directory = args.catalog.clone().or_else(|| config.catalog.clone());
+    let definitions = catalog_directory
         .as_deref()
-        .or(config.catalog.as_deref())
         .map(PackageDefinition::from_directory)
         .transpose()?;
     let local_catalog = definitions
@@ -447,8 +446,7 @@ fn execute(args: Args) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
         }
         Command::Format { check } => {
-            let directory = args
-                .catalog
+            let directory = catalog_directory
                 .as_deref()
                 .ok_or("format requires --catalog pointing to a PDR recipe directory")?;
             let definitions = definitions
