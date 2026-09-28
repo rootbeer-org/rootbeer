@@ -182,14 +182,15 @@ fn exports(
         {
             continue;
         }
-        let kind = if kind == DependencyKind::LinkRuntime
-            && dependency.kind() == DependencyKind::LinkRuntime
-        {
-            DependencyKind::LinkRuntime
-        } else if matches!(kind, DependencyKind::Link | DependencyKind::LinkRuntime) {
-            DependencyKind::Link
-        } else {
-            dependency.kind()
+        // A runtime link stays one only through runtime links: nothing else carries the consumer
+        // a runtime closure, so it links that library statically.
+        let kind = match (kind, dependency.kind()) {
+            (DependencyKind::LinkRuntime, DependencyKind::LinkRuntime) => {
+                DependencyKind::LinkRuntime
+            }
+            (DependencyKind::Link | DependencyKind::LinkRuntime, _) => DependencyKind::Link,
+            (_, DependencyKind::LinkRuntime) => DependencyKind::Link,
+            (_, kind) => kind,
         };
         exports(dependency.package(), kind, nodes, visible, visited);
     }
@@ -313,6 +314,7 @@ mod tests {
             ("tool", vec![("data", DependencyKind::Runtime)]),
             ("static", vec![]),
             ("shared", vec![("base", DependencyKind::LinkRuntime)]),
+            ("bundled", vec![("shared", DependencyKind::All)]),
             (
                 "root",
                 vec![
@@ -347,7 +349,7 @@ mod tests {
         }
         let graph = DependencyGraph::new(
             &catalog,
-            &["root".into()],
+            &["root".into(), "bundled".into()],
             &ResolveContext::current().system,
         )
         .unwrap();
@@ -369,6 +371,9 @@ mod tests {
         assert!(!root.exports["static@1"].is_shared);
         assert!(root.exports["shared@1"].is_shared);
         assert!(root.exports["base@1"].is_shared);
+        let bundled = &graph.nodes["bundled@1"];
+        assert!(bundled.runtime_closure.is_empty());
+        assert!(!bundled.exports["base@1"].is_shared);
     }
 
     #[test]
