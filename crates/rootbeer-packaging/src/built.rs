@@ -91,11 +91,6 @@ fn load(
     if receipt.system != system {
         return Err(format!("{key}: built for {}, not {system}", receipt.system));
     }
-    if !receipt.package.runtime_dependencies.is_empty() {
-        return Err(format!(
-            "{key}: builds with runtime dependencies cannot be handed off yet"
-        ));
-    }
     let LockedSource::File { sha256, .. } = &receipt.package.source else {
         return Err(format!("{key}: receipt does not name a local archive"));
     };

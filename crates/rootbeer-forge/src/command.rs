@@ -339,6 +339,7 @@ fn execute(args: Args) -> Result<(), String> {
                     published,
                 },
                 input_key.as_deref(),
+                &Default::default(),
             )?;
             writeln!(
                 output,

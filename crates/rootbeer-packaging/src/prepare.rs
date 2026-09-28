@@ -430,6 +430,7 @@ mod tests {
                     published: 1,
                 },
                 Some(&task.key),
+                &Default::default(),
             )
             .unwrap();
             let bytes = fs::read(release.join("package.json")).unwrap();
@@ -460,7 +461,8 @@ mod tests {
                     public_key: &public_key,
                     published: 1
                 },
-                Some(&"f".repeat(64))
+                Some(&"f".repeat(64)),
+                &Default::default()
             )
             .is_err());
             let mut failing = catalog.clone();
@@ -496,7 +498,8 @@ mod tests {
                     public_key: &public_key,
                     published: 1
                 },
-                Some(&task.key)
+                Some(&task.key),
+                &Default::default()
             )
             .unwrap_err()
             .contains("hash mismatch"));

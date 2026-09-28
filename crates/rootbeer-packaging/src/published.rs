@@ -5,7 +5,7 @@ use rootbeer_package::distribution::{
 };
 use rootbeer_package::graph::{find_recipe_definition, find_recipe_for_system, DependencyGraph};
 use rootbeer_package::repository::RepositoryResolver;
-use rootbeer_package::{BuildArtifact, PackageCatalog, ResolveContext};
+use rootbeer_package::{BuildArtifact, LockedPackage, PackageCatalog, ResolveContext};
 
 use crate::BuildPlan;
 
@@ -92,6 +92,13 @@ impl PublishedDependencies {
             records.insert(key.clone(), Published { record, bytes });
         }
         Ok(Self { records })
+    }
+
+    /// Each published dependency's package, as its record publishes it.
+    pub(crate) fn packages(&self) -> impl Iterator<Item = (&String, &LockedPackage)> {
+        self.records
+            .iter()
+            .map(|(key, published)| (key, &published.record.artifact.package))
     }
 
     /// What a published dependency contributes to its dependents' inputs: the inputs it was

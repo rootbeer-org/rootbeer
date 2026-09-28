@@ -11,14 +11,23 @@ use super::{
 use rootbeer_catalog::is_sha256;
 use rootbeer_store::{hash_bytes, hash_file};
 
+/// A runtime dependency as its own record publishes it, and a local copy of its archive, if any.
+#[derive(Debug, Clone)]
+pub(crate) struct ReleasedDependency {
+    pub package: rootbeer_package::LockedPackage,
+    pub archive: Option<PathBuf>,
+}
+
 /// Verifies a source build's receipt and archives, audits the realized tree, and returns the
-/// artifact as it will be addressed in `registry`. The destination receives the archives.
+/// artifact as it will be addressed in `registry`, referencing each runtime dependency as
+/// `released` publishes it. The destination receives the package's own archive.
 pub(crate) fn prepare_artifact(
     catalog: &PackageCatalog,
     receipt_path: &Path,
     registry: &str,
     destination: &Path,
     realizer: &PackageRealizer,
+    released: &BTreeMap<String, ReleasedDependency>,
 ) -> Result<(String, PublishedArtifact, Vec<u8>), String> {
     let bytes = fs::read(receipt_path).map_err(|e| format!("{}: {e}", receipt_path.display()))?;
     let receipt: BuildArtifact = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
@@ -41,20 +50,17 @@ pub(crate) fn prepare_artifact(
         return Err(format!("{key}: artifact hash mismatch"));
     }
     let mut package = receipt.package;
-    copy_runtime(
-        &mut package,
-        receipt_path.parent().unwrap_or(Path::new(".")),
-        destination,
-    )?;
+    publish_runtime(&mut package, released)?;
     package.source = LockedSource::File {
         path: target,
         sha256: sha256.clone(),
     };
+    let local = local_runtime(&package, released);
     let realized = realizer
-        .realize(&package)
+        .realize(&local)
         .map_err(|e| format!("{key}: {e}"))?;
     let mut runtime = BTreeMap::new();
-    for dependency in rootbeer_package::runtime::closure(&package)? {
+    for dependency in rootbeer_package::runtime::closure(&local)? {
         let realized = realizer.realize(dependency).map_err(|e| e.to_string())?;
         runtime.insert(
             rootbeer_package::runtime::store_directory(dependency)?,
@@ -73,7 +79,6 @@ pub(crate) fn prepare_artifact(
         url: format!("ghcr://{registry}@sha256:{sha256}"),
         sha256: sha256.clone(),
     };
-    publish_runtime(&mut package, registry)?;
     let receipt_sha256 = hash_bytes(&bytes);
     Ok((
         receipt.system,
@@ -86,53 +91,51 @@ pub(crate) fn prepare_artifact(
     ))
 }
 
-fn copy_runtime(
+/// Replaces each runtime dependency with the package its own record publishes, which must be
+/// the build this package was linked against.
+fn publish_runtime(
     package: &mut rootbeer_package::LockedPackage,
-    source: &Path,
-    destination: &Path,
+    released: &BTreeMap<String, ReleasedDependency>,
 ) -> Result<(), String> {
-    for dependency in package.runtime_dependencies.values_mut() {
-        copy_runtime(dependency, source, destination)?;
-        let LockedSource::File { sha256, .. } = &dependency.source else {
-            return Err("runtime receipts require local archives".into());
-        };
-        let archive = source.join("runtime").join(format!(
-            "{}.tar.gz",
-            rootbeer_package::runtime::store_directory(dependency)?.display()
-        ));
-        let target = destination
-            .join("artifacts")
-            .join(format!("{sha256}.tar.gz"));
-        fs::copy(archive, &target).map_err(|e| e.to_string())?;
-        if hash_file(&target).map_err(|e| e.to_string())? != *sha256 {
+    for (id, dependency) in package.runtime_dependencies.iter_mut() {
+        let published = &released
+            .get(id)
+            .ok_or_else(|| format!("{id}: runtime dependency is not published"))?
+            .package;
+        if published.output_sha256 != dependency.output_sha256
+            || published.provides != dependency.provides
+        {
             return Err(format!(
-                "{}: runtime archive hash mismatch",
-                dependency.id()
+                "{id}: published build differs from the one linked against"
             ));
         }
-        dependency.source = LockedSource::File {
-            path: target,
-            sha256: sha256.clone(),
-        };
+        *dependency = published.clone();
     }
     Ok(())
 }
 
-fn publish_runtime(
-    package: &mut rootbeer_package::LockedPackage,
-    registry: &str,
-) -> Result<(), String> {
-    for dependency in package.runtime_dependencies.values_mut() {
-        publish_runtime(dependency, registry)?;
-        let LockedSource::File { sha256, .. } = &dependency.source else {
-            return Err("runtime bundle requires local archives".into());
+/// The package with every runtime dependency whose archive is already here installed from it.
+fn local_runtime(
+    package: &rootbeer_package::LockedPackage,
+    released: &BTreeMap<String, ReleasedDependency>,
+) -> rootbeer_package::LockedPackage {
+    let mut package = package.clone();
+    for (id, dependency) in package.runtime_dependencies.iter_mut() {
+        *dependency = local_runtime(dependency, released);
+        let Some(archive) = released
+            .get(id)
+            .and_then(|released| released.archive.clone())
+        else {
+            continue;
         };
-        dependency.source = LockedSource::Url {
-            url: format!("ghcr://{registry}@sha256:{sha256}"),
-            sha256: sha256.clone(),
-        };
+        if let LockedSource::Url { sha256, .. } = &dependency.source {
+            dependency.source = LockedSource::File {
+                path: archive,
+                sha256: sha256.clone(),
+            };
+        }
     }
-    Ok(())
+    package
 }
 
 pub(crate) fn validate_receipt(
@@ -235,7 +238,13 @@ pub(crate) fn validate_receipt(
         if runtime_package.id() == package.id() {
             continue;
         }
-        if !matches!(&runtime_package.source, LockedSource::File { sha256, .. } if is_sha256(sha256))
+        let is_hashed = match &runtime_package.source {
+            LockedSource::File { sha256, .. } | LockedSource::Url { sha256, .. } => {
+                is_sha256(sha256)
+            }
+            LockedSource::Path { .. } => false,
+        };
+        if !is_hashed
             || runtime_package.install
                 != (LockedInstall::Archive {
                     format: ArchiveFormat::TarGz,

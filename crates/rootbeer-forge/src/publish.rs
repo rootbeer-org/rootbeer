@@ -109,6 +109,7 @@ fn release(
         &destination,
         signer,
         Some(&key),
+        &Default::default(),
     )?;
     let reference = rootbeer_packaging::push_package(&destination, public_key)?;
     Ok((package, key, reference))

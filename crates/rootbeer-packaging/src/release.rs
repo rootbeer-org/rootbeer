@@ -1,8 +1,13 @@
+use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use rootbeer_package::distribution::{BuildProvenance, PackageProvenance, PackageRecord};
+use rootbeer_package::distribution::{
+    verify_record, BuildProvenance, PackageProvenance, PackageRecord,
+};
+
+use crate::receipt::ReleasedDependency;
 use rootbeer_package::{
     BuildArtifact, CatalogRecipe, LockedSource, PackageCatalog, PackageRealizer, PublishedArtifact,
 };
@@ -19,6 +24,9 @@ pub struct Signer<'a> {
 
 /// Verifies and signs one qualified package. The caller must trust the receipt's producer.
 /// The destination contains only this package's archive, receipt, and signed record.
+///
+/// `released` names release outputs of this run, by package, that runtime dependencies not yet
+/// in the PDR are referenced from.
 pub fn release_package(
     catalog: &PackageCatalog,
     receipt: &Path,
@@ -26,6 +34,7 @@ pub fn release_package(
     output: &Path,
     signer: &Signer,
     expected_inputs: Option<&str>,
+    released: &BTreeMap<String, PathBuf>,
 ) -> Result<String, String> {
     rootbeer_package::ghcr::validate_repository(registry)?;
     let receipt_bytes = fs::read(receipt).map_err(|error| error.to_string())?;
@@ -60,12 +69,12 @@ pub fn release_package(
     let qualified = if recipe.build.is_some() {
         prepare_source(
             catalog,
-            receipt,
-            &receipt_bytes,
+            (receipt, &receipt_bytes),
             registry,
             &destination,
             &realizer,
             signer.public_key,
+            released,
         )?
     } else {
         prepare_binary(
@@ -109,21 +118,37 @@ struct Qualified {
 
 fn prepare_source(
     catalog: &PackageCatalog,
-    receipt: &Path,
-    receipt_bytes: &[u8],
+    (receipt, receipt_bytes): (&Path, &[u8]),
     registry: &str,
     destination: &Path,
     realizer: &PackageRealizer,
     public_key: &str,
+    released: &BTreeMap<String, PathBuf>,
 ) -> Result<Qualified, String> {
     fs::create_dir(destination.join("artifacts")).map_err(|error| error.to_string())?;
     let build: BuildArtifact =
         serde_json::from_slice(receipt_bytes).map_err(|error| error.to_string())?;
-    if !build.package.runtime_dependencies.is_empty() {
-        return Err("release does not support runtime dependencies yet".into());
-    }
     let id = build.package.id();
     let published = crate::PublishedDependencies::from_receipt(catalog, &build, public_key)?;
+    let mut runtime = BTreeMap::new();
+    for (key, package) in published.packages() {
+        let package = package.clone();
+        runtime.insert(
+            key.clone(),
+            ReleasedDependency {
+                package,
+                archive: None,
+            },
+        );
+    }
+    for (key, directory) in released {
+        let bytes =
+            fs::read(directory.join("package.json")).map_err(|error| format!("{key}: {error}"))?;
+        let record = verify_record(&bytes, public_key, key, &build.system)?;
+        let archive = Some(directory.join("package.tar.gz"));
+        let package = record.artifact.package;
+        runtime.insert(key.clone(), ReleasedDependency { package, archive });
+    }
     let mut inputs =
         crate::package_plan::dependency_inputs(catalog, &id, &build.system, &published)?;
     let mut dependencies = std::collections::BTreeMap::new();
@@ -161,8 +186,14 @@ fn prepare_source(
             .ok_or("build receipt has no runtime audit")?,
         dependencies,
     };
-    let (system, artifact, checked_receipt) =
-        crate::receipt::prepare_artifact(catalog, receipt, registry, destination, realizer)?;
+    let (system, artifact, checked_receipt) = crate::receipt::prepare_artifact(
+        catalog,
+        receipt,
+        registry,
+        destination,
+        realizer,
+        &runtime,
+    )?;
     if checked_receipt != receipt_bytes {
         return Err("build receipt changed during release".into());
     }
@@ -380,6 +411,7 @@ mod tests {
                 build.qualification_environment.as_deref().unwrap(),
                 &BTreeMap::new(),
             )),
+            &Default::default(),
         )
         .unwrap();
         let bytes = fs::read(release.join("package.json")).unwrap();
@@ -407,6 +439,7 @@ mod tests {
                 published: 1
             },
             Some(&"0".repeat(64)),
+            &Default::default(),
         )
         .unwrap_err()
         .contains("planned package inputs"));
@@ -435,7 +468,8 @@ mod tests {
                 public_key: &public_key,
                 published: 1
             },
-            None
+            None,
+            &Default::default()
         )
         .unwrap_err()
         .contains("receipt does not match"));
@@ -456,9 +490,184 @@ mod tests {
                 public_key: &public_key,
                 published: 1
             },
-            None
+            None,
+            &Default::default()
         )
         .is_err());
         assert!(!failed.exists());
+    }
+
+    /// A catalog of `base`, `middle` linking `base`, and `consumer` linking `middle`, all shared.
+    fn runtime_chain(root: &Path) -> (PackageCatalog, PathBuf) {
+        let sources = root.join("sources");
+        for (name, code) in [
+            ("base", "int base(void) { return 40; }"),
+            (
+                "middle",
+                "int base(void); int middle(void) { return base() + 2; }",
+            ),
+            (
+                "consumer",
+                "int middle(void); int main(void) { return middle() != 42; }",
+            ),
+        ] {
+            fs::create_dir_all(sources.join(name)).unwrap();
+            fs::write(sources.join(name).join("main.c"), code).unwrap();
+        }
+        let archive = root.join("sources.tar.gz");
+        rootbeer_build::pack(&sources, &archive).unwrap();
+        let downloads = root.join("downloads");
+        let cached = rootbeer_package::download::DownloadCache::new(&downloads)
+            .materialize(&format!("file://{}", archive.display()), None)
+            .unwrap();
+
+        let system = rootbeer_package::ResolveContext::current().system;
+        let is_macos = cfg!(target_os = "macos");
+        let mut catalog = crate::test_catalog::catalog().clone();
+        let template = catalog.packages["xz"].clone();
+        catalog.packages.clear();
+        for (name, dependency) in [
+            ("base", None),
+            ("middle", Some("base")),
+            ("consumer", Some("middle")),
+        ] {
+            let is_library = name != "consumer";
+            let filename = match (is_library, is_macos) {
+                (false, _) => name.to_string(),
+                (true, true) => format!("lib{name}.dylib"),
+                (true, false) => format!("lib{name}.so"),
+            };
+            let mut link = format!("cc main.c -o {filename}");
+            if is_library && is_macos {
+                link.push_str(&format!(
+                    " -dynamiclib -Wl,-install_name,{{prefix}}/lib/{filename}"
+                ));
+            } else if is_library {
+                link.push_str(&format!(" -shared -fPIC -Wl,-soname,{filename}"));
+            }
+            if let Some(dependency) = dependency {
+                link.push_str(&format!(" -L{{dependencies}}/lib -l{dependency}"));
+            }
+            link.push_str(" $LDFLAGS");
+            let directory = if is_library { "lib" } else { "bin" };
+
+            let mut package = template.clone();
+            package.name = name.into();
+            package.aliases.clear();
+            let mut recipe = package.versions.values().next().unwrap().clone();
+            package.default_versions = BTreeMap::from([(system.clone(), "1".to_string())]);
+            recipe.platforms.retain(|platform, _| *platform == system);
+            let platform = recipe.platforms.get_mut(&system).unwrap();
+            platform.bins = rootbeer_package::Bins::Names(if is_library {
+                vec![]
+            } else {
+                vec![name.into()]
+            });
+            platform.checks = if is_library {
+                vec![]
+            } else {
+                vec![vec![name.into()]]
+            };
+            platform.build = Some(serde_json::from_value(serde_json::json!({
+                "backend": "custom", "url": "https://source.invalid/runtime.tar.gz",
+                "sha256": cached.sha256, "archive": "tar.gz", "strip_prefix": name,
+                "dependencies": dependency
+                    .map(|name| serde_json::json!({"package": format!("{name}@1"), "kind": "link_runtime"}))
+                    .into_iter()
+                    .collect::<Vec<_>>(),
+                "libraries": if is_library { vec![format!("lib/{filename}")] } else { vec![] },
+                "steps": {"configure": [], "build": [["sh", "-c", link]], "check": [["sh", "-c", "exit 0"]],
+                    "install": [["mkdir", "-p", format!("{{prefix}}/{directory}")],
+                        ["cp", filename, format!("{{prefix}}/{directory}/")]]}
+            })).unwrap());
+            package.versions = BTreeMap::from([("1".into(), recipe)]);
+            catalog.packages.insert(name.into(), package);
+        }
+        (catalog, downloads)
+    }
+
+    #[test]
+    fn dependents_reference_runtime_dependencies_as_their_own_records_publish_them() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let (catalog, downloads) = runtime_chain(&root);
+        let options = crate::BuildOptions {
+            downloads,
+            cache: Some(crate::BuildCache {
+                directory: root.join("cache"),
+                context: "runtime-release-test".into(),
+                recheck: false,
+            }),
+            ..Default::default()
+        };
+        let key = Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new()).unwrap();
+        let public_key: String = Ed25519KeyPair::from_pkcs8(key.as_ref())
+            .unwrap()
+            .public_key()
+            .as_ref()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        let signer = Signer {
+            key_der: key.as_ref(),
+            public_key: &public_key,
+            published: 1,
+        };
+
+        fs::create_dir_all(root.join("prepared")).unwrap();
+        fs::create_dir_all(root.join("releases")).unwrap();
+        let mut built = Vec::new();
+        let mut released = BTreeMap::new();
+        for name in ["base", "middle", "consumer"] {
+            let id = format!("{name}@1");
+            let prepared = root.join("prepared").join(name);
+            crate::prepare_package(&catalog, &id, &prepared, &options, None, &built).unwrap();
+            built.push(prepared.clone());
+
+            let release = root.join("releases").join(name);
+            if name == "consumer" {
+                let error = release_package(
+                    &catalog,
+                    &prepared.join("receipt.json"),
+                    "example/packages/consumer",
+                    &root.join("unreleased"),
+                    &signer,
+                    None,
+                    &BTreeMap::new(),
+                )
+                .unwrap_err();
+                assert!(error.contains("not published"), "{error}");
+            }
+            release_package(
+                &catalog,
+                &prepared.join("receipt.json"),
+                &format!("example/packages/{name}"),
+                &release,
+                &signer,
+                None,
+                &released,
+            )
+            .unwrap();
+            released.insert(id, release);
+        }
+
+        let record = |name: &str| {
+            let bytes = fs::read(root.join("releases").join(name).join("package.json")).unwrap();
+            let system = rootbeer_package::ResolveContext::current().system;
+            verify_record(&bytes, &public_key, &format!("{name}@1"), &system).unwrap()
+        };
+        let base = record("base").artifact.package;
+        let middle = record("middle").artifact.package;
+        let consumer = record("consumer").artifact.package;
+        assert_eq!(middle.runtime_dependencies["base@1"], base);
+        assert_eq!(consumer.runtime_dependencies["middle@1"], middle);
+        let LockedSource::Url { url, .. } = &consumer.runtime_dependencies["middle@1"].source
+        else {
+            panic!("runtime dependency is not published");
+        };
+        assert!(
+            url.starts_with("ghcr://example/packages/middle@sha256:"),
+            "{url}"
+        );
     }
 }
