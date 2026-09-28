@@ -317,10 +317,9 @@ impl Retained {
     pub fn recovery(
         &self,
         github: &GitHub,
-        runner: &str,
         task: &PackageTask,
     ) -> Result<Option<Recovery>, String> {
-        let Some(job) = build_job(&self.jobs, runner, &task.package) else {
+        let Some(job) = build_job(&self.jobs, &task.system, &task.package) else {
             return Ok(None);
         };
         let log = github.text(&format!(
@@ -344,13 +343,13 @@ impl Retained {
     }
 }
 
-/// The newest successful job that built the package on this runner; none means it never
+/// The newest successful job that built the package for this system; none means it never
 /// finished, so it may run again.
-fn build_job<'a>(jobs: &'a [Value], runner: &str, package: &str) -> Option<&'a Value> {
+fn build_job<'a>(jobs: &'a [Value], system: &str, package: &str) -> Option<&'a Value> {
     jobs.iter()
         .filter(|job| {
             job["name"].as_str().is_some_and(|name| {
-                name.starts_with(&format!("{runner} / "))
+                name.starts_with(&format!("{system} / "))
                     && name.ends_with(&format!(" / {package}"))
             }) && job["conclusion"] == "success"
                 && job["steps"].as_array().into_iter().flatten().any(|step| {
@@ -572,20 +571,20 @@ mod tests {
     }
 
     fn job(conclusion: &str) -> Value {
-        json!({"id": 7, "run_attempt": 1, "name": "macos-15 / Build / tool@1",
+        json!({"id": 7, "run_attempt": 1, "name": "aarch64-macos / Build (0) / tool@1",
                "conclusion": conclusion, "steps": [{"name": "Build and check this package", "conclusion": "success"}]})
     }
 
     #[test]
     fn jobs_that_never_finished_may_run_again() {
-        assert!(build_job(&[], "macos-15", "tool@1").is_none());
-        assert!(build_job(&[job("failure")], "macos-15", "tool@1").is_none());
+        assert!(build_job(&[], "aarch64-macos", "tool@1").is_none());
+        assert!(build_job(&[job("failure")], "aarch64-macos", "tool@1").is_none());
         assert_eq!(
-            build_job(&[job("success")], "macos-15", "tool@1"),
+            build_job(&[job("success")], "aarch64-macos", "tool@1"),
             Some(&job("success"))
         );
-        assert!(build_job(&[job("success")], "ubuntu-24.04", "tool@1").is_none());
-        assert!(build_job(&[job("success")], "macos-15", "tool@2").is_none());
+        assert!(build_job(&[job("success")], "x86_64-linux", "tool@1").is_none());
+        assert!(build_job(&[job("success")], "aarch64-macos", "tool@2").is_none());
     }
 
     #[test]

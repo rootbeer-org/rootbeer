@@ -84,14 +84,6 @@ impl Config {
         Ok(Distribution { pdr, registry })
     }
 
-    pub fn runner(&self, system: &str) -> Result<&str, String> {
-        self.ci
-            .runners
-            .get(system)
-            .map(String::as_str)
-            .ok_or_else(|| format!("{FILE} names no CI runner for {system}"))
-    }
-
     pub fn engine(&self) -> Result<&Engine, String> {
         self.ci
             .engine
@@ -233,8 +225,7 @@ mod tests {
         .unwrap();
         assert_eq!(config.catalog.as_deref(), Some(Path::new("packages")));
         assert_eq!(config.distribution().unwrap().registry, "rootbeer-org/pdr");
-        assert_eq!(config.runner("x86_64-linux").unwrap(), "ubuntu-24.04");
-        assert!(config.runner("aarch64-macos").is_err());
+        assert_eq!(config.ci.runners["x86_64-linux"], "ubuntu-24.04");
         assert!(toml::from_str::<Config>("unknown = 1").is_err());
     }
 }

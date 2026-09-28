@@ -197,7 +197,8 @@ fn select(
         .filter(|request| is_supported(catalog, request, system))
         .collect();
         if !selected.is_empty() {
-            platforms.push(json!({"runner": runner, "packages": selected.join(" ")}));
+            platforms
+                .push(json!({"runner": runner, "system": system, "packages": selected.join(" ")}));
         }
     }
     output("platforms", &json!({"include": platforms}).to_string())?;
@@ -271,8 +272,6 @@ fn plan(
     path: &Path,
     records: &Path,
 ) -> Result<(), String> {
-    let system = rootbeer_packaging::ResolveContext::current().system;
-    let runner = config.runner(&system)?.to_string();
     let mut reuse_run = reuse_run.filter(|run| !run.is_empty());
     let attempt: u64 = std::env::var("GITHUB_RUN_ATTEMPT")
         .ok()
@@ -292,7 +291,7 @@ fn plan(
         _ => None,
     };
     let mut recover = |task: &rootbeer_packaging::PackageTask| match (&github, &retained) {
-        (Some(github), Some(retained)) => retained.recovery(github, &runner, task),
+        (Some(github), Some(retained)) => retained.recovery(github, task),
         _ => Ok(None),
     };
     let plan = plan_work(
