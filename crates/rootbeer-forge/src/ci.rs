@@ -43,8 +43,20 @@ pub enum Ci {
         #[arg(long, default_value = "discovery-records")]
         records: PathBuf,
     },
-    /// Find the builds of a task's dependencies this run uploaded, for download by ID
+    /// Find the builds a task installs, from this run or the verified run it recovers from
     Dependencies { plan: PathBuf, task: String },
+    /// Find every build this runner publishes, from this run or the verified run it recovers from
+    Builds { plan: PathBuf },
+    /// Sign and push every downloaded build of a plan, one failure at a time
+    Publish {
+        plan: PathBuf,
+        /// Directory holding the downloaded builds
+        #[arg(default_value = "builds")]
+        builds: PathBuf,
+        /// Where each published record is saved for discovery
+        #[arg(long, default_value = "discovery-records")]
+        records: PathBuf,
+    },
     /// Advance the engine's recipe to the newest main commit its CI verified
     Engine {
         /// Only report whether there is one, as the `changed` output
@@ -92,23 +104,72 @@ pub fn run(command: Ci, config: &Config, catalog: Option<&PackageCatalog>) -> Re
         Ci::Propose { packages } => crate::discovery::propose(config, &packages),
         Ci::Dependencies { plan, task } => {
             let plan = WorkPlan::read(&plan)?;
-            let Work::Build { dependencies, .. } = &plan.task(&task)?.work else {
-                return output("ids", "");
+            let packages: Vec<_> = match &plan.task(&task)?.work {
+                Work::Build { dependencies, .. } => dependencies
+                    .iter()
+                    .map(|dependency| dependency.package.as_str())
+                    .collect(),
+                _ => Vec::new(),
             };
-            if dependencies.is_empty() {
-                return output("ids", "");
-            }
-            let keys: Vec<_> = dependencies
+            downloads(&plan, &packages, true)
+        }
+        Ci::Builds { plan } => {
+            let plan = WorkPlan::read(&plan)?;
+            let packages: Vec<_> = plan
+                .tasks
                 .iter()
-                .map(|dependency| dependency.key.clone())
+                .filter(|task| matches!(task.work, Work::Build { .. } | Work::Recover { .. }))
+                .map(|task| task.package.as_str())
                 .collect();
-            let ids = github::run_builds(&GitHub::from_env()?, &keys)?;
-            output(
-                "ids",
-                &ids.iter().map(u64::to_string).collect::<Vec<_>>().join(","),
-            )
+            downloads(&plan, &packages, false)
+        }
+        Ci::Publish {
+            plan,
+            builds,
+            records,
+        } => crate::publish::publish(
+            config,
+            catalog()?,
+            &WorkPlan::read(&plan)?,
+            &builds,
+            &records,
+        ),
+    }
+}
+
+/// Step outputs naming the artifacts of `packages`: `ids` from this run, and `recovered-ids`
+/// from the verified run `recovered-run`. Builds this run failed to make are an error only
+/// when a dependent needs them.
+fn downloads(plan: &WorkPlan, packages: &[&str], is_required: bool) -> Result<(), String> {
+    let mut keys = Vec::new();
+    let mut recovered = Vec::new();
+    let mut runs = std::collections::BTreeSet::new();
+    for package in packages {
+        let task = plan.task(package)?;
+        match &task.work {
+            Work::Recover { run, artifact } => {
+                recovered.push(artifact.to_string());
+                runs.insert(*run);
+            }
+            _ => keys.push(task.key.clone()),
         }
     }
+    if runs.len() > 1 {
+        return Err("a plan recovers builds from one verified run".into());
+    }
+    let ids = match keys.is_empty() {
+        true => Vec::new(),
+        false => github::run_builds(&GitHub::from_env()?, &keys, is_required)?,
+    };
+    output(
+        "ids",
+        &ids.iter().map(u64::to_string).collect::<Vec<_>>().join(","),
+    )?;
+    output("recovered-ids", &recovered.join(","))?;
+    output(
+        "recovered-run",
+        &runs.first().map(u64::to_string).unwrap_or_default(),
+    )
 }
 
 fn select(
@@ -247,48 +308,50 @@ fn plan(
         serde_json::to_vec_pretty(&plan).map_err(|error| error.to_string())?,
     )
     .map_err(|error| error.to_string())?;
-    let levels = plan.levels();
-    for index in 0..rootbeer_packaging::work::LEVELS {
-        let entries: Vec<_> = levels
-            .get(index)
-            .into_iter()
-            .flatten()
-            .map(|task| {
-                let mut entry = json!({
-                    "package": task.package, "name": task.name, "system": plan.system, "key": task.key,
-                });
-                match &task.work {
-                    Work::Recover { run, artifact, .. } => {
-                        entry["artifact"] = json!(artifact.to_string());
-                        entry["reuse_run"] = json!(run.to_string());
+    let levels: Vec<_> = plan
+        .levels()
+        .into_iter()
+        .enumerate()
+        .filter(|(_, tasks)| !tasks.is_empty())
+        .map(|(level, tasks)| {
+            let tasks: Vec<_> = tasks
+                .iter()
+                .map(|task| {
+                    let mut entry =
+                        json!({"package": task.package, "name": task.name, "key": task.key});
+                    if let Work::Error(error) = &task.work {
+                        entry["error"] = json!(error);
                     }
-                    Work::Error(error) => entry["error"] = json!(error),
-                    Work::Build { .. } | Work::Reuse { .. } => {}
-                }
-                entry
-            })
-            .collect();
-        output(
-            &format!("level_{index}"),
-            &json!({"include": entries}).to_string(),
-        )?;
-    }
-    output("depth", &levels.len().to_string())?;
-    output("has-work", if levels.is_empty() { "false" } else { "true" })?;
+                    entry
+                })
+                .collect();
+            json!({"level": level, "tasks": {"include": tasks}})
+        })
+        .collect();
+    let publishes = plan
+        .tasks
+        .iter()
+        .any(|task| matches!(task.work, Work::Build { .. } | Work::Recover { .. }));
+    output("builds", &json!({"include": levels}).to_string())?;
+    output(
+        "has-builds",
+        if levels.is_empty() { "false" } else { "true" },
+    )?;
+    output("has-publish", if publishes { "true" } else { "false" })?;
     summary(&describe(&plan))
 }
 
 /// A readable account of a plan: what each task does, and why.
 pub fn describe(plan: &WorkPlan) -> String {
     let mut text = String::new();
-    let jobs = plan
+    let reused = plan
         .tasks
         .iter()
-        .filter(|task| task.work.level().is_some())
+        .filter(|task| matches!(task.work, Work::Reuse { .. }))
         .count();
-    let reused = plan.tasks.len() - jobs;
     text.push_str(&format!(
-        "{jobs} packages to build or recover on {}; {reused} signed results reused.\n\n",
+        "{} packages to build or recover on {}; {reused} signed results reused.\n\n",
+        plan.tasks.len() - reused,
         plan.system
     ));
     for task in &plan.tasks {
@@ -311,11 +374,8 @@ pub fn describe(plan: &WorkPlan) -> String {
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
-            Work::Recover { level, run, .. } => {
-                format!(
-                    "- Recover `{}` from run {run} (level {level})\n",
-                    task.package
-                )
+            Work::Recover { run, .. } => {
+                format!("- Recover `{}` from run {run}\n", task.package)
             }
             Work::Reuse { record, .. } => format!("- Reuse `{}`: `{record}`\n", task.package),
             Work::Error(error) => format!("- Cannot plan `{}`: {error}\n", task.package),

@@ -63,12 +63,8 @@ pub enum Work {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         dependencies: Vec<Dependency>,
     },
-    /// Take the build a verified run already qualified.
-    Recover {
-        level: usize,
-        run: u64,
-        artifact: u64,
-    },
+    /// Take the build a verified run already qualified; it needs no job.
+    Recover { run: u64, artifact: u64 },
     /// A signed result for these inputs is already published.
     Reuse { key: String, record: String },
     /// The package cannot be planned; its job reports this and fails.
@@ -108,7 +104,7 @@ impl WorkPlan {
             .ok_or_else(|| format!("{package} is not in this plan"))
     }
 
-    /// Tasks run at each dependency level, which CI runs as its own jobs.
+    /// Builds at each dependency level, which CI runs one level after another.
     pub fn levels(&self) -> Vec<Vec<&WorkTask>> {
         let mut levels = vec![Vec::new(); LEVELS];
         for task in &self.tasks {
@@ -127,12 +123,13 @@ impl WorkPlan {
 }
 
 impl Work {
-    /// The level a job runs at; reused results need no job.
+    /// The level a job runs at; recovered and reused results need no job, and a task that
+    /// cannot be planned fails in the first.
     pub fn level(&self) -> Option<usize> {
         match self {
-            Self::Build { level, .. } | Self::Recover { level, .. } => Some(*level),
+            Self::Build { level, .. } => Some(*level),
             Self::Error(_) => Some(0),
-            Self::Reuse { .. } => None,
+            Self::Recover { .. } | Self::Reuse { .. } => None,
         }
     }
 }
@@ -197,7 +194,6 @@ pub fn plan_work(
                 Some(recovery) => {
                     in_run.insert(task.package.clone(), recovery.key.clone());
                     Work::Recover {
-                        level: 0,
                         run: recovery.run,
                         artifact: recovery.artifact,
                     }
@@ -246,10 +242,11 @@ pub fn plan_work(
     })
 }
 
-/// Orders the jobs of one run so each follows the builds it installs instead of compiling.
+/// Orders the builds of one run so each follows the builds it installs instead of compiling.
 ///
-/// A build installs its dependencies' builds only when this run makes all of them; otherwise it
-/// compiles them inline, as a build published outside the run's root cannot be installed.
+/// A build installs its dependencies' builds only when this run makes or recovers all of them;
+/// otherwise it compiles them inline, as a build published outside the run's root cannot be
+/// installed. A recovered build is ready from the start, so only builds add levels.
 fn assign_levels(
     tasks: &mut [WorkTask],
     planned: &BTreeMap<String, PackageTask>,
@@ -258,7 +255,7 @@ fn assign_levels(
     fn level(
         package: &str,
         planned: &BTreeMap<String, PackageTask>,
-        in_run: &BTreeMap<String, String>,
+        building: &BTreeSet<String>,
         levels: &mut BTreeMap<String, usize>,
     ) -> usize {
         if let Some(level) = levels.get(package) {
@@ -267,42 +264,42 @@ fn assign_levels(
         let deepest = planned[package]
             .builds
             .iter()
-            .filter(|build| in_run.contains_key(*build))
-            .map(|build| level(build, planned, in_run, levels) + 1)
+            .filter(|build| building.contains(*build))
+            .map(|build| level(build, planned, building, levels) + 1)
             .max()
             .unwrap_or(0);
         levels.insert(package.to_string(), deepest);
         deepest
     }
+    let building: BTreeSet<String> = tasks
+        .iter()
+        .filter(|task| matches!(task.work, Work::Build { .. }))
+        .map(|task| task.package.clone())
+        .collect();
     let mut levels = BTreeMap::new();
     for task in tasks.iter_mut() {
         let package = task.package.clone();
-        match &mut task.work {
-            Work::Build {
-                level: task_level,
-                dependencies,
-            } => {
-                *task_level = level(&package, planned, in_run, &mut levels);
-                let builds = &planned[&package].builds;
-                if builds.iter().all(|build| in_run.contains_key(build)) {
-                    *dependencies = builds
-                        .iter()
-                        .map(|build| Dependency {
-                            package: build.clone(),
-                            key: in_run[build].clone(),
-                        })
-                        .collect();
-                }
-            }
-            Work::Recover {
-                level: task_level, ..
-            } => *task_level = level(&package, planned, in_run, &mut levels),
-            Work::Reuse { .. } | Work::Error(_) => {}
+        let Work::Build {
+            level: task_level,
+            dependencies,
+        } = &mut task.work
+        else {
+            continue;
+        };
+        *task_level = level(&package, planned, &building, &mut levels);
+        let builds = &planned[&package].builds;
+        if builds.iter().all(|build| in_run.contains_key(build)) {
+            *dependencies = builds
+                .iter()
+                .map(|build| Dependency {
+                    package: build.clone(),
+                    key: in_run[build].clone(),
+                })
+                .collect();
         }
-        if task.work.level().is_some_and(|level| level >= LEVELS) {
+        if *task_level >= LEVELS {
             return Err(format!(
-                "{}: dependency chains deeper than {LEVELS} builds need more CI levels",
-                task.package
+                "{package}: dependency chains deeper than {LEVELS} builds need more CI levels"
             ));
         }
     }
@@ -485,27 +482,28 @@ pub fn build_task(
 }
 
 /// The handed-in build of each expected dependency, found by its receipt so directory names
-/// don't matter; a download extracted in place is one build at `directory` itself.
+/// don't matter: builds sit in `directory`, or one level into groups such as this run's and a
+/// recovered run's, and a group holding one download has it extracted in place.
 fn dependency_builds(directory: &Path, expected: &[Dependency]) -> Result<Vec<PathBuf>, String> {
     let wanted: BTreeSet<_> = expected
         .iter()
         .map(|dependency| dependency.package.as_str())
         .collect();
-    let candidates = if directory.join("receipt.json").is_file() {
-        vec![directory.to_path_buf()]
-    } else if directory.is_dir() {
-        let mut entries = Vec::new();
-        for entry in fs::read_dir(directory).map_err(|error| error.to_string())? {
-            let path = entry.map_err(|error| error.to_string())?.path();
-            if path.join("receipt.json").is_file() {
-                entries.push(path);
-            }
+    let mut candidates = Vec::new();
+    let mut pending = vec![(directory.to_path_buf(), 0)];
+    while let Some((path, depth)) = pending.pop() {
+        if path.join("receipt.json").is_file() {
+            candidates.push(path);
+            continue;
         }
-        entries.sort();
-        entries
-    } else {
-        Vec::new()
-    };
+        if depth == 2 || !path.is_dir() {
+            continue;
+        }
+        for entry in fs::read_dir(&path).map_err(|error| error.to_string())? {
+            pending.push((entry.map_err(|error| error.to_string())?.path(), depth + 1));
+        }
+    }
+    candidates.sort();
     let mut found = BTreeMap::new();
     for candidate in candidates {
         let bytes = fs::read(candidate.join("receipt.json")).map_err(|error| error.to_string())?;
@@ -560,7 +558,6 @@ mod tests {
                 key: task.key.clone(),
                 work: if recovered.contains(&task.package.as_str()) {
                     Work::Recover {
-                        level: 0,
                         run: 1,
                         artifact: 2,
                     }
@@ -616,12 +613,9 @@ mod tests {
             &[task("ncurses@1", &[]), task("telnet@1", &["ncurses@1"])],
             &["ncurses@1"],
         );
-        assert!(matches!(
-            find(&tasks, "ncurses@1").work,
-            Work::Recover { level: 0, .. }
-        ));
+        assert_eq!(find(&tasks, "ncurses@1").work.level(), None);
         let Work::Build {
-            level: 1,
+            level: 0,
             dependencies,
         } = &find(&tasks, "telnet@1").work
         else {
@@ -725,6 +719,13 @@ mod tests {
         assert!(dependency_builds(&builds, &other)
             .unwrap_err()
             .contains("does not install"));
+        let grouped = root.path().join("grouped/recovered");
+        fs::create_dir_all(grouped.parent().unwrap()).unwrap();
+        fs::rename(builds.join("build"), &grouped).unwrap();
+        assert_eq!(
+            dependency_builds(&root.path().join("grouped"), &expected).unwrap(),
+            [grouped]
+        );
         assert!(dependency_builds(&root.path().join("none"), &expected)
             .unwrap_err()
             .contains("not handed in"));

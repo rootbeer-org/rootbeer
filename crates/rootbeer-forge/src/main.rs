@@ -3,6 +3,7 @@ mod command;
 mod config;
 mod discovery;
 mod github;
+mod publish;
 
 use clap::Parser;
 

@@ -320,11 +320,7 @@ impl Retained {
         runner: &str,
         task: &PackageTask,
     ) -> Result<Option<Recovery>, String> {
-        let expected = format!(
-            "{runner} / {} ({}) / Build {}",
-            task.package, task.system, task.package
-        );
-        let Some(job) = build_job(&self.jobs, &expected) else {
+        let Some(job) = build_job(&self.jobs, runner, &task.package) else {
             return Ok(None);
         };
         let log = github.text(&format!(
@@ -348,22 +344,18 @@ impl Retained {
     }
 }
 
-/// The newest successful job that built or recovered the task; none means it never finished,
-/// so it may run again.
-fn build_job<'a>(jobs: &'a [Value], expected: &str) -> Option<&'a Value> {
+/// The newest successful job that built the package on this runner; none means it never
+/// finished, so it may run again.
+fn build_job<'a>(jobs: &'a [Value], runner: &str, package: &str) -> Option<&'a Value> {
     jobs.iter()
         .filter(|job| {
-            job["name"]
-                .as_str()
-                .is_some_and(|name| name.ends_with(expected))
-                && job["conclusion"] == "success"
+            job["name"].as_str().is_some_and(|name| {
+                name.starts_with(&format!("{runner} / "))
+                    && name.ends_with(&format!(" / {package}"))
+            }) && job["conclusion"] == "success"
                 && job["steps"].as_array().into_iter().flatten().any(|step| {
-                    matches!(
-                        step["name"].as_str(),
-                        Some(
-                            "Build and check this package" | "Recover the admitted verified build"
-                        )
-                    ) && step["conclusion"] == "success"
+                    step["name"] == "Build and check this package"
+                        && step["conclusion"] == "success"
                 })
         })
         .max_by_key(|job| job["run_attempt"].as_u64())
@@ -419,9 +411,9 @@ fn uploaded_builds(log: &str) -> Vec<(String, String, u64, u64)> {
         .collect()
 }
 
-/// The newest unexpired build of each input key this run uploaded; a missing one means its job
-/// failed, or found a result published after planning.
-pub fn run_builds(github: &GitHub, keys: &[String]) -> Result<Vec<u64>, String> {
+/// The newest unexpired build of each input key this run uploaded. A missing one means its job
+/// failed, or found a result published after planning; only a dependent `requires` every one.
+pub fn run_builds(github: &GitHub, keys: &[String], requires: bool) -> Result<Vec<u64>, String> {
     let artifacts = github.all(
         &format!(
             "repos/{}/actions/runs/{}/artifacts",
@@ -430,10 +422,10 @@ pub fn run_builds(github: &GitHub, keys: &[String]) -> Result<Vec<u64>, String> 
         ),
         "artifacts",
     )?;
-    newest_builds(&artifacts, keys)
+    newest_builds(&artifacts, keys, requires)
 }
 
-fn newest_builds(artifacts: &[Value], keys: &[String]) -> Result<Vec<u64>, String> {
+fn newest_builds(artifacts: &[Value], keys: &[String], requires: bool) -> Result<Vec<u64>, String> {
     let mut builds: BTreeMap<&str, (u64, u64)> = BTreeMap::new();
     for artifact in artifacts {
         let Some(rest) = artifact["name"]
@@ -464,14 +456,17 @@ fn newest_builds(artifacts: &[Value], keys: &[String]) -> Result<Vec<u64>, Strin
         .filter(|key| !builds.contains_key(key.as_str()))
         .cloned()
         .collect();
-    if !missing.is_empty() {
+    if requires && !missing.is_empty() {
         return Err(format!(
             "no build in this run for dependency inputs {}: their job failed, or found a result \
              published after planning; re-run all jobs to plan against it",
             missing.join(", ")
         ));
     }
-    Ok(keys.iter().map(|key| builds[key.as_str()].1).collect())
+    Ok(keys
+        .iter()
+        .filter_map(|key| builds.get(key.as_str()).map(|(_, id)| *id))
+        .collect())
 }
 
 #[cfg(test)]
@@ -502,13 +497,14 @@ mod tests {
             json!({"id": 4, "name": format!("published-records-{b}"), "expired": false}),
         ];
         assert_eq!(
-            newest_builds(&artifacts, &[a.clone(), b.clone()]).unwrap(),
+            newest_builds(&artifacts, &[a.clone(), b.clone()], true).unwrap(),
             [2, 3]
         );
         artifacts[2]["expired"] = json!(true);
-        assert!(newest_builds(&artifacts, &[a, b])
+        assert!(newest_builds(&artifacts, &[a.clone(), b.clone()], true)
             .unwrap_err()
             .contains("re-run"));
+        assert_eq!(newest_builds(&artifacts, &[a, b], false).unwrap(), [2]);
     }
 
     #[test]
@@ -576,19 +572,20 @@ mod tests {
     }
 
     fn job(conclusion: &str) -> Value {
-        json!({"id": 7, "run_attempt": 1, "name": "macos-15 / tool@1 (aarch64-macos) / Build tool@1",
+        json!({"id": 7, "run_attempt": 1, "name": "macos-15 / Build / tool@1",
                "conclusion": conclusion, "steps": [{"name": "Build and check this package", "conclusion": "success"}]})
     }
 
     #[test]
     fn jobs_that_never_finished_may_run_again() {
-        let expected = "macos-15 / tool@1 (aarch64-macos) / Build tool@1";
-        assert!(build_job(&[], expected).is_none());
-        assert!(build_job(&[job("failure")], expected).is_none());
+        assert!(build_job(&[], "macos-15", "tool@1").is_none());
+        assert!(build_job(&[job("failure")], "macos-15", "tool@1").is_none());
         assert_eq!(
-            build_job(&[job("success")], expected),
+            build_job(&[job("success")], "macos-15", "tool@1"),
             Some(&job("success"))
         );
+        assert!(build_job(&[job("success")], "ubuntu-24.04", "tool@1").is_none());
+        assert!(build_job(&[job("success")], "macos-15", "tool@2").is_none());
     }
 
     #[test]
