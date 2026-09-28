@@ -1,7 +1,7 @@
 use super::{Binary, Format};
 use std::path::Path;
 
-pub(super) fn is_native(magic: [u8; 4]) -> bool {
+pub(crate) fn is_native(magic: [u8; 4]) -> bool {
     magic == *b"\x7fELF"
         || matches!(
             u32::from_be_bytes(magic),

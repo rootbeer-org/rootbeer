@@ -34,11 +34,6 @@ fn runtime_chain_survives_cache_reuse_and_installation_without_build_trees() {
     } else {
         "so"
     };
-    let token = if cfg!(target_os = "macos") {
-        "@loader_path"
-    } else {
-        "$ORIGIN"
-    };
     for (name, dependency) in [
         ("base", None),
         ("middle", Some("base")),
@@ -80,7 +75,7 @@ fn runtime_chain_survives_cache_reuse_and_installation_without_build_trees() {
             if cfg!(target_os = "macos") {
                 command.extend([
                     "-dynamiclib".into(),
-                    format!("-Wl,-install_name,@rpath/{filename}"),
+                    format!("-Wl,-install_name,{{prefix}}/lib/{filename}"),
                 ]);
             } else {
                 command.extend([
@@ -91,18 +86,17 @@ fn runtime_chain_survives_cache_reuse_and_installation_without_build_trees() {
             }
         }
         if let Some(dependency) = dependency {
-            command.extend([
-                "-L{dependencies}/lib".into(),
-                format!("-l{dependency}"),
-                format!("-Wl,-rpath,{token}/../../{{runtime:{dependency}@1}}/lib"),
-            ]);
+            command.extend(["-L{dependencies}/lib".into(), format!("-l{dependency}")]);
             if name == "consumer" {
-                command.extend([
-                    "-lbase".into(),
-                    format!("-Wl,-rpath,{token}/../../{{runtime:base@1}}/lib"),
-                ]);
+                command.push("-lbase".into());
             }
         }
+        // Links the way make, cmake, and meson do: with the engine's LDFLAGS.
+        let command = vec![
+            "sh".to_string(),
+            "-c".into(),
+            format!("{} $LDFLAGS", command.join(" ")),
+        ];
         let output_dir = if is_library { "lib" } else { "bin" };
         let runtime_build: rootbeer_package::SourceBuild = serde_json::from_value(serde_json::json!({
             "backend": "custom", "url": "https://source.invalid/runtime.tar.gz", "sha256": cached.sha256,

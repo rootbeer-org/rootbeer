@@ -5,6 +5,7 @@ mod consumer_test;
 mod environment;
 pub use environment::{verify_environment, BuildEnvironment};
 mod plan;
+mod relocate;
 pub use cache::{BuildCache, BuildSession};
 pub use plan::BuildPlan;
 
@@ -682,6 +683,22 @@ fn compile(
             ))
         })
         .collect::<Result<BTreeMap<_, _>, String>>()?;
+    let relocation_roots = runtime
+        .iter()
+        .map(|(key, directory)| (dependency_roots[key].clone(), directory.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let rpaths = relocate::rpaths(&relocation_roots)?;
+    if !rpaths.is_empty() {
+        append_flags(&mut environment, "LDFLAGS", &rpaths);
+        match build.backend {
+            BuildBackend::Rust => {
+                let flags = rpaths.iter().map(|flag| format!("-Clink-arg={flag}"));
+                append_flags(&mut environment, "RUSTFLAGS", &flags.collect::<Vec<_>>());
+            }
+            BuildBackend::Go => append_flags(&mut environment, "CGO_LDFLAGS", &rpaths),
+            _ => {}
+        }
+    }
     let downloads_directory = opts
         .downloads
         .canonicalize()
@@ -743,6 +760,13 @@ fn compile(
             return Err(format!("invalid output command {name}"));
         }
     }
+    if !relocation_roots.is_empty() || relocate::exports_shared(&prefix, &build.libraries) {
+        relocate::Relocation {
+            prefix: &prefix,
+            runtime: &relocation_roots,
+        }
+        .apply()?;
+    }
     dependencies::validate(&prefix, &build.libraries)?;
     let runtime_audit = audit_output(
         &prefix,
@@ -792,6 +816,16 @@ fn compile(
         },
     };
     Ok(artifact)
+}
+
+fn append_flags(environment: &mut BTreeMap<&str, String>, name: &'static str, flags: &[String]) {
+    let existing = environment.get(name).filter(|value| !value.is_empty());
+    let value = existing
+        .into_iter()
+        .chain(flags)
+        .cloned()
+        .collect::<Vec<_>>();
+    environment.insert(name, value.join(" "));
 }
 
 fn pack_runtime(

@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 mod parse;
+pub(crate) use parse::is_native;
 mod policy;
 #[cfg(test)]
 mod tests;
