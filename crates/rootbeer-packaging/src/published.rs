@@ -34,9 +34,13 @@ impl PublishedDependencies {
         pdr: &RepositoryResolver,
     ) -> Result<Self, String> {
         let graph = DependencyGraph::new(catalog, &[request.to_string()], system)?;
+        let root = graph
+            .order
+            .last()
+            .ok_or_else(|| format!("{request} has no recipe for {system}"))?;
         let context = ResolveContext::new(system);
         let mut records = BTreeMap::new();
-        for key in &graph.nodes[request].closure {
+        for key in &graph.nodes[root].closure {
             let (package, version, recipe) = find_recipe_for_system(catalog, key, system)?;
             if recipe.build.is_none() {
                 continue;

@@ -34,7 +34,11 @@ impl BuiltDependencies {
     ) -> Result<Self, String> {
         let system = ResolveContext::current().system;
         let graph = DependencyGraph::new(catalog, &[request.to_string()], &system)?;
-        let closure = &graph.nodes[request].closure;
+        let root = graph
+            .order
+            .last()
+            .ok_or_else(|| format!("{request} has no recipe for {system}"))?;
+        let closure = &graph.nodes[root].closure;
         let context = options
             .cache
             .as_ref()
@@ -128,6 +132,16 @@ mod tests {
     fn fixture(root: &Path) -> (PackageCatalog, PathBuf) {
         let (catalog, receipt) = crate::receipt::tests::fixture(root);
         (catalog, receipt.parent().unwrap().to_path_buf())
+    }
+
+    #[test]
+    fn a_request_by_name_resolves_its_default_version() {
+        let catalog = crate::test_catalog::catalog();
+        let system = ResolveContext::current().system;
+        let version = catalog.packages["xz"].default_version_for(&system).unwrap();
+        for request in ["xz".to_string(), format!("xz@{version}")] {
+            BuiltDependencies::load(catalog, &request, &[], &BuildOptions::default()).unwrap();
+        }
     }
 
     #[test]
