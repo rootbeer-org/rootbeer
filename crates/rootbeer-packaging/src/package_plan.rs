@@ -10,7 +10,7 @@ use crate::{BuildOptions, PublishedDependencies};
 use rootbeer_build::Generation;
 
 /// One package to qualify on the current platform.
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct PackageTask {
     pub package: String,
     pub name: String,

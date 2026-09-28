@@ -564,24 +564,26 @@ allowed.
 A pull request to the PDR compares expanded recipes and runs one job per changed
 package, version, and platform. Changed dependencies also select their consumers.
 Metadata-only changes and unrelated engine updates don't rebuild anything. Each job
-runs the same commands you can run by hand:
+runs the same commands you can run by hand from a PDR checkout, whose `forge.toml`
+names the recipes, the PDR, and the registry:
 
 ```sh
-pdr=(--pdr https://pdr.rbpkg.com/v3/current.json --pdr-public-key "$PDR_PUBLIC_KEY")
-rootbeer-forge --catalog packages package-plan curl@8.22.0 --context "$BUILD_CONTEXT" "${pdr[@]}"
-rootbeer-forge --catalog packages prepare curl@8.22.0 --input-key "$INPUT_KEY" \
-  --output result --cache "$CACHE" --cache-context "$BUILD_CONTEXT" \
-  "${pdr[@]}" --pdr-root "$PDR_ROOT"
+rootbeer-forge plan telnet@2.8
+rootbeer-forge build plan.json ncurses@6.6 --output ncurses
+rootbeer-forge build plan.json telnet@2.8 --dependencies ncurses
 ```
 
-`package-plan` emits one task per exact package supported on the current machine,
-each with an input key covering its recipe and checks, platform, build backend, and
-tool and environment hashes. `build --input-key` stops if this machine's inputs
-differ, rather than producing a result under the wrong key. A source task also names the
-PDR root it planned against; `--pdr-root` makes the build read that same root, so a
-publication in between can't change which dependencies it installs. Its `builds` lists the
-source dependencies that root hasn't published, which CI builds first, in their own jobs, and
-hands to their dependents with `--dependency-artifact`.
+`plan` writes `plan.json`: every requested package, plus each source dependency the PDR
+hasn't published for its current recipe, as one task apiece. A task reuses a signed result
+GHCR already holds for its input key, which covers the recipe and checks, platform, build
+backend, and tool and environment hashes; otherwise it builds, after the builds it installs.
+The plan pins the PDR root, catalog, engine, and machine it was made against. `build`
+executes one task and stops if any of those differ, rather than producing a result under
+the wrong key, and installs the dependency builds found in `--dependencies` instead of
+compiling them. On another runner image it keeps its own key.
+
+In CI, `rootbeer-forge ci plan` also recovers builds a verified run retained, and each
+dependency level runs as its own set of jobs, so a dependency is built once per run.
 
 PR jobs have no signing credentials. After merge, publication promotes the exact
 verified artifacts from the PR without rebuilding. Each package is signed in its own

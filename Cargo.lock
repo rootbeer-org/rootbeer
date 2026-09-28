@@ -1647,7 +1647,11 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "rootbeer-packaging",
+ "serde",
  "serde_json",
+ "tempfile",
+ "toml 1.0.3+spec-1.1.0",
+ "ureq",
 ]
 
 [[package]]

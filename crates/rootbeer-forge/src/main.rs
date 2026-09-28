@@ -1,4 +1,7 @@
+mod ci;
 mod command;
+mod config;
+mod github;
 
 use clap::Parser;
 

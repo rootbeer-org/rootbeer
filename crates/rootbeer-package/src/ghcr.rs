@@ -36,32 +36,8 @@ impl GhcrBlob {
         &self,
         execution: &crate::Execution,
     ) -> io::Result<(Box<dyn Read>, Option<u64>)> {
-        let agent: ureq::Agent = ureq::Agent::config_builder()
-            .https_only(true)
-            .timeout_resolve(Some(Duration::from_secs(30)))
-            .timeout_connect(Some(Duration::from_secs(30)))
-            .timeout_send_request(Some(Duration::from_secs(30)))
-            .timeout_recv_response(Some(Duration::from_secs(30)))
-            .timeout_recv_body(Some(Duration::from_secs(30)))
-            .redirect_auth_headers(ureq::config::RedirectAuthHeaders::Never)
-            .timeout_global(Some(
-                execution.remaining()?.unwrap_or(Duration::from_secs(300)),
-            ))
-            .build()
-            .into();
-        let mut response = agent
-            .get("https://ghcr.io/token")
-            .query("service", "ghcr.io")
-            .query("scope", format!("repository:{}:pull", self.repository))
-            .call()
-            .map_err(|e| io::Error::other(format!("cannot obtain public GHCR pull token: {e}")))?;
-        let mut bytes = Vec::new();
-        response
-            .body_mut()
-            .as_reader()
-            .take(65537)
-            .read_to_end(&mut bytes)?;
-        let token = parse_token(&bytes)?;
+        let agent = agent(execution.remaining()?.unwrap_or(Duration::from_secs(300)));
+        let token = pull_token(&agent, &self.repository)?;
         let url = format!(
             "https://ghcr.io/v2/{}/blobs/sha256:{}",
             self.repository, self.sha256
@@ -81,6 +57,91 @@ impl GhcrBlob {
         let length = body.content_length();
         Ok((Box::new(body.into_reader()), length))
     }
+}
+
+/// What a public repository's tag names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Tagged {
+    Manifest(Vec<u8>),
+    Missing,
+    /// GHCR answers a repository nobody has pushed to exactly as it answers a private one.
+    Denied,
+}
+
+/// Reads the OCI manifest `tag` names in a public GHCR repository.
+pub fn tagged_manifest(repository: &str, tag: &str) -> io::Result<Tagged> {
+    validate_repository(repository).map_err(io::Error::other)?;
+    if tag.is_empty()
+        || tag.len() > 128
+        || !tag
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        return Err(io::Error::other("invalid GHCR tag"));
+    }
+    let agent = agent(Duration::from_secs(120));
+    let token = match pull_token(&agent, repository) {
+        Ok(token) => token,
+        Err(error) if error.kind() == io::ErrorKind::PermissionDenied => return Ok(Tagged::Denied),
+        Err(error) => return Err(error),
+    };
+    let response = agent
+        .get(format!("https://ghcr.io/v2/{repository}/manifests/{tag}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Accept", "application/vnd.oci.image.manifest.v1+json")
+        .call();
+    let mut response = match response {
+        Ok(response) => response,
+        Err(ureq::Error::StatusCode(404)) => return Ok(Tagged::Missing),
+        Err(ureq::Error::StatusCode(401 | 403)) => return Ok(Tagged::Denied),
+        Err(error) => {
+            return Err(io::Error::other(format!(
+                "cannot read GHCR manifest {repository}:{tag}: {error}"
+            )))
+        }
+    };
+    let mut bytes = Vec::new();
+    response
+        .body_mut()
+        .as_reader()
+        .take(1 << 20)
+        .read_to_end(&mut bytes)?;
+    Ok(Tagged::Manifest(bytes))
+}
+
+fn agent(timeout: Duration) -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .https_only(true)
+        .timeout_resolve(Some(Duration::from_secs(30)))
+        .timeout_connect(Some(Duration::from_secs(30)))
+        .timeout_send_request(Some(Duration::from_secs(30)))
+        .timeout_recv_response(Some(Duration::from_secs(30)))
+        .timeout_recv_body(Some(Duration::from_secs(30)))
+        .redirect_auth_headers(ureq::config::RedirectAuthHeaders::Never)
+        .timeout_global(Some(timeout))
+        .build()
+        .into()
+}
+
+fn pull_token(agent: &ureq::Agent, repository: &str) -> io::Result<String> {
+    let mut response = agent
+        .get("https://ghcr.io/token")
+        .query("service", "ghcr.io")
+        .query("scope", format!("repository:{repository}:pull"))
+        .call()
+        .map_err(|error| match error {
+            ureq::Error::StatusCode(401 | 403) => {
+                io::Error::new(io::ErrorKind::PermissionDenied, "GHCR denied a pull token")
+            }
+            error => io::Error::other(format!("cannot obtain public GHCR pull token: {error}")),
+        })?;
+    let mut bytes = Vec::new();
+    response
+        .body_mut()
+        .as_reader()
+        .take(65537)
+        .read_to_end(&mut bytes)?;
+    parse_token(&bytes)
 }
 
 pub fn validate_repository(repository: &str) -> Result<(), String> {

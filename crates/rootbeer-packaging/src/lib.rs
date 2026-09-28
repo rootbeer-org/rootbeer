@@ -16,6 +16,7 @@ pub use published::PublishedDependencies;
 mod publish_records;
 mod receipt;
 mod release;
+pub mod selection;
 pub use package_plan::{plan_packages, PackageTask};
 pub use publish_records::publish_records;
 pub use release::{push_package, release_package, Signer};
@@ -24,6 +25,7 @@ mod sign;
 pub use sign::sign_package_record;
 
 pub mod upstream;
+pub mod work;
 pub use upstream::{discover_updates, UpdateReport};
 
 #[cfg(test)]

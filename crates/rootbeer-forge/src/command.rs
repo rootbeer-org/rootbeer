@@ -15,29 +15,39 @@ pub struct Args {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Plan exact dependency-free packages for this machine
-    PackagePlan {
+    /// Plan the work this machine builds, reuses, or recovers, and every unpublished dependency
+    Plan {
         #[arg(required = true)]
         packages: Vec<String>,
+        #[arg(short, long, default_value = "plan.json")]
+        output: PathBuf,
+        /// Where records of reused results are saved for publication
         #[arg(long)]
-        context: String,
-        #[command(flatten)]
-        published: Published,
+        records: Option<PathBuf>,
+        /// Identity of this machine's image; detected by default
+        #[arg(long)]
+        context: Option<String>,
     },
-    /// Verify a signed package result against the requested identity and input key
-    VerifyRecord {
-        reference: String,
+    /// Build one task of a plan, installing the dependency builds earlier jobs made
+    Build {
+        plan: PathBuf,
+        task: String,
+        #[arg(short, long, default_value = "result")]
+        output: PathBuf,
+        /// Directory holding the handed-in dependency builds
+        #[arg(long, default_value = "dependency-builds")]
+        dependencies: PathBuf,
+        /// Persistent build result cache
         #[arg(long)]
-        package: String,
+        cache: Option<PathBuf>,
+        /// Identity of this machine's image; detected by default
         #[arg(long)]
-        system: String,
-        #[arg(long)]
-        input_key: String,
-        #[arg(long)]
-        public_key: String,
-        /// Save the verified signed bytes for discovery publication
-        #[arg(long)]
-        output: Option<PathBuf>,
+        context: Option<String>,
+    },
+    /// Steps of the GitHub Actions workflows
+    Ci {
+        #[command(subcommand)]
+        command: crate::ci::Ci,
     },
     /// Approve one qualified package and prepare its signed package release
     Release {
@@ -115,14 +125,11 @@ enum Command {
         #[arg(long)]
         receipt: Option<PathBuf>,
     },
-    /// Inspect the dependency graph without executing builds
-    Plan { name: String },
+    /// Show the dependency graph a package builds with
+    Graph { name: String },
     /// Prepare a source or upstream binary recipe as an installable local artifact
     Prepare {
         name: String,
-        /// Fail before building if this machine differs from the work plan
-        #[arg(long, requires = "cache_context")]
-        input_key: Option<String>,
         /// Pinned tools, SDK/sysroot inputs, and build variables
         #[arg(long)]
         environment: Option<PathBuf>,
@@ -209,9 +216,11 @@ pub fn run(args: Args) {
 }
 
 fn execute(args: Args) -> Result<(), String> {
+    let config = crate::config::Config::load()?;
     let definitions = args
         .catalog
         .as_deref()
+        .or(config.catalog.as_deref())
         .map(PackageDefinition::from_directory)
         .transpose()?;
     let local_catalog = definitions
@@ -220,54 +229,68 @@ fn execute(args: Args) -> Result<(), String> {
         .transpose()?;
     let catalog = || {
         local_catalog.as_ref().ok_or_else(|| {
-            "this command requires --catalog pointing to a PDR recipe directory".to_string()
+            "this command requires --catalog, or `catalog` in forge.toml, naming a PDR recipe directory".to_string()
         })
     };
     let mut output = io::stdout().lock();
     match args.command {
-        Command::PackagePlan {
+        Command::Plan {
             packages,
+            output: destination,
+            records,
             context,
-            published,
         } => {
-            let pdr = published.resolver()?;
-            let tasks = rootbeer_packaging::plan_packages(
+            let plan = rootbeer_packaging::work::plan_work(
                 catalog()?,
                 &packages,
-                &rootbeer_packaging::BuildOptions::default(),
-                &context,
-                pdr.as_ref(),
+                &context.unwrap_or_else(crate::config::detect_context),
+                &config.distribution()?,
+                &mut |_| Ok(None),
+                records.as_deref(),
             )?;
-            writeln!(
-                output,
-                "{}",
-                serde_json::to_string(&tasks).map_err(|error| error.to_string())?
+            std::fs::write(
+                &destination,
+                serde_json::to_vec_pretty(&plan).map_err(|error| error.to_string())?,
             )
             .map_err(|error| error.to_string())?;
+            write!(output, "{}", crate::ci::describe(&plan)).map_err(|error| error.to_string())?;
         }
-        Command::VerifyRecord {
-            reference,
-            package,
-            system,
-            input_key,
-            public_key,
+        Command::Build {
+            plan,
+            task,
             output: destination,
+            dependencies,
+            cache,
+            context,
         } => {
-            let bytes = rootbeer_packaging::distribution::read_record(&reference)?;
-            let record = rootbeer_packaging::distribution::verify_record(
-                &bytes,
-                &public_key,
-                &package,
-                &system,
+            let plan = rootbeer_packaging::work::WorkPlan::read(&plan)?;
+            let cache = cache.unwrap_or_else(|| std::env::temp_dir().join("rootbeer-forge-cache"));
+            let outcome = rootbeer_packaging::work::build_task(
+                catalog()?,
+                &plan,
+                &task,
+                &destination,
+                &dependencies,
+                &cache,
+                &context.unwrap_or_else(crate::config::detect_context),
             )?;
-            if record.input_key() != input_key {
-                return Err("signed package inputs differ from the requested work".into());
+            let summary = serde_json::to_vec_pretty(&outcome).map_err(|error| error.to_string())?;
+            std::fs::write(destination.join("build.json"), &summary)
+                .map_err(|error| error.to_string())?;
+            match outcome {
+                rootbeer_packaging::work::Outcome::Built { key } => {
+                    writeln!(output, "built {task} as inputs-{key}")
+                }
+                rootbeer_packaging::work::Outcome::Reused { record, .. } => {
+                    writeln!(
+                        output,
+                        "reused {task}, published after planning as {record}"
+                    )
+                }
             }
-            if let Some(destination) = destination {
-                std::fs::write(destination, bytes).map_err(|error| error.to_string())?;
-            }
-            writeln!(output, "{reference}").map_err(|error| error.to_string())?;
+            .map_err(|error| error.to_string())?;
         }
+        Command::Ci { command } => crate::ci::run(command, &config, local_catalog.as_ref())?,
         Command::PublishRecords {
             mut record,
             records,
@@ -495,7 +518,7 @@ fn execute(args: Args) -> Result<(), String> {
             .map_err(|error| error.to_string())?;
             report.validate()?;
         }
-        Command::Plan { name } => {
+        Command::Graph { name } => {
             catalog()?.validate()?;
             let graph = rootbeer_packaging::graph::DependencyGraph::new(
                 catalog()?,
@@ -511,7 +534,6 @@ fn execute(args: Args) -> Result<(), String> {
         }
         Command::Prepare {
             name,
-            input_key,
             environment,
             isolate,
             output: destination,
@@ -525,21 +547,6 @@ fn execute(args: Args) -> Result<(), String> {
         } => {
             let pdr = published.resolver()?;
             let environment = read_environment(environment)?;
-            if let Some(expected) = input_key {
-                if isolate || environment.is_some() {
-                    return Err("package-plan currently requires the host environment".into());
-                }
-                let tasks = rootbeer_packaging::plan_packages(
-                    catalog()?,
-                    std::slice::from_ref(&name),
-                    &rootbeer_packaging::BuildOptions::default(),
-                    cache_context.as_deref().unwrap(),
-                    pdr.as_ref(),
-                )?;
-                if tasks.len() != 1 || tasks[0].key != expected {
-                    return Err("package inputs or build environment changed since planning".into());
-                }
-            }
             let cache = cache.map(|directory| rootbeer_packaging::BuildCache {
                 directory,
                 context: cache_context.unwrap(),
