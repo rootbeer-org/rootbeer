@@ -217,8 +217,7 @@ fn library_recipes_separate_inputs_builds_and_exports() {
         PackageCatalog::from_directory(directory.path())
     };
     let catalog = load(source).unwrap();
-    let build = catalog.packages["library"].versions["1"].platforms
-        [&ResolveContext::current().system]
+    let build = catalog.packages["library"].versions["1"].platforms["aarch64-macos"]
         .build
         .as_ref()
         .unwrap();
