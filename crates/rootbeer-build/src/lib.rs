@@ -686,7 +686,7 @@ fn compile(
         .iter()
         .map(|(key, directory)| (dependency_roots[key].clone(), directory.clone()))
         .collect::<BTreeMap<_, _>>();
-    let rpaths = relocate::rpaths(&relocation_roots)?;
+    let rpaths = relocate::link_flags(&prefix, &relocation_roots, &build.libraries)?;
     if !rpaths.is_empty() {
         append_flags(&mut environment, "LDFLAGS", &rpaths);
         match build.backend {

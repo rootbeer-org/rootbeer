@@ -37,28 +37,50 @@ impl Relocation<'_> {
 
     fn file(&self, path: &Path, depth: usize) -> Result<(), String> {
         let mut bytes = fs::read(path).map_err(|error| error.to_string())?;
-        let is_changed = if bytes.starts_with(b"\x7fELF") {
-            self.elf(&mut bytes, depth)?
-        } else {
-            self.mach(&mut bytes, depth)?
-        };
-        if !is_changed {
-            return Ok(());
+        let is_signed = is_signed(&bytes)?;
+        if bytes.starts_with(b"\x7fELF") {
+            if !self.elf(&mut bytes, depth)? {
+                return Ok(());
+            }
+            return fs::write(path, &bytes).map_err(|error| error.to_string());
         }
 
-        fs::write(path, &bytes).map_err(|error| error.to_string())?;
-        if is_signed(&bytes)? {
-            let status = Command::new("/usr/bin/codesign")
-                .args(["--force", "--sign", "-"])
-                .arg(path)
-                .output()
-                .map_err(|error| format!("codesign: {error}"))?;
-            if !status.status.success() {
-                return Err(format!(
-                    "codesign: {}",
-                    String::from_utf8_lossy(&status.stderr).trim()
-                ));
+        let edits = self.mach(&bytes, depth)?;
+        if edits.is_empty() {
+            return Ok(());
+        }
+        if edits.iter().all(MachEdit::fits) {
+            for edit in &edits {
+                bytes[edit.start..edit.end].fill(0);
+                bytes[edit.start..edit.start + edit.new.len()].copy_from_slice(edit.new.as_bytes());
             }
+            fs::write(path, &bytes).map_err(|error| error.to_string())?;
+        } else {
+            // Longer names go through the header padding the build linked with.
+            let mut arguments: Vec<Vec<&str>> = Vec::new();
+            for edit in &edits {
+                let argument = match edit.kind {
+                    MachKind::Rpath => vec!["-rpath", edit.old.as_str(), edit.new.as_str()],
+                    MachKind::Identity => vec!["-id", edit.new.as_str()],
+                    MachKind::Load => vec!["-change", edit.old.as_str(), edit.new.as_str()],
+                };
+                if !arguments.contains(&argument) {
+                    arguments.push(argument);
+                }
+            }
+            run_tool(
+                Command::new("/usr/bin/install_name_tool")
+                    .args(arguments.concat())
+                    .arg(path),
+            )?;
+        }
+
+        if is_signed {
+            run_tool(
+                Command::new("/usr/bin/codesign")
+                    .args(["--force", "--sign", "-"])
+                    .arg(path),
+            )?;
         }
         Ok(())
     }
@@ -102,18 +124,23 @@ impl Relocation<'_> {
         is_installed.then_some(rest)
     }
 
+    /// Relocates each entry of a search path, dropping entries that relocate to one already
+    /// listed, which also leaves room for the longer loader-relative forms.
     fn rewrite_list(&self, value: &str, token: &str, depth: usize) -> Option<String> {
         let mut is_changed = false;
-        let entries: Vec<String> = value
-            .split(':')
-            .map(|entry| match self.rewrite(entry, token, depth) {
+        let mut entries: Vec<String> = Vec::new();
+        for entry in value.split(':') {
+            let entry = match self.rewrite(entry, token, depth) {
                 Some(relocated) => {
                     is_changed = true;
                     relocated
                 }
                 None => entry.to_string(),
-            })
-            .collect();
+            };
+            if !entries.contains(&entry) {
+                entries.push(entry);
+            }
+        }
         is_changed.then(|| entries.join(":"))
     }
 
@@ -179,7 +206,7 @@ impl Relocation<'_> {
         Ok(is_changed)
     }
 
-    fn mach(&self, bytes: &mut [u8], depth: usize) -> Result<bool, String> {
+    fn mach(&self, bytes: &[u8], depth: usize) -> Result<Vec<MachEdit>, String> {
         let slices = match goblin::mach::Mach::parse(bytes).map_err(|error| error.to_string())? {
             goblin::mach::Mach::Binary(_) => vec![0],
             goblin::mach::Mach::Fat(fat) => fat
@@ -199,22 +226,24 @@ impl Relocation<'_> {
             let mach =
                 goblin::mach::MachO::parse(&bytes[base..], 0).map_err(|error| error.to_string())?;
             for command in &mach.load_commands {
-                let (name, size, is_identity) = match command.command {
-                    CommandVariant::Rpath(rpath) => (rpath.path, rpath.cmdsize, false),
-                    CommandVariant::IdDylib(dylib) => (dylib.dylib.name, dylib.cmdsize, true),
+                let (name, size, kind) = match command.command {
+                    CommandVariant::Rpath(rpath) => (rpath.path, rpath.cmdsize, MachKind::Rpath),
+                    CommandVariant::IdDylib(dylib) => {
+                        (dylib.dylib.name, dylib.cmdsize, MachKind::Identity)
+                    }
                     CommandVariant::LoadDylib(dylib)
                     | CommandVariant::LoadWeakDylib(dylib)
                     | CommandVariant::ReexportDylib(dylib)
                     | CommandVariant::LazyLoadDylib(dylib)
                     | CommandVariant::LoadUpwardDylib(dylib) => {
-                        (dylib.dylib.name, dylib.cmdsize, false)
+                        (dylib.dylib.name, dylib.cmdsize, MachKind::Load)
                     }
                     _ => continue,
                 };
                 let start = base + command.offset + name as usize;
                 let end = base + command.offset + size as usize;
                 let old = c_string(&bytes[..end], start)?;
-                let new = if is_identity {
+                let new = if kind == MachKind::Identity {
                     let path = Path::new(old);
                     let is_own = path.starts_with(self.prefix) || self.installed(path).is_some();
                     is_own.then(|| format!("@rpath/{}", file_name(old)))
@@ -224,20 +253,49 @@ impl Relocation<'_> {
                 let Some(new) = new else {
                     continue;
                 };
-                if new.len() >= end - start {
-                    return Err(format!("relocated load path {new} does not fit in {old}"));
-                }
-                edits.push((start, end, new));
+                let old = old.to_string();
+                edits.push(MachEdit {
+                    kind,
+                    start,
+                    end,
+                    old,
+                    new,
+                });
             }
         }
-
-        let is_changed = !edits.is_empty();
-        for (start, end, new) in edits {
-            bytes[start..end].fill(0);
-            bytes[start..start + new.len()].copy_from_slice(new.as_bytes());
-        }
-        Ok(is_changed)
+        Ok(edits)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MachKind {
+    Rpath,
+    Identity,
+    Load,
+}
+
+/// One load command string and what it becomes.
+struct MachEdit {
+    kind: MachKind,
+    start: usize,
+    end: usize,
+    old: String,
+    new: String,
+}
+
+impl MachEdit {
+    /// Whether the new string and its terminator fit in the command as linked.
+    fn fits(&self) -> bool {
+        self.new.len() < self.end - self.start
+    }
+}
+
+fn run_tool(command: &mut Command) -> Result<(), String> {
+    let output = command.output().map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    Ok(())
 }
 
 fn collect(directory: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
@@ -319,21 +377,41 @@ fn is_signed(bytes: &[u8]) -> Result<bool, String> {
     }
 }
 
-/// Linker flags that make runtime dependencies loadable from build-tree and installed binaries.
-pub(crate) fn rpaths(runtime: &BTreeMap<PathBuf, PathBuf>) -> Result<Vec<String>, String> {
+/// Linker flags that make runtime dependencies loadable from build-tree and installed binaries,
+/// let a package that exports shared libraries load its own, and on macOS leave room for
+/// relocated names longer than the ones linked.
+pub(crate) fn link_flags(
+    prefix: &Path,
+    runtime: &BTreeMap<PathBuf, PathBuf>,
+    libraries: &[PathBuf],
+) -> Result<Vec<String>, String> {
+    let is_shared = libraries.iter().any(|library| {
+        library
+            .extension()
+            .is_some_and(|extension| extension == "so" || extension == "dylib")
+    });
     let mut flags = Vec::new();
+    if cfg!(target_os = "macos") && (is_shared || !runtime.is_empty()) {
+        flags.push("-Wl,-headerpad_max_install_names".to_string());
+    }
+    let mut directories = Vec::new();
+    if is_shared {
+        directories.push(prefix.join("lib"));
+    }
     for root in runtime.keys() {
         for directory in ["lib", "lib64"] {
             let path = root.join(directory);
-            if !path.is_dir() {
-                continue;
+            if path.is_dir() {
+                directories.push(path);
             }
-            let path = path.to_str().ok_or("runtime path must be UTF-8")?;
-            if path.contains(char::is_whitespace) {
-                return Err(format!("runtime path {path} contains whitespace"));
-            }
-            flags.push(format!("-Wl,-rpath,{path}"));
         }
+    }
+    for path in directories {
+        let path = path.to_str().ok_or("runtime path must be UTF-8")?;
+        if path.contains(char::is_whitespace) {
+            return Err(format!("runtime path {path} contains whitespace"));
+        }
+        flags.push(format!("-Wl,-rpath,{path}"));
     }
     Ok(flags)
 }
@@ -381,7 +459,7 @@ mod tests {
         assert_eq!(relocation.rewrite("$ORIGIN/../lib", "$ORIGIN", 1), None);
         assert_eq!(
             relocation.rewrite_list("$ORIGIN/../lib:/build/prefix/lib", "$ORIGIN", 1),
-            Some("$ORIGIN/../lib:$ORIGIN/../lib".into())
+            Some("$ORIGIN/../lib".into())
         );
         assert_eq!(
             relocation.rewrite_list("$ORIGIN/../lib", "$ORIGIN", 1),
