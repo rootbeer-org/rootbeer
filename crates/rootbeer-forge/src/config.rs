@@ -40,6 +40,20 @@ pub struct Ci {
     /// Paths a promoted run must have verified with exactly the approved content.
     #[serde(default)]
     pub trusted: Vec<String>,
+    /// The engine whose CI-verified main commits the catalog's own recipe follows.
+    pub engine: Option<Engine>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub struct Engine {
+    pub repository: String,
+    /// The recipe built from it.
+    pub package: String,
+    /// The workflow whose success on main verifies a commit.
+    pub workflow: String,
+    /// Cargo manifest, relative to the repository, whose version the recipe's versions carry.
+    pub manifest: String,
 }
 
 impl Config {
@@ -76,6 +90,13 @@ impl Config {
             .get(system)
             .map(String::as_str)
             .ok_or_else(|| format!("{FILE} names no CI runner for {system}"))
+    }
+
+    pub fn engine(&self) -> Result<&Engine, String> {
+        self.ci
+            .engine
+            .as_ref()
+            .ok_or(format!("{FILE} does not name the engine under [ci.engine]"))
     }
 
     pub fn workflow(&self) -> Result<&str, String> {

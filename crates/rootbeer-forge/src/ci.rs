@@ -45,6 +45,17 @@ pub enum Ci {
     },
     /// Find the builds of a task's dependencies this run uploaded, for download by ID
     Dependencies { plan: PathBuf, task: String },
+    /// Advance the engine's recipe to the newest main commit its CI verified
+    Engine {
+        /// Only report whether there is one, as the `changed` output
+        #[arg(long)]
+        probe: bool,
+    },
+    /// Open or update the reviewed pull requests proposing discovered recipe updates
+    Propose {
+        #[arg(required = true)]
+        packages: Vec<String>,
+    },
 }
 
 pub fn run(command: Ci, config: &Config, catalog: Option<&PackageCatalog>) -> Result<(), String> {
@@ -74,6 +85,11 @@ pub fn run(command: Ci, config: &Config, catalog: Option<&PackageCatalog>) -> Re
             output: path,
             records,
         } => plan(config, catalog()?, &packages, reuse_run, &path, &records),
+        Ci::Engine { probe } => {
+            let directory = config.catalog.as_deref().unwrap_or(Path::new("packages"));
+            crate::discovery::advance_engine(config, directory, probe)
+        }
+        Ci::Propose { packages } => crate::discovery::propose(config, &packages),
         Ci::Dependencies { plan, task } => {
             let plan = WorkPlan::read(&plan)?;
             let Work::Build { dependencies, .. } = &plan.task(&task)?.work else {
@@ -314,7 +330,7 @@ pub fn output(name: &str, value: &str) -> Result<(), String> {
     append("GITHUB_OUTPUT", &format!("{name}={value}\n"))
 }
 
-fn summary(text: &str) -> Result<(), String> {
+pub fn summary(text: &str) -> Result<(), String> {
     append("GITHUB_STEP_SUMMARY", text)
 }
 

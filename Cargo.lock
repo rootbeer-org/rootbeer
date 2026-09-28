@@ -1645,10 +1645,13 @@ dependencies = [
 name = "rootbeer-forge"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "clap",
+ "flate2",
  "rootbeer-packaging",
  "serde",
  "serde_json",
+ "tar",
  "tempfile",
  "toml 1.0.3+spec-1.1.0",
  "ureq",

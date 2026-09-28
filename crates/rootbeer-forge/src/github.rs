@@ -37,38 +37,78 @@ impl GitHub {
         })
     }
 
-    fn request(&self, path: &str) -> Result<String, String> {
+    fn request(&self, method: &str, path: &str, body: Option<&Value>) -> Result<String, String> {
         let url = format!("{API}/{}", path.trim_start_matches('/'));
-        let mut response = self
-            .agent
-            .get(&url)
+        let request = ureq::http::Request::builder()
+            .method(method)
+            .uri(&url)
             .header("Authorization", format!("Bearer {}", self.token))
             .header("Accept", "application/vnd.github+json")
             .header("X-GitHub-Api-Version", "2022-11-28")
-            .header("User-Agent", "rootbeer-forge")
-            .call()
-            .map_err(|error| format!("GET {url}: {error}"))?;
+            .header("User-Agent", "rootbeer-forge");
+        let payload = body.map(Value::to_string).unwrap_or_default();
+        let request = request
+            .body(payload)
+            .map_err(|error| format!("{method} {url}: {error}"))?;
+        let mut response = self
+            .agent
+            .run(request)
+            .map_err(|error| format!("{method} {url}: {error}"))?;
         let mut text = String::new();
         response
             .body_mut()
             .as_reader()
             .take(64 << 20)
             .read_to_string(&mut text)
-            .map_err(|error| format!("GET {url}: {error}"))?;
+            .map_err(|error| format!("{method} {url}: {error}"))?;
         Ok(text)
     }
 
-    pub fn get(&self, path: &str) -> Result<Value, String> {
-        serde_json::from_str(&self.request(path)?).map_err(|error| format!("{path}: {error}"))
+    fn json(&self, method: &str, path: &str, body: Option<&Value>) -> Result<Value, String> {
+        let text = self.request(method, path, body)?;
+        if text.is_empty() {
+            return Ok(Value::Null);
+        }
+        serde_json::from_str(&text).map_err(|error| format!("{path}: {error}"))
     }
 
-    /// Every item of a paginated collection whose pages list them under `field`.
+    pub fn get(&self, path: &str) -> Result<Value, String> {
+        self.json("GET", path, None)
+    }
+
+    pub fn post(&self, path: &str, body: &Value) -> Result<Value, String> {
+        self.json("POST", path, Some(body))
+    }
+
+    pub fn patch(&self, path: &str, body: &Value) -> Result<Value, String> {
+        self.json("PATCH", path, Some(body))
+    }
+
+    /// Runs a GraphQL operation, for what the REST API cannot do, such as enabling auto-merge.
+    pub fn graphql(&self, query: &str, variables: Value) -> Result<Value, String> {
+        let response = self.post(
+            "graphql",
+            &serde_json::json!({"query": query, "variables": variables}),
+        )?;
+        if let Some(errors) = response.get("errors").filter(|errors| !errors.is_null()) {
+            return Err(format!("GraphQL: {errors}"));
+        }
+        Ok(response["data"].clone())
+    }
+
+    /// Every item of a paginated collection whose pages list them under `field`, or are
+    /// themselves the list when `field` is empty.
     pub fn all(&self, path: &str, field: &str) -> Result<Vec<Value>, String> {
         let separator = if path.contains('?') { '&' } else { '?' };
         let mut items = Vec::new();
         for page in 1.. {
             let response = self.get(&format!("{path}{separator}per_page=100&page={page}"))?;
-            let batch = response[field]
+            let batch = if field.is_empty() {
+                &response
+            } else {
+                &response[field]
+            };
+            let batch = batch
                 .as_array()
                 .ok_or_else(|| format!("{path}: no {field} list"))?;
             items.extend(batch.iter().cloned());
@@ -80,7 +120,7 @@ impl GitHub {
     }
 
     fn text(&self, path: &str) -> Result<String, String> {
-        self.request(path)
+        self.request("GET", path, None)
     }
 
     fn merged_pulls(&self, sha: &str) -> Result<Vec<Value>, String> {
