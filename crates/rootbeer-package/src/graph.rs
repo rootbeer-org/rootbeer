@@ -153,6 +153,9 @@ pub struct DependencyExports {
     pub has_bins: bool,
     pub has_libraries: bool,
     pub libraries: Vec<std::path::PathBuf>,
+    /// Linked as shared libraries, so version aliases and cmake packages are exported too.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_shared: bool,
 }
 
 fn exports(
@@ -168,6 +171,7 @@ fn exports(
     let entry = visible.entry(package.into()).or_default();
     entry.has_bins |= matches!(kind, DependencyKind::All | DependencyKind::Build);
     entry.has_libraries |= kind != DependencyKind::Build;
+    entry.is_shared |= kind == DependencyKind::LinkRuntime;
     if kind == DependencyKind::Build {
         return;
     }
@@ -178,7 +182,11 @@ fn exports(
         {
             continue;
         }
-        let kind = if matches!(kind, DependencyKind::Link | DependencyKind::LinkRuntime) {
+        let kind = if kind == DependencyKind::LinkRuntime
+            && dependency.kind() == DependencyKind::LinkRuntime
+        {
+            DependencyKind::LinkRuntime
+        } else if matches!(kind, DependencyKind::Link | DependencyKind::LinkRuntime) {
             DependencyKind::Link
         } else {
             dependency.kind()
@@ -358,6 +366,9 @@ mod tests {
             assert!(root.exports[name].has_libraries);
             assert!(!root.exports[name].has_bins);
         }
+        assert!(!root.exports["static@1"].is_shared);
+        assert!(root.exports["shared@1"].is_shared);
+        assert!(root.exports["base@1"].is_shared);
     }
 
     #[test]

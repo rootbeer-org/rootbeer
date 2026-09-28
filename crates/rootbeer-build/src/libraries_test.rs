@@ -168,11 +168,12 @@ fn library_exports_reject_collisions_escapes_and_thin_archives() {
     fs::write(&archive, "!<thin>\n").unwrap();
     assert!(dependencies::validate(&package, &libraries).is_err());
     fs::write(&archive, "!<arch>\n").unwrap();
-    dependencies::stage(&package, &libraries, &root.join("merged")).unwrap();
+    dependencies::stage(&package, &libraries, false, &root.join("merged")).unwrap();
     symlink(&package, root.join("package-alias")).unwrap();
     dependencies::stage(
         &root.join("package-alias"),
         &libraries,
+        false,
         &root.join("alias-exports"),
     )
     .unwrap();
@@ -184,7 +185,7 @@ fn library_exports_reject_collisions_escapes_and_thin_archives() {
     fs::create_dir_all(other.join("lib")).unwrap();
     fs::write(other.join("lib/libtest.a"), "!<arch>\n").unwrap();
     assert!(
-        dependencies::stage(&other, &libraries, &root.join("merged"))
+        dependencies::stage(&other, &libraries, false, &root.join("merged"))
             .unwrap_err()
             .contains("collision")
     );
@@ -193,6 +194,51 @@ fn library_exports_reject_collisions_escapes_and_thin_archives() {
     assert!(dependencies::validate(&package, &libraries)
         .unwrap_err()
         .contains("escapes"));
+}
+
+#[test]
+fn shared_exports_carry_version_aliases_and_cmake_packages() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let package = root.join("package");
+    fs::create_dir_all(package.join("lib/cmake/Test")).unwrap();
+    fs::write(package.join("lib/cmake/Test/TestConfig.cmake"), "").unwrap();
+    fs::write(root.join("test.c"), "int test(void) { return 1; }").unwrap();
+    let (real, aliases) = if cfg!(target_os = "macos") {
+        ("libtest.1.2.dylib", ["libtest.1.dylib", "libtest.dylib"])
+    } else {
+        ("libtest.so.1.2", ["libtest.so.1", "libtest.so"])
+    };
+    let shared = if cfg!(target_os = "macos") {
+        "-dynamiclib"
+    } else {
+        "-shared"
+    };
+    assert!(Command::new("cc")
+        .args([shared, "-fPIC", "-o"])
+        .arg(package.join("lib").join(real))
+        .arg(root.join("test.c"))
+        .status()
+        .unwrap()
+        .success());
+    symlink(real, package.join("lib").join(aliases[0])).unwrap();
+    symlink(aliases[0], package.join("lib").join(aliases[1])).unwrap();
+    let libraries = vec![PathBuf::from("lib").join(aliases[1])];
+
+    dependencies::stage(&package, &libraries, false, &root.join("static")).unwrap();
+    assert!(!root.join("static/lib").join(real).exists());
+    assert!(!root.join("static/lib/cmake").exists());
+
+    dependencies::stage(&package, &libraries, true, &root.join("shared")).unwrap();
+    for name in [real, aliases[0], aliases[1]] {
+        assert_eq!(
+            fs::read_link(root.join("shared/lib").join(name)).unwrap(),
+            package.join("lib").join(real)
+        );
+    }
+    assert!(root
+        .join("shared/lib/cmake/Test/TestConfig.cmake")
+        .is_file());
 }
 
 #[test]

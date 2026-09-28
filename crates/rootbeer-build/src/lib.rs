@@ -339,6 +339,7 @@ fn execute(plan: &BuildPlan, output: &Path, opts: &BuildOptions) -> Result<Build
                     dependencies::stage(
                         &dependency_roots[key],
                         &exports.libraries,
+                        exports.is_shared,
                         &tools.join(".rootbeer-libraries"),
                     )
                     .map_err(|error| format!("{key}: {error}"))?;

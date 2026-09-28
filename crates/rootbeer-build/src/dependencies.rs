@@ -30,26 +30,63 @@ pub fn validate(root: &Path, libraries: &[PathBuf]) -> Result<(), String> {
     Ok(())
 }
 
-pub(crate) fn stage(root: &Path, libraries: &[PathBuf], output: &Path) -> Result<(), String> {
+/// Links a dependency's exports into `output`. Shared exports also carry each library's version
+/// aliases and cmake packages, since consumers find those rather than the declared file.
+pub(crate) fn stage(
+    root: &Path,
+    libraries: &[PathBuf],
+    is_shared: bool,
+    output: &Path,
+) -> Result<(), String> {
     if libraries.is_empty() {
         return Ok(());
     }
     validate(root, libraries)?;
     for library in libraries {
         link(root, library, output)?;
+        if is_shared {
+            for alias in aliases(root, library)? {
+                link(root, &alias, output)?;
+            }
+        }
     }
-    for directory in [
+
+    let mut directories = vec![
         "include",
         "lib/pkgconfig",
         "lib64/pkgconfig",
         "share/pkgconfig",
-    ] {
+    ];
+    if is_shared {
+        directories.extend(["lib/cmake", "lib64/cmake", "share/cmake"]);
+    }
+    for directory in directories {
         let path = root.join(directory);
         if path.try_exists().map_err(|error| error.to_string())? {
             tree(root, Path::new(directory), output)?;
         }
     }
     Ok(())
+}
+
+/// Entries beside `library` that resolve to the same file, such as `libz.so.1` for `libz.so`.
+fn aliases(root: &Path, library: &Path) -> Result<Vec<PathBuf>, String> {
+    let target = contained_file(root, library)?;
+    let parent = library.parent().unwrap_or(Path::new(""));
+    let mut entries = fs::read_dir(root.join(parent))
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    entries.sort_by_key(|entry| entry.file_name());
+
+    let mut aliases = Vec::new();
+    for entry in entries {
+        let relative = parent.join(entry.file_name());
+        if relative != library && fs::canonicalize(entry.path()).ok() == Some(target.clone()) {
+            aliases.push(relative);
+        }
+    }
+    Ok(aliases)
 }
 
 fn contained_file(root: &Path, relative: &Path) -> Result<PathBuf, String> {

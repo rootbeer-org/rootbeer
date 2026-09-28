@@ -314,6 +314,7 @@ mod tests {
                 has_bins: true,
                 has_libraries: true,
                 libraries: vec![PathBuf::from("lib/libcompiler.a")],
+                is_shared: false,
             },
         )]);
         assert_ne!(
@@ -329,6 +330,21 @@ mod tests {
             )
             .unwrap()
         );
+        let exported = |libraries| {
+            key(
+                "xz@1",
+                version.revision,
+                recipe,
+                "aarch64-macos",
+                &dependencies,
+                "sdk-v1",
+                libraries,
+            )
+            .unwrap()
+        };
+        let mut shared = libraries.clone();
+        shared.get_mut("compiler@1").unwrap().is_shared = true;
+        assert_ne!(exported(&libraries), exported(&shared));
         dependencies.get_mut("compiler@1").unwrap().output_sha256 = Some("d".repeat(64));
         assert_ne!(original, digest(version.revision, recipe, &dependencies));
         dependencies.get_mut("compiler@1").unwrap().output_sha256 = None;
