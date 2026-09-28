@@ -173,8 +173,18 @@ pub fn producer(
     )
     .map_err(|error| error.to_string())?;
     let source = event.get("workflow_run").filter(|run| !run.is_null());
+    // A PR run can finish just before its merge; a checkout without the merge waits for the
+    // merge's own run to promote it.
     let pulls = match source {
-        Some(run) => github.merged_pulls(run["head_sha"].as_str().unwrap_or_default())?,
+        Some(run) => github
+            .merged_pulls(run["head_sha"].as_str().unwrap_or_default())?
+            .into_iter()
+            .filter(|pull| {
+                pull["merge_commit_sha"].as_str().is_some_and(|merge| {
+                    git(&["merge-base", "--is-ancestor", merge, "HEAD"]).is_ok()
+                })
+            })
+            .collect(),
         None if env("GITHUB_EVENT_NAME")? == "push" => github.merged_pulls(&env("GITHUB_SHA")?)?,
         None => Vec::new(),
     };
