@@ -120,8 +120,47 @@ impl PackageRecord {
         )
     }
 
+    /// Every runtime input is a published archive that was also built with, at the same output.
+    fn validate_runtime(&self) -> Result<(), String> {
+        let package = &self.artifact.package;
+        if package.runtime_dependencies.is_empty() {
+            return Ok(());
+        }
+        let PackageProvenance::Source(provenance) = &self.provenance else {
+            return Err("only source records may have runtime dependencies".into());
+        };
+
+        for dependency in crate::runtime::closure(package)? {
+            let id = dependency.id();
+            let is_published = matches!(
+                &dependency.source,
+                crate::LockedSource::Url { url, sha256 }
+                    if (url.starts_with("ghcr://") || url.starts_with("https://"))
+                        && rootbeer_catalog::is_sha256(sha256)
+            );
+            let is_archive = dependency.install
+                == crate::LockedInstall::Archive {
+                    format: crate::ArchiveFormat::TarGz,
+                    strip_prefix: None,
+                };
+            if !is_published || !is_archive {
+                return Err(format!(
+                    "{id}: runtime dependency is not a published archive"
+                ));
+            }
+
+            let built = provenance.dependencies.get(&id);
+            if built.map(|built| &built.output_sha256) != dependency.output_sha256.as_ref() {
+                return Err(format!(
+                    "{id}: runtime dependency differs from the build that used it"
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Validates the package contract supported by this schema: build dependencies are
-    /// recorded in provenance, and nothing is needed from another package at runtime.
+    /// recorded in provenance, and runtime dependencies are published archives of those builds.
     pub fn validate(&self) -> Result<(), String> {
         let package = &self.artifact.package;
         if self.schema != 2 {
@@ -137,9 +176,7 @@ impl PackageRecord {
             return Err("invalid package record identity".into());
         }
         self.recipe.validate(&self.system)?;
-        if !package.runtime_dependencies.is_empty() {
-            return Err("package records with runtime dependencies are not supported yet".into());
-        }
+        self.validate_runtime()?;
         if let (Some(build), PackageProvenance::Source(provenance)) =
             (&self.recipe.build, &self.provenance)
         {
@@ -478,16 +515,89 @@ pub(crate) mod tests {
         assert_eq!(rebuilt, built, "outputs are evidence, not inputs");
         let revised = change(|dependency| dependency.inputs.revision = 2);
         assert_ne!(revised, built);
+    }
 
+    #[test]
+    fn runtime_dependencies_must_be_published_archives_of_the_builds_used() {
+        let (bytes, key, id) = signed();
+        let mut record = verify_record(&bytes, &key, &id, "aarch64-linux").unwrap();
+        let runtime = crate::LockedPackage {
+            name: "runtime".into(),
+            version: "1".into(),
+            source: crate::LockedSource::Url {
+                url: format!("ghcr://owner/packages/runtime@sha256:{}", "a".repeat(64)),
+                sha256: "a".repeat(64),
+            },
+            install: crate::LockedInstall::Archive {
+                format: crate::ArchiveFormat::TarGz,
+                strip_prefix: None,
+            },
+            provides: Default::default(),
+            output_sha256: Some("c".repeat(64)),
+            runtime_dependencies: BTreeMap::new(),
+        };
+        record.recipe.build.as_mut().unwrap().dependencies.push(
+            serde_json::from_value(
+                serde_json::json!({"package": "runtime@1", "kind": "link_runtime"}),
+            )
+            .unwrap(),
+        );
         record
             .artifact
             .package
             .runtime_dependencies
-            .insert("runtime@1".into(), record.artifact.package.clone());
-        assert!(record
-            .validate()
-            .unwrap_err()
-            .contains("runtime dependencies"));
+            .insert(runtime.id(), runtime);
+        let PackageProvenance::Source(provenance) = &mut record.provenance else {
+            panic!()
+        };
+        provenance.dependencies.insert(
+            "runtime@1".into(),
+            BuiltDependency {
+                inputs: DependencyInputs {
+                    revision: 1,
+                    recipe_sha256: "a".repeat(64),
+                    engine_sha256: "b".repeat(64),
+                },
+                output_sha256: "c".repeat(64),
+            },
+        );
+        record.validate().unwrap();
+
+        let rejects = |edit: fn(&mut crate::LockedPackage), expected: &str| {
+            let mut changed = record.clone();
+            edit(
+                changed
+                    .artifact
+                    .package
+                    .runtime_dependencies
+                    .get_mut("runtime@1")
+                    .unwrap(),
+            );
+            let error = changed.validate().unwrap_err();
+            assert!(error.contains(expected), "{error}");
+        };
+        rejects(
+            |runtime| runtime.output_sha256 = Some("d".repeat(64)),
+            "differs from the build",
+        );
+        rejects(
+            |runtime| {
+                runtime.source = crate::LockedSource::Url {
+                    url: "http://example.org/runtime.tar.gz".into(),
+                    sha256: "a".repeat(64),
+                }
+            },
+            "not a published archive",
+        );
+        rejects(
+            |runtime| {
+                runtime.install = crate::LockedInstall::Binary {
+                    path: "bin/runtime".into(),
+                }
+            },
+            "not a published archive",
+        );
+        rejects(|runtime| runtime.output_sha256 = None, "SHA-256");
     }
 
     #[test]

@@ -20,8 +20,9 @@ use crate::{
 };
 use rootbeer_catalog::decode_hex;
 
-/// The highest `min_engine_level` this build can install.
-pub const ENGINE_LEVEL: u32 = 1;
+/// The highest `min_engine_level` this build can install. Level 2 adds records with runtime
+/// dependencies.
+pub const ENGINE_LEVEL: u32 = 2;
 
 /// A PDR as a client knows it: where its root is published and who signs it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
