@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -38,23 +39,34 @@ pub fn publish(
     fs::create_dir_all(records).map_err(|error| error.to_string())?;
     let releases = tempfile::tempdir().map_err(|error| error.to_string())?;
 
+    let mut builds = builds(directory)?;
+    builds.sort_by_cached_key(|build| closure_size(build));
+
     let mut text = String::new();
     let mut failures = Vec::new();
     let mut done = Vec::new();
-    for build in builds(directory)? {
-        let result = release(catalog, plan, &build, releases.path(), &signer, public_key).and_then(
-            |(package, key, reference)| {
-                fs::copy(
-                    releases.path().join(&key).join("package.json"),
-                    records.join(format!("{key}.json")),
-                )
-                .map_err(|error| error.to_string())?;
-                Ok((package, reference))
-            },
-        );
+    let mut released = BTreeMap::new();
+    for build in builds {
+        let result = release(
+            catalog,
+            plan,
+            &build,
+            (releases.path(), &released),
+            &signer,
+            public_key,
+        )
+        .and_then(|(package, key, reference)| {
+            fs::copy(
+                releases.path().join(&key).join("package.json"),
+                records.join(format!("{key}.json")),
+            )
+            .map_err(|error| error.to_string())?;
+            Ok((package, key, reference))
+        });
         match result {
-            Ok((package, reference)) => {
+            Ok((package, key, reference)) => {
                 text.push_str(&format!("- Published `{package}`: `{reference}`\n"));
+                released.insert(package.clone(), releases.path().join(key));
                 done.push(package);
             }
             Err(error) => {
@@ -76,13 +88,22 @@ pub fn publish(
     Ok(())
 }
 
+/// Dependencies first: a build's closure strictly contains each of its dependencies' closures.
+fn closure_size(build: &Path) -> usize {
+    fs::read(build.join("receipt.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<BuildArtifact>(&bytes).ok())
+        .map_or(0, |artifact| artifact.dependencies.len())
+}
+
 /// Releases and pushes one build under the key it was built with, or, for a recovered build, the
-/// key its verified run qualified it under.
+/// key its verified run qualified it under. Runtime dependencies released earlier in this job
+/// are referenced from their releases.
 fn release(
     catalog: &PackageCatalog,
     plan: &WorkPlan,
     build: &Path,
-    releases: &Path,
+    (releases, released): (&Path, &BTreeMap<String, PathBuf>),
     signer: &rootbeer_packaging::Signer,
     public_key: &str,
 ) -> Result<(String, String, String), String> {
@@ -109,7 +130,7 @@ fn release(
         &destination,
         signer,
         Some(&key),
-        &Default::default(),
+        released,
     )?;
     let reference = rootbeer_packaging::push_package(&destination, public_key)?;
     Ok((package, key, reference))
