@@ -138,8 +138,8 @@ version, so review them with `rootbeer-forge --catalog packages show <name>`.
 
 ### Templates
 
-URLs, assets, tags, strip prefixes, Go linker variables, configure flags, build
-arguments, build steps, and checks accept these placeholders:
+URLs, assets, tags, strip prefixes, Go linker variables, Rust build environments,
+configure flags, build arguments, build steps, and checks accept these placeholders:
 
 | Placeholder | Value |
 | --- | --- |

@@ -512,6 +512,21 @@ mod tests {
             build.go.as_ref().unwrap().variables["commit"],
             "f".repeat(40)
         );
+
+        let rust = recorded.replace(
+            r#"backend = "go", go = { binaries = { tool = "./cmd" }, variables = { commit = "{commit}" } }"#,
+            r#"backend = "rust", rust = { packages = { "tool" }, environment = { SOURCE = "{commit}" } }"#,
+        );
+        let definition = PackageDefinition::from_lua(&rust).unwrap();
+        assert!(definition.uses_commit());
+        let build = definition.package.versions["1"].platforms["x86_64-linux"]
+            .build
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            build.rust.as_ref().unwrap().environment["SOURCE"],
+            "f".repeat(40)
+        );
     }
 
     #[test]

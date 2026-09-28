@@ -506,6 +506,12 @@ impl Recipe {
                     *value = values.substitute(value)?;
                 }
             }
+            let mut rust = build.rust.clone();
+            if let Some(rust) = rust.as_mut() {
+                for value in rust.environment.values_mut() {
+                    *value = values.substitute(value)?;
+                }
+            }
             let archive = match source.archive.as_deref() {
                 None => crate::ArchiveFormat::default(),
                 Some("tar.gz") => crate::ArchiveFormat::TarGz,
@@ -527,7 +533,7 @@ impl Recipe {
             recipe.build = Some(crate::SourceBuild {
                 git: source.git.clone(),
                 backend: build.backend.clone(),
-                rust: build.rust.clone(),
+                rust,
                 go,
                 url: values.substitute(url)?,
                 sha256: digest.to_string(),
