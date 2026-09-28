@@ -174,6 +174,8 @@ struct Placeholders<'a> {
     tag: &'a str,
     target: Option<&'a str>,
     commit: Option<&'a str>,
+    /// `dylib` or `so`, naming shared libraries the way this platform's loader does.
+    shared_extension: &'a str,
 }
 
 impl Placeholders<'_> {
@@ -181,7 +183,8 @@ impl Placeholders<'_> {
     fn fill(&self, text: &str) -> Result<String, String> {
         let mut value = text
             .replace("{version}", self.version)
-            .replace("{tag}", self.tag);
+            .replace("{tag}", self.tag)
+            .replace("{shared_extension}", self.shared_extension);
         if let Some(target) = self.target {
             value = value.replace("{target}", target);
         }
@@ -339,7 +342,7 @@ impl Recipe {
             .get(system)
             .ok_or_else(|| format!("{}: {system} is not a declared platform", self.name))?;
         let spec = self.shared.overlay(&platform.overrides);
-        self.resolve(version, commit, "", platform, &spec)
+        self.resolve(system, version, commit, "", platform, &spec)
             .map_err(|error| format!("{}@{version} {system}: {error}", self.name))
     }
 
@@ -388,8 +391,15 @@ impl Recipe {
                     .overlay(&entry.overrides);
                 platforms.insert(
                     system.clone(),
-                    self.resolve(version, entry.commit.as_deref(), digest, platform, &spec)
-                        .map_err(|error| format!("{}@{version} {system}: {error}", self.name))?,
+                    self.resolve(
+                        system,
+                        version,
+                        entry.commit.as_deref(),
+                        digest,
+                        platform,
+                        &spec,
+                    )
+                    .map_err(|error| format!("{}@{version} {system}: {error}", self.name))?,
                 );
             }
             versions.insert(
@@ -433,6 +443,7 @@ impl Recipe {
 
     fn resolve(
         &self,
+        system: &str,
         version: &str,
         commit: Option<&str>,
         digest: &str,
@@ -451,6 +462,11 @@ impl Recipe {
             tag: &tag,
             target: platform.target.as_deref(),
             commit,
+            shared_extension: if system.ends_with("-macos") {
+                "dylib"
+            } else {
+                "so"
+            },
         };
         let outputs = spec.outputs.clone().unwrap_or_default();
 
@@ -543,7 +559,14 @@ impl Recipe {
                 args: values.command(&build.args)?,
                 patches: source.patches.clone(),
                 dependencies: build.dependencies.clone(),
-                libraries: build.libraries.clone(),
+                libraries: build
+                    .libraries
+                    .iter()
+                    .map(|library| {
+                        let library = library.to_str().ok_or("library paths must be UTF-8")?;
+                        values.substitute(library).map(PathBuf::from)
+                    })
+                    .collect::<Result<_, String>>()?,
                 steps: build
                     .steps
                     .as_ref()
@@ -659,6 +682,40 @@ mod tests {
             recipe.versions["1.3.1"].digests.keys().collect::<Vec<_>>(),
             vec!["aarch64-macos"]
         );
+    }
+
+    #[test]
+    fn shared_libraries_are_named_by_each_platform_loader() {
+        let digest = "a".repeat(64);
+        let recipe = parse(&format!(
+            r#"{{
+              "name": "zlib", "description": "Compress", "homepage": "https://x",
+              "source": {{ "url": "https://x/zlib-{{version}}.tar.gz", "archive": "tar.gz",
+                          "strip_prefix": "zlib-{{version}}" }},
+              "build": {{ "backend": "autotools", "libraries": ["lib/libz.{{shared_extension}}"] }},
+              "outputs": {{ "bins": [] }},
+              "platforms": {{
+                "aarch64-macos": {{ "default_version": "1" }},
+                "x86_64-linux": {{ "default_version": "1" }}
+              }},
+              "versions": {{ "1": {{ "license": "Zlib",
+                "digests": {{ "aarch64-macos": "{digest}", "x86_64-linux": "{digest}" }} }} }}
+            }}"#
+        ));
+        let package = recipe.expand().unwrap().package;
+        let libraries = |system: &str| {
+            package.versions["1"].platforms[system]
+                .build
+                .as_ref()
+                .unwrap()
+                .libraries
+                .clone()
+        };
+        assert_eq!(
+            libraries("aarch64-macos"),
+            [PathBuf::from("lib/libz.dylib")]
+        );
+        assert_eq!(libraries("x86_64-linux"), [PathBuf::from("lib/libz.so")]);
     }
 
     #[test]
