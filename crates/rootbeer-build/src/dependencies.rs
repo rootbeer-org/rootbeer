@@ -8,11 +8,7 @@ pub fn validate(root: &Path, libraries: &[PathBuf]) -> Result<(), String> {
     let root = root.canonicalize().map_err(|error| error.to_string())?;
     for library in libraries {
         let path = contained_file(&root, library)?;
-        let mut magic = [0; 8];
-        fs::File::open(&path)
-            .and_then(|mut file| file.read_exact(&mut magic))
-            .map_err(|error| format!("{}: {error}", path.display()))?;
-        if &magic == b"!<arch>\n" {
+        if is_archive(&path)? {
             continue;
         }
         let report = crate::audit::audit(&root)?;
@@ -31,7 +27,9 @@ pub fn validate(root: &Path, libraries: &[PathBuf]) -> Result<(), String> {
 }
 
 /// Links a dependency's exports into `output`. Shared exports also carry each library's version
-/// aliases and cmake packages, since consumers find those rather than the declared file.
+/// aliases and cmake packages, since consumers find those rather than the declared file. Static
+/// exports carry only archives, so a library that turns shared stays static for consumers that
+/// have not declared needing it at runtime.
 pub(crate) fn stage(
     root: &Path,
     libraries: &[PathBuf],
@@ -42,7 +40,18 @@ pub(crate) fn stage(
         return Ok(());
     }
     validate(root, libraries)?;
+    let mut archives = Vec::new();
     for library in libraries {
+        if is_archive(&contained_file(root, library)?)? {
+            archives.push(library.clone());
+        }
+    }
+    if !is_shared && archives.is_empty() {
+        return Err("exports only shared libraries; depend on it with `link_runtime`".into());
+    }
+
+    let exports = if is_shared { libraries } else { &archives };
+    for library in exports {
         link(root, library, output)?;
         if is_shared {
             for alias in aliases(root, library)? {
@@ -87,6 +96,14 @@ fn aliases(root: &Path, library: &Path) -> Result<Vec<PathBuf>, String> {
         }
     }
     Ok(aliases)
+}
+
+fn is_archive(path: &Path) -> Result<bool, String> {
+    let mut magic = [0; 8];
+    fs::File::open(path)
+        .and_then(|mut file| file.read_exact(&mut magic))
+        .map_err(|error| format!("{}: {error}", path.display()))?;
+    Ok(&magic == b"!<arch>\n")
 }
 
 fn contained_file(root: &Path, relative: &Path) -> Result<PathBuf, String> {

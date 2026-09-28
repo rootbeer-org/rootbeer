@@ -223,10 +223,17 @@ fn shared_exports_carry_version_aliases_and_cmake_packages() {
         .success());
     symlink(real, package.join("lib").join(aliases[0])).unwrap();
     symlink(aliases[0], package.join("lib").join(aliases[1])).unwrap();
-    let libraries = vec![PathBuf::from("lib").join(aliases[1])];
+    let shared = vec![PathBuf::from("lib").join(aliases[1])];
+    let error = dependencies::stage(&package, &shared, false, &root.join("unlinked")).unwrap_err();
+    assert!(error.contains("link_runtime"), "{error}");
 
+    fs::write(package.join("lib/libtest.a"), "!<arch>\n").unwrap();
+    let libraries = vec![PathBuf::from("lib/libtest.a"), shared[0].clone()];
     dependencies::stage(&package, &libraries, false, &root.join("static")).unwrap();
-    assert!(!root.join("static/lib").join(real).exists());
+    assert!(root.join("static/lib/libtest.a").exists());
+    for name in [real, aliases[0], aliases[1]] {
+        assert!(!root.join("static/lib").join(name).exists(), "{name}");
+    }
     assert!(!root.join("static/lib/cmake").exists());
 
     dependencies::stage(&package, &libraries, true, &root.join("shared")).unwrap();
