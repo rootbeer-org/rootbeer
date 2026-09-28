@@ -400,7 +400,6 @@ fn execute(plan: &BuildPlan, output: &Path, opts: &BuildOptions) -> Result<Build
                 .collect();
             artifact.build_key = cache_entry.as_ref().map(|entry| entry.key().to_string());
             artifact.build_environment = cache.map(|cache| cache.context.clone());
-            pack_runtime(&mut artifact.package, &dependency_roots, &destination)?;
             let locked = artifact.package.clone();
             built = Some(artifact);
             locked
@@ -828,35 +827,6 @@ fn append_flags(environment: &mut BTreeMap<&str, String>, name: &'static str, fl
     environment.insert(name, value.join(" "));
 }
 
-fn pack_runtime(
-    package: &mut LockedPackage,
-    roots: &BTreeMap<String, PathBuf>,
-    output: &Path,
-) -> Result<(), String> {
-    for dependency in package.runtime_dependencies.values_mut() {
-        pack_runtime(dependency, roots, output)?;
-        let root = roots
-            .get(&dependency.id())
-            .ok_or("missing runtime output")?;
-        let directory = output.join("runtime");
-        fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
-        let archive = directory.join(format!(
-            "{}.tar.gz",
-            rootbeer_package::runtime::store_directory(dependency)?.display()
-        ));
-        pack(root, &archive).map_err(|e| e.to_string())?;
-        dependency.source = LockedSource::File {
-            sha256: hash_file(&archive).map_err(|e| e.to_string())?,
-            path: archive,
-        };
-        dependency.install = LockedInstall::Archive {
-            format: ArchiveFormat::TarGz,
-            strip_prefix: None,
-        };
-    }
-    Ok(())
-}
-
 fn runtime_dependencies(
     build: &SourceBuild,
     dependencies: &BTreeMap<String, LockedPackage>,
@@ -909,8 +879,12 @@ fn audit_output(
 }
 
 fn install_spec(package: &LockedPackage, output: &Path) -> Result<serde_json::Value, String> {
-    let LockedSource::File { path, sha256 } = &package.source else {
-        return Err("build install files require local archives".into());
+    let source = match &package.source {
+        LockedSource::File { path, sha256 } => {
+            serde_json::json!({"file": local_archive(path, sha256, output)?, "sha256": sha256})
+        }
+        LockedSource::Url { url, sha256 } => serde_json::json!({"url": url, "sha256": sha256}),
+        LockedSource::Path { .. } => return Err("build install files require archives".into()),
     };
     let runtime = package
         .runtime_dependencies
@@ -918,7 +892,7 @@ fn install_spec(package: &LockedPackage, output: &Path) -> Result<serde_json::Va
         .map(|(key, package)| Ok((key.clone(), install_spec(package, output)?)))
         .collect::<Result<BTreeMap<_, _>, String>>()?;
     let mut spec = serde_json::json!({"name": package.name, "version": package.version,
-        "source": {"file": path.strip_prefix(output).map_err(|e| e.to_string())?, "sha256": sha256},
+        "source": source,
         "install": {"archive": "tar.gz"}, "bins": package.provides.bins, "output_sha256": package.output_sha256});
     if !package.provides.apps.is_empty() {
         spec["apps"] = serde_json::to_value(&package.provides.apps).map_err(|e| e.to_string())?;
@@ -927,6 +901,17 @@ fn install_spec(package: &LockedPackage, output: &Path) -> Result<serde_json::Va
         spec["runtime_dependencies"] = serde_json::to_value(runtime).map_err(|e| e.to_string())?;
     }
     Ok(spec)
+}
+
+/// The archive relative to `output`, copied in when it lives elsewhere, such as a build cache.
+fn local_archive(path: &Path, sha256: &str, output: &Path) -> Result<PathBuf, String> {
+    if let Ok(relative) = path.strip_prefix(output) {
+        return Ok(relative.to_path_buf());
+    }
+    let relative = Path::new("runtime").join(format!("{sha256}.tar.gz"));
+    fs::create_dir_all(output.join("runtime")).map_err(|e| e.to_string())?;
+    fs::copy(path, output.join(&relative)).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(relative)
 }
 
 fn write_install_files(artifact: &BuildArtifact, output: &Path) -> Result<(), String> {

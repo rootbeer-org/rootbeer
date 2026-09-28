@@ -133,6 +133,11 @@ fn runtime_chain_survives_cache_reuse_and_installation_without_build_trees() {
     let output = root.join("output");
     let artifact = plan.execute(&output, &opts).unwrap();
     let build_key = artifact.build_key.clone();
+    assert_eq!(
+        artifact.package.runtime_dependencies["middle@1"].source,
+        artifact.dependencies["middle@1"].source,
+        "runtime dependencies reference their own build's archive"
+    );
     let first_report = fs::read(output.join("runtime-audit.json")).unwrap();
     fs::remove_dir_all(&output).unwrap();
     fs::remove_dir_all(&sources).unwrap();
