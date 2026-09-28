@@ -359,6 +359,8 @@ fn assemble(
         let added = times.clone().min().expect("document is not empty");
         let updated = times.max().expect("document is not empty");
 
+        let min_engine_level = min_engine_level(name, package, &document)?;
+
         let bytes =
             rootbeer_catalog::canonical_json(&document).map_err(|error| error.to_string())?;
         let digest = hash_bytes(&bytes);
@@ -371,7 +373,7 @@ fn assemble(
                 homepage: package.homepage.clone(),
                 license,
                 maintainers: package.recipe_maintainers.clone(),
-                min_engine_level: package.min_engine_level,
+                min_engine_level,
                 added,
                 updated,
                 platforms,
@@ -381,6 +383,35 @@ fn assemble(
     }
     root.validate()?;
     Ok((root, documents))
+}
+
+/// The authored level, raised to what any published record needs. Rootbeer itself is never
+/// raised: `rb self-update` is how an older client reaches a newer level.
+fn min_engine_level(
+    name: &str,
+    package: &CatalogPackage,
+    document: &PackageDocument,
+) -> Result<Option<u32>, String> {
+    let has_runtime = document
+        .versions
+        .values()
+        .flat_map(|entry| entry.platforms.values())
+        .flat_map(|platform| platform.recipe.build.iter())
+        .flat_map(|build| &build.dependencies)
+        .any(|dependency| dependency.kind().is_runtime());
+    let level = if has_runtime {
+        let authored = package.min_engine_level.unwrap_or_default();
+        Some(authored.max(rootbeer_package::repository::RUNTIME_DEPENDENCIES_LEVEL))
+    } else {
+        package.min_engine_level
+    };
+
+    if name == rootbeer_package::self_update::PACKAGE && level.is_some_and(|level| level > 1) {
+        return Err(format!(
+            "{name}: must stay installable by every client, so it cannot require a newer rb"
+        ));
+    }
+    Ok(level)
 }
 
 fn document(package: &CatalogPackage, published: &BTreeMap<Key, Published>) -> PackageDocument {
@@ -674,6 +705,11 @@ mod tests {
 
     /// `app` is built with `lib`; both are source builds published on Linux.
     fn dependent_catalog(lib_configure: &str) -> PackageCatalog {
+        linked_catalog(lib_configure, r#""lib@1""#)
+    }
+
+    /// `app` depends on `lib` through `dependency`, a Lua dependency entry.
+    fn linked_catalog(lib_configure: &str, dependency: &str) -> PackageCatalog {
         let digest = "a".repeat(64);
         let recipe = |name: &str, build: &str| {
             PackageDefinition::from_lua(&format!(
@@ -696,7 +732,7 @@ mod tests {
         );
         let app = recipe(
             "app",
-            r#"{ backend = "autotools", dependencies = { "lib@1" } }"#,
+            &format!(r#"{{ backend = "autotools", dependencies = {{ {dependency} }} }}"#),
         );
         PackageCatalog::from_definitions(&BTreeMap::from([
             ("lib".into(), lib),
@@ -748,5 +784,40 @@ mod tests {
             kept.is_empty(),
             "lib changed, and app was built with the old lib: {kept:?}"
         );
+    }
+
+    fn published_all(catalog: &PackageCatalog) -> BTreeMap<Key, Published> {
+        catalog
+            .packages
+            .keys()
+            .map(|name| {
+                let approved = &catalog.packages[name].versions["1"];
+                let key = (name.to_string(), "1".to_string(), LINUX.to_string());
+                let entry = Published {
+                    recipe: approved.platforms[LINUX].clone(),
+                    record: hash_bytes(name.as_bytes()),
+                    published: 100,
+                };
+                (key, entry)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn only_packages_with_runtime_dependencies_need_a_newer_rb() {
+        let runtime = r#"{ package = "lib@1", kind = "link_runtime" }"#;
+        for (dependency, expected) in [(r#""lib@1""#, None), (runtime, Some(2))] {
+            let catalog = linked_catalog("--shared", dependency);
+            let (root, _) = assemble(&catalog, None, &published_all(&catalog), 1).unwrap();
+            assert_eq!(root.packages["app"].min_engine_level, expected);
+            assert_eq!(root.packages["lib"].min_engine_level, None);
+        }
+
+        let mut catalog = linked_catalog("--shared", runtime);
+        let mut rootbeer = catalog.packages.remove("app").unwrap();
+        rootbeer.name = rootbeer_package::self_update::PACKAGE.into();
+        catalog.packages.insert(rootbeer.name.clone(), rootbeer);
+        let error = assemble(&catalog, None, &published_all(&catalog), 1).unwrap_err();
+        assert!(error.contains("cannot require a newer rb"), "{error}");
     }
 }
