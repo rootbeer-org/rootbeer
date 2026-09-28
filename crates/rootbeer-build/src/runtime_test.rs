@@ -73,9 +73,11 @@ fn runtime_chain_survives_cache_reuse_and_installation_without_build_trees() {
         let mut command = vec!["cc".into(), "main.c".into(), "-o".into(), filename.clone()];
         if is_library {
             if cfg!(target_os = "macos") {
+                // base names itself as a DESTDIR install into `/` would; middle by its prefix.
+                let directory = if name == "base" { "" } else { "{prefix}" };
                 command.extend([
                     "-dynamiclib".into(),
-                    format!("-Wl,-install_name,{{prefix}}/lib/{filename}"),
+                    format!("-Wl,-install_name,{directory}/lib/{filename}"),
                 ]);
             } else {
                 command.extend([

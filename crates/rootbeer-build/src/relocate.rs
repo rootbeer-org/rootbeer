@@ -67,14 +67,13 @@ impl Relocation<'_> {
     /// prefix nor a runtime dependency.
     fn rewrite(&self, value: &str, token: &str, depth: usize) -> Option<String> {
         let path = Path::new(value);
+        let runtime = self.runtime.iter().find(|(root, _)| path.starts_with(root));
         let (ups, name, rest) = if let Ok(rest) = path.strip_prefix(self.prefix) {
             (depth, None, rest)
-        } else {
-            let (root, name) = self
-                .runtime
-                .iter()
-                .find(|(root, _)| path.starts_with(root))?;
+        } else if let Some((root, name)) = runtime {
             (depth + 1, Some(name), path.strip_prefix(root).unwrap())
+        } else {
+            (depth, None, self.installed(path)?)
         };
 
         let mut relocated = PathBuf::from(token);
@@ -91,6 +90,16 @@ impl Relocation<'_> {
                 .trim_end_matches('/')
                 .to_string(),
         )
+    }
+
+    /// The part of an absolute path that names a file in the prefix, as a `DESTDIR` install
+    /// into `/` records it, such as `/lib/libz.1.dylib` for `<prefix>/lib/libz.1.dylib`.
+    fn installed<'a>(&self, path: &'a Path) -> Option<&'a Path> {
+        let rest = path.strip_prefix("/").ok()?;
+        let is_installed = !rest.as_os_str().is_empty()
+            && !rest.starts_with("..")
+            && self.prefix.join(rest).symlink_metadata().is_ok();
+        is_installed.then_some(rest)
     }
 
     fn rewrite_list(&self, value: &str, token: &str, depth: usize) -> Option<String> {
@@ -206,9 +215,9 @@ impl Relocation<'_> {
                 let end = base + command.offset + size as usize;
                 let old = c_string(&bytes[..end], start)?;
                 let new = if is_identity {
-                    Path::new(old)
-                        .starts_with(self.prefix)
-                        .then(|| format!("@rpath/{}", file_name(old)))
+                    let path = Path::new(old);
+                    let is_own = path.starts_with(self.prefix) || self.installed(path).is_some();
+                    is_own.then(|| format!("@rpath/{}", file_name(old)))
                 } else {
                     self.rewrite(old, "@loader_path", depth)
                 };
@@ -378,5 +387,38 @@ mod tests {
             relocation.rewrite_list("$ORIGIN/../lib", "$ORIGIN", 1),
             None
         );
+    }
+
+    #[test]
+    fn destdir_install_paths_are_relocated_only_when_they_name_the_package() {
+        let directory = tempfile::tempdir().unwrap();
+        let prefix = directory.path().join("prefix");
+        fs::create_dir_all(prefix.join("lib")).unwrap();
+        fs::write(prefix.join("lib/libz.1.dylib"), "").unwrap();
+        let runtime = BTreeMap::new();
+        let relocation = Relocation {
+            prefix: &prefix,
+            runtime: &runtime,
+        };
+        assert_eq!(
+            relocation.rewrite("/lib/libz.1.dylib", "@loader_path", 1),
+            Some("@loader_path/../lib/libz.1.dylib".into())
+        );
+        assert_eq!(
+            relocation.rewrite("/lib", "$ORIGIN", 1),
+            Some("$ORIGIN/../lib".into())
+        );
+        for foreign in [
+            "/usr/lib/libSystem.B.dylib",
+            "/lib/missing.dylib",
+            "/",
+            "/../lib",
+        ] {
+            assert_eq!(
+                relocation.rewrite(foreign, "@loader_path", 1),
+                None,
+                "{foreign}"
+            );
+        }
     }
 }
