@@ -108,6 +108,14 @@ impl BuildPlan {
         package: LockedPackage,
         record: String,
     ) -> Result<(), String> {
+        self.use_built(key, package)?;
+        self.published.insert(key.to_string(), record);
+        Ok(())
+    }
+
+    /// Installs `key` from a build of its exact recipe that another job already qualified,
+    /// instead of compiling it again. The caller has verified the build's receipt and archive.
+    pub fn use_built(&mut self, key: &str, package: LockedPackage) -> Result<(), String> {
         let is_dependency = self.graph.order.last().is_some_and(|root| root != key);
         if !is_dependency
             || !self
@@ -116,12 +124,19 @@ impl BuildPlan {
                 .is_some_and(|recipe| recipe.build.is_some())
         {
             return Err(format!(
-                "{key}: only a source-built dependency has a published build"
+                "{key}: only a source-built dependency has a qualified build"
             ));
         }
+        if self.binaries.contains_key(key) {
+            return Err(format!("{key}: already installed from another build"));
+        }
         self.binaries.insert(key.to_string(), package);
-        self.published.insert(key.to_string(), record);
         Ok(())
+    }
+
+    /// The build a dependency is installed from instead of being compiled, if any.
+    pub fn installed(&self, key: &str) -> Option<&LockedPackage> {
+        self.binaries.get(key)
     }
 
     pub fn graph(&self) -> &DependencyGraph {

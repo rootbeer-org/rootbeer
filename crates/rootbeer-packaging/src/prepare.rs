@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use rootbeer_package::distribution::UpstreamProvenance;
 use rootbeer_package::repository::RepositoryResolver;
@@ -24,13 +24,15 @@ pub(crate) struct BinaryReceipt {
 }
 
 /// Qualifies a source build or repackages a verified upstream binary without compiling it.
-/// With a PDR, dependencies it has published builds of are installed rather than compiled.
+/// With a PDR, dependencies it has published builds of are installed rather than compiled, as are
+/// the `built` dependency builds earlier jobs qualified.
 pub fn prepare_package(
     catalog: &PackageCatalog,
     request: &str,
     output: &Path,
     options: &BuildOptions,
     pdr: Option<&RepositoryResolver>,
+    built: &[PathBuf],
 ) -> Result<LockedPackage, String> {
     catalog.validate()?;
     let (_, _, recipe) = rootbeer_package::graph::find_recipe(catalog, request)?;
@@ -41,9 +43,13 @@ pub fn prepare_package(
             crate::PublishedDependencies::find(catalog, request, &system, pdr)?
                 .use_in(&mut plan)?;
         }
+        crate::BuiltDependencies::load(catalog, request, built, options)?.use_in(&mut plan)?;
         return plan
             .execute(output, options)
             .map(|artifact| artifact.package);
+    }
+    if !built.is_empty() {
+        return Err("an upstream binary is repackaged without dependency builds".into());
     }
     let inputs = package_inputs(catalog);
     let mut resolver = rootbeer_package::backend_stack().with_implicit_resolver("rootbeer");

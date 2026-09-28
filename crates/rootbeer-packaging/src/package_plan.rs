@@ -22,6 +22,10 @@ pub struct PackageTask {
     /// Keys the same inputs had under reviewed predecessor engines, whose results remain valid.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub compatible_keys: Vec<String>,
+    /// Source dependencies with no published build, which this build compiles unless another
+    /// job hands it their builds.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub builds: Vec<String>,
 }
 
 /// What identifies every package in a build's closure, so a change to any of them is a new build.
@@ -102,6 +106,15 @@ pub fn plan_packages(
                 environments.entry(engine.clone()).or_insert(identity)
             }
         };
+        let mut builds = Vec::new();
+        for dependency in
+            &DependencyGraph::new(catalog, std::slice::from_ref(&id), &system)?.nodes[&id].closure
+        {
+            let (_, _, dependency_recipe) = find_recipe_for_system(catalog, dependency, &system)?;
+            if dependency_recipe.build.is_some() && published.inputs(dependency).is_none() {
+                builds.push(dependency.clone());
+            }
+        }
         let compatible_keys = rootbeer_build::compatible_generations()
             .iter()
             .map(|generation| {
@@ -135,6 +148,7 @@ pub fn plan_packages(
                     .filter(|_| recipe.build.is_some())
                     .map(|pdr| pdr.pin().root.clone()),
                 compatible_keys,
+                builds,
             },
         );
     }

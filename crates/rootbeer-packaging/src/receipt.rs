@@ -135,7 +135,10 @@ fn publish_runtime(
     Ok(())
 }
 
-fn validate_receipt(catalog: &PackageCatalog, receipt: &BuildArtifact) -> Result<(), String> {
+pub(crate) fn validate_receipt(
+    catalog: &PackageCatalog,
+    receipt: &BuildArtifact,
+) -> Result<(), String> {
     let package = &receipt.package;
     let entry = catalog
         .packages

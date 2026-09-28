@@ -5,6 +5,8 @@ pub use rootbeer_build::{
     BuildOptions, BuildPlan, Generation,
 };
 pub use rootbeer_package::*;
+mod built;
+pub use built::BuiltDependencies;
 mod checks;
 mod prepare;
 pub use prepare::prepare_package;

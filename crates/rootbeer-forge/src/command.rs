@@ -148,6 +148,9 @@ enum Command {
         phase_timeout: u64,
         #[command(flatten)]
         published: Published,
+        /// Install a dependency from this `prepare` output instead of compiling it
+        #[arg(long = "dependency-artifact")]
+        dependency_artifacts: Vec<PathBuf>,
     },
 }
 
@@ -518,6 +521,7 @@ fn execute(args: Args) -> Result<(), String> {
             recheck,
             phase_timeout,
             published,
+            dependency_artifacts,
         } => {
             let pdr = published.resolver()?;
             let environment = read_environment(environment)?;
@@ -554,6 +558,7 @@ fn execute(args: Args) -> Result<(), String> {
                     ..Default::default()
                 },
                 pdr.as_ref(),
+                &dependency_artifacts,
             )?;
             writeln!(
                 output,
