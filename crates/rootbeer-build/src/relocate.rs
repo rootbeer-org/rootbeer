@@ -49,7 +49,9 @@ impl Relocation<'_> {
         if edits.is_empty() {
             return Ok(());
         }
-        if edits.iter().all(MachEdit::fits) {
+        if edits.iter().all(MachEdit::fits)
+            && !edits.iter().any(|edit| edit.kind == MachKind::DeleteRpath)
+        {
             for edit in &edits {
                 bytes[edit.start..edit.end].fill(0);
                 bytes[edit.start..edit.start + edit.new.len()].copy_from_slice(edit.new.as_bytes());
@@ -61,6 +63,7 @@ impl Relocation<'_> {
             for edit in &edits {
                 let argument = match edit.kind {
                     MachKind::Rpath => vec!["-rpath", edit.old.as_str(), edit.new.as_str()],
+                    MachKind::DeleteRpath => vec!["-delete_rpath", edit.old.as_str()],
                     MachKind::Identity => vec!["-id", edit.new.as_str()],
                     MachKind::Load => vec!["-change", edit.old.as_str(), edit.new.as_str()],
                 };
@@ -225,6 +228,7 @@ impl Relocation<'_> {
             }
             let mach =
                 goblin::mach::MachO::parse(&bytes[base..], 0).map_err(|error| error.to_string())?;
+            let mut rpaths = std::collections::BTreeSet::new();
             for command in &mach.load_commands {
                 let (name, size, kind) = match command.command {
                     CommandVariant::Rpath(rpath) => (rpath.path, rpath.cmdsize, MachKind::Rpath),
@@ -250,6 +254,21 @@ impl Relocation<'_> {
                 } else {
                     self.rewrite(old, "@loader_path", depth)
                 };
+                if kind == MachKind::Rpath {
+                    // Two build paths can name the same installed directory, and install_name_tool
+                    // refuses to repeat an rpath, so later ones are dropped.
+                    let is_repeat = !rpaths.insert(new.as_deref().unwrap_or(old).to_string());
+                    if is_repeat && new.is_some() {
+                        edits.push(MachEdit {
+                            kind: MachKind::DeleteRpath,
+                            start,
+                            end,
+                            old: old.to_string(),
+                            new: String::new(),
+                        });
+                        continue;
+                    }
+                }
                 let Some(new) = new else {
                     continue;
                 };
@@ -270,6 +289,7 @@ impl Relocation<'_> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MachKind {
     Rpath,
+    DeleteRpath,
     Identity,
     Load,
 }
@@ -498,5 +518,69 @@ mod tests {
                 "{foreign}"
             );
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn rpaths_that_relocate_to_the_same_directory_collapse_into_one() {
+        let directory = tempfile::tempdir().unwrap();
+        let prefix = directory.path().join("prefix");
+        fs::create_dir_all(prefix.join("lib")).unwrap();
+        fs::create_dir_all(prefix.join("bin")).unwrap();
+        let compile = |args: &[&str]| {
+            let output = Command::new("/usr/bin/cc")
+                .current_dir(directory.path())
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        fs::write(directory.path().join("f.c"), "int f(void) { return 0; }\n").unwrap();
+        fs::write(
+            directory.path().join("m.c"),
+            "int f(void); int main(void) { return f(); }\n",
+        )
+        .unwrap();
+        let library = prefix.join("lib/libf.dylib");
+        compile(&[
+            "-dynamiclib",
+            "-o",
+            library.to_str().unwrap(),
+            "-install_name",
+            "@rpath/libf.dylib",
+            "f.c",
+        ]);
+        let binary = prefix.join("bin/m");
+        let lib = prefix.join("lib");
+        let rpath = format!("-Wl,-rpath,{}", lib.display());
+        compile(&[
+            "-o",
+            binary.to_str().unwrap(),
+            "m.c",
+            "-L",
+            lib.to_str().unwrap(),
+            "-lf",
+            &rpath,
+            "-Wl,-rpath,/lib",
+            "-Wl,-headerpad_max_install_names",
+        ]);
+
+        let runtime = BTreeMap::new();
+        Relocation {
+            prefix: &prefix,
+            runtime: &runtime,
+        }
+        .apply()
+        .unwrap();
+
+        let bytes = fs::read(&binary).unwrap();
+        let mach = goblin::mach::MachO::parse(&bytes, 0).unwrap();
+        let rpaths: Vec<_> = mach.rpaths.iter().map(|rpath| rpath.to_string()).collect();
+        assert_eq!(rpaths, ["@loader_path/../lib"]);
+        assert!(Command::new(&binary).status().unwrap().success());
     }
 }
