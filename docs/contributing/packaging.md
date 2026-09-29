@@ -63,7 +63,8 @@ return {
 
 Unknown fields fail validation. Run
 `rootbeer-forge --catalog packages format` after editing so that discovery's later
-rewrites don't reflow the file; CI runs `format --check`.
+rewrites don't reflow the file; CI runs `format --check`. Both keep comments with the field
+they sit above or beside, so explain each workaround where it lives and what would retire it.
 
 ### Prebuilt or source
 

@@ -5,6 +5,7 @@ use std::path::Path;
 use mlua::LuaSerdeExt;
 use serde::{Deserialize, Serialize};
 
+mod comments;
 pub mod lua;
 use super::CatalogPackage;
 
@@ -16,6 +17,7 @@ pub struct PackageDefinition {
     pub package: CatalogPackage,
     pub upstream: BTreeMap<String, PackageUpstream>,
     authoring: Option<recipe::Recipe>,
+    comments: comments::Comments,
 }
 
 /// Where discovery finds new versions for one or more platforms.
@@ -109,6 +111,7 @@ impl PackageDefinition {
             package,
             upstream: BTreeMap::new(),
             authoring: None,
+            comments: Default::default(),
         }
     }
 
@@ -116,7 +119,9 @@ impl PackageDefinition {
     pub fn from_lua(source: &str) -> Result<Self, String> {
         let (lua, value) = lua::evaluate(source)?;
         let recipe: recipe::Recipe = lua.from_value(value).map_err(|error| error.to_string())?;
-        recipe.expand()
+        let mut definition = recipe.expand()?;
+        definition.comments = comments::Comments::scan(source)?;
+        Ok(definition)
     }
 
     /// Reads canonical package files in deterministic name order.
@@ -232,7 +237,7 @@ impl PackageDefinition {
             .authoring
             .as_ref()
             .ok_or("rendering a package file requires its authored recipe")?;
-        lua::write(&recipe.with_shared_upstream())
+        lua::write_commented(&recipe.with_shared_upstream(), &self.comments)
     }
 }
 
@@ -370,6 +375,38 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn rendering_keeps_comments_beside_their_fields() {
+        let source = r#"-- Maintainer note above the recipe.
+return {
+            name = "tool", description = "A tool", homepage = "https://example.com",
+            default_license = "MIT",
+            source = { url = "https://example.com/{version}.tar.gz", archive = "tar.gz", strip_prefix = "tool-{version}" },
+            build = {
+                backend = "autotools",
+                -- Upstream #1 breaks the default; drop once it ships.
+                configure = { "--disable-thing", "--enable-other" }, -- both needed
+            },
+            outputs = { bins = { "tool" }, checks = { { "tool", "--version" } } },
+            platforms = { ["x86_64-linux"] = { default_version = "1" } },
+            versions = { ["1"] = { digests = { ["x86_64-linux"] = "DIGEST" } } },
+        }"#
+        .replace("DIGEST", &"a".repeat(64));
+        let rendered = PackageDefinition::from_lua(&source)
+            .unwrap()
+            .to_lua()
+            .unwrap();
+        assert!(rendered.starts_with("-- Maintainer note above the recipe.\nreturn {"));
+        assert!(rendered.contains(
+            "        -- Upstream #1 breaks the default; drop once it ships.\n        configure = { \"--disable-thing\", \"--enable-other\" }, -- both needed\n"
+        ));
+        let again = PackageDefinition::from_lua(&rendered)
+            .unwrap()
+            .to_lua()
+            .unwrap();
+        assert_eq!(again, rendered);
     }
 
     #[test]

@@ -2,6 +2,108 @@ use super::{Binary, Format, Violation};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 
+const UNBUNDLED: &str = "no compatible bundled library at the loader's search paths; external runtime dependencies are not supported yet";
+
+/// Loader references the OS runtime provides, so packages may use them without bundling.
+struct Baseline {
+    interpreters: &'static [&'static str],
+    search_dirs: &'static [&'static str],
+    search_prefixes: &'static [&'static str],
+    libraries: &'static [&'static str],
+    library_prefixes: &'static [&'static str],
+}
+
+const ELF: Baseline = Baseline {
+    interpreters: &[
+        "/lib64/ld-linux-x86-64.so.2",
+        "/lib/ld-linux-aarch64.so.1",
+        "/lib/ld-linux.so.2",
+        "/lib/ld-linux-armhf.so.3",
+        "/lib/ld-musl-x86_64.so.1",
+        "/lib/ld-musl-aarch64.so.1",
+    ],
+    search_dirs: &[
+        "/lib",
+        "/lib64",
+        "/usr/lib",
+        "/usr/lib64",
+        "/lib/x86_64-linux-gnu",
+        "/usr/lib/x86_64-linux-gnu",
+        "/lib/aarch64-linux-gnu",
+        "/usr/lib/aarch64-linux-gnu",
+    ],
+    search_prefixes: &[],
+    libraries: &[
+        "libc.so.6",
+        "libm.so.6",
+        "libdl.so.2",
+        "libpthread.so.0",
+        "librt.so.1",
+        "libgcc_s.so.1",
+        "libstdc++.so.6",
+        "libc.musl-x86_64.so.1",
+        "libc.musl-aarch64.so.1",
+        "ld-linux-x86-64.so.2",
+        "ld-linux-aarch64.so.1",
+    ],
+    library_prefixes: &[],
+};
+
+const MACHO: Baseline = Baseline {
+    interpreters: &["/usr/lib/dyld"],
+    search_dirs: &["/usr/lib"],
+    search_prefixes: &["/System/Library/Frameworks"],
+    libraries: &[],
+    library_prefixes: &["/usr/lib", "/System/Library/Frameworks"],
+};
+
+impl Baseline {
+    fn of(format: Format) -> &'static Self {
+        match format {
+            Format::Elf => &ELF,
+            Format::MachO => &MACHO,
+        }
+    }
+
+    fn allows_interpreter(&self, interpreter: &str) -> bool {
+        self.interpreters.contains(&interpreter)
+    }
+
+    fn allows_search_path(&self, path: &str) -> bool {
+        is_plain(path) && allows(path, self.search_dirs, self.search_prefixes)
+    }
+
+    fn allows_library(&self, library: &str) -> bool {
+        is_plain(library) && allows(library, self.libraries, self.library_prefixes)
+    }
+}
+
+fn allows(reference: &str, exact: &[&str], prefixes: &[&str]) -> bool {
+    exact.contains(&reference)
+        || prefixes
+            .iter()
+            .any(|prefix| Path::new(reference).starts_with(prefix))
+}
+
+fn is_plain(reference: &str) -> bool {
+    !Path::new(reference)
+        .components()
+        .any(|part| matches!(part, Component::ParentDir | Component::CurDir))
+}
+
+/// Where the loader would find one library reference.
+enum Resolution<'a> {
+    System,
+    Bundled(&'a Binary),
+    Unresolved(&'static str),
+}
+
+/// Directories a binary's libraries are searched in, and those its dependencies inherit.
+struct SearchPaths {
+    own: Vec<PathBuf>,
+    inherited: Vec<PathBuf>,
+}
+
 pub(super) fn check(roots: &BTreeMap<PathBuf, PathBuf>, binaries: &[Binary]) -> Vec<Violation> {
     let mut audit = Checker {
         roots,
@@ -17,20 +119,17 @@ pub(super) fn check(roots: &BTreeMap<PathBuf, PathBuf>, binaries: &[Binary]) -> 
             audit.visit(binary, None, &[], &mut BTreeSet::new());
         }
     }
-    audit.violations.sort_by(|a, b| {
-        (&a.path, a.architecture, &a.reference, &a.reason).cmp(&(
-            &b.path,
-            b.architecture,
-            &b.reference,
-            &b.reason,
-        ))
-    });
-    audit.violations.dedup_by(|a, b| {
-        a.path == b.path
-            && a.architecture == b.architecture
-            && a.reference == b.reference
-            && a.reason == b.reason
-    });
+
+    let key = |violation: &Violation| {
+        (
+            violation.path.clone(),
+            violation.architecture,
+            violation.reference.clone(),
+            violation.reason.clone(),
+        )
+    };
+    audit.violations.sort_by_key(key);
+    audit.violations.dedup_by(|a, b| key(a) == key(b));
     audit.violations
 }
 
@@ -49,18 +148,6 @@ impl<'a> Checker<'a> {
             reference: reference.into(),
             reason: reason.into(),
         });
-    }
-
-    fn resolve(&self, candidate: &Path) -> Option<PathBuf> {
-        for (directory, root) in self.roots {
-            let Ok(relative) = candidate.strip_prefix(directory) else {
-                continue;
-            };
-            let path = root.join(relative).canonicalize().ok()?;
-            let relative = path.strip_prefix(root).ok()?;
-            return Some(directory.join(relative));
-        }
-        None
     }
 
     fn visit(
@@ -83,111 +170,150 @@ impl<'a> Checker<'a> {
         if !active.insert(key) {
             return;
         }
-        if let Some(interpreter) = &binary.interpreter {
-            let allowed = match binary.format {
-                Format::MachO => interpreter == "/usr/lib/dyld",
-                Format::Elf => matches!(
-                    interpreter.as_str(),
-                    "/lib64/ld-linux-x86-64.so.2"
-                        | "/lib/ld-linux-aarch64.so.1"
-                        | "/lib/ld-linux.so.2"
-                        | "/lib/ld-linux-armhf.so.3"
-                        | "/lib/ld-musl-x86_64.so.1"
-                        | "/lib/ld-musl-aarch64.so.1"
-                ),
-            };
-            if !allowed {
-                self.reject(
-                    binary,
-                    interpreter,
-                    "interpreter is outside the OS-runtime baseline",
-                );
-            }
-        }
-        if let Some(identity) = &binary.identity {
-            let allowed = match binary.format {
-                Format::Elf => !identity.contains('/') && !identity.is_empty(),
-                Format::MachO => ["@rpath/", "@loader_path/"].iter().any(|prefix| {
-                    identity
-                        .strip_prefix(prefix)
-                        .is_some_and(|path| normalize(Path::new(path)).is_ok())
-                }),
-            };
-            if !allowed {
-                self.reject(binary, identity, "library identity is not relocatable");
-            }
-        }
-        let mut rpaths = Vec::new();
-        let mut runpaths = Vec::new();
-        for (paths, resolved) in [
-            (&binary.rpaths, &mut rpaths),
-            (&binary.runpaths, &mut runpaths),
-        ] {
-            for path in paths {
-                if system_path(binary.format, path) {
-                    continue;
-                }
-                match expand(path, binary, executable) {
-                    Ok(path) => resolved.push(path),
-                    Err(reason) => self.reject(binary, path, reason),
-                }
-            }
-        }
-        let mut inherited_next = rpaths.clone();
-        inherited_next.extend_from_slice(inherited);
-        let search = if binary.format == Format::Elf && !binary.runpaths.is_empty() {
-            &runpaths
-        } else {
-            &inherited_next
-        };
+
+        self.check_interpreter(binary);
+        self.check_identity(binary);
+
+        let search = self.search_paths(binary, executable, inherited);
         for library in &binary.libraries {
-            if system_library(binary.format, library) {
+            match self.resolve(binary, library, &search.own, executable) {
+                Resolution::System => {}
+                Resolution::Bundled(target) => {
+                    self.visit(target, executable, &search.inherited, active)
+                }
+                Resolution::Unresolved(reason) => self.reject(binary, library, reason),
+            }
+        }
+
+        active.remove(&key);
+    }
+
+    fn check_interpreter(&mut self, binary: &Binary) {
+        let Some(interpreter) = &binary.interpreter else {
+            return;
+        };
+        if !Baseline::of(binary.format).allows_interpreter(interpreter) {
+            self.reject(
+                binary,
+                interpreter,
+                "interpreter is outside the OS-runtime baseline",
+            );
+        }
+    }
+
+    fn check_identity(&mut self, binary: &Binary) {
+        let Some(identity) = &binary.identity else {
+            return;
+        };
+        let is_relocatable = match binary.format {
+            Format::Elf => !identity.contains('/') && !identity.is_empty(),
+            Format::MachO => ["@rpath/", "@loader_path/"].iter().any(|prefix| {
+                identity
+                    .strip_prefix(prefix)
+                    .is_some_and(|path| normalize(Path::new(path)).is_ok())
+            }),
+        };
+        if !is_relocatable {
+            self.reject(binary, identity, "library identity is not relocatable");
+        }
+    }
+
+    /// ELF RUNPATH replaces inherited rpaths for this binary alone; otherwise rpaths accumulate.
+    fn search_paths(
+        &mut self,
+        binary: &Binary,
+        executable: Option<&Path>,
+        inherited: &[PathBuf],
+    ) -> SearchPaths {
+        let rpaths = self.expand_all(binary, &binary.rpaths, executable);
+        let runpaths = self.expand_all(binary, &binary.runpaths, executable);
+
+        let mut accumulated = rpaths;
+        accumulated.extend_from_slice(inherited);
+        if binary.format == Format::Elf && !binary.runpaths.is_empty() {
+            return SearchPaths {
+                own: runpaths,
+                inherited: inherited.to_vec(),
+            };
+        }
+        SearchPaths {
+            own: accumulated.clone(),
+            inherited: accumulated,
+        }
+    }
+
+    fn expand_all(
+        &mut self,
+        binary: &Binary,
+        paths: &[String],
+        executable: Option<&Path>,
+    ) -> Vec<PathBuf> {
+        let baseline = Baseline::of(binary.format);
+        let mut expanded = Vec::new();
+        for path in paths {
+            if baseline.allows_search_path(path) {
                 continue;
             }
-            let candidates = match binary.format {
-                Format::Elf if !library.contains('/') => Ok(search
-                    .iter()
-                    .map(|path| path.join(library))
-                    .collect::<Vec<_>>()),
-                Format::MachO if library.starts_with("@rpath/") => {
-                    let suffix = &library[7..];
-                    Ok(search.iter().map(|path| path.join(suffix)).collect())
-                }
-                _ => expand(library, binary, executable).map(|path| vec![path]),
-            };
-            let candidates = match candidates {
-                Ok(candidates) => candidates,
-                Err(reason) => {
-                    self.reject(binary, library, reason);
-                    continue;
-                }
-            };
-            let mut target = None;
-            for candidate in candidates {
-                let Ok(candidate) = normalize(&candidate) else {
-                    continue;
-                };
-                let Some(relative) = self.resolve(&candidate) else {
-                    continue;
-                };
-                target = self.binaries.iter().find(|other| {
-                    other.path == relative
-                        && other.format == binary.format
-                        && other.architecture == binary.architecture
-                        && other.bits == binary.bits
-                        && other.little_endian == binary.little_endian
-                        && !other.is_executable
-                });
-                if target.is_some() {
-                    break;
-                }
-            }
-            match target {
-                Some(target) => self.visit(target, executable, if binary.format == Format::Elf && !binary.runpaths.is_empty() { inherited } else { &inherited_next }, active),
-                None => self.reject(binary, library, "no compatible bundled library at the loader's search paths; external runtime dependencies are not supported yet"),
+            match expand(path, binary, executable) {
+                Ok(path) => expanded.push(path),
+                Err(reason) => self.reject(binary, path, reason),
             }
         }
-        active.remove(&key);
+        expanded
+    }
+
+    fn resolve(
+        &self,
+        binary: &Binary,
+        library: &str,
+        search: &[PathBuf],
+        executable: Option<&Path>,
+    ) -> Resolution<'a> {
+        if Baseline::of(binary.format).allows_library(library) {
+            return Resolution::System;
+        }
+        let candidates = match binary.format {
+            Format::Elf if !library.contains('/') => {
+                search.iter().map(|path| path.join(library)).collect()
+            }
+            Format::MachO if library.starts_with("@rpath/") => {
+                let suffix = &library["@rpath/".len()..];
+                search.iter().map(|path| path.join(suffix)).collect()
+            }
+            _ => match expand(library, binary, executable) {
+                Ok(path) => vec![path],
+                Err(reason) => return Resolution::Unresolved(reason),
+            },
+        };
+        candidates
+            .iter()
+            .filter_map(|candidate| normalize(candidate).ok())
+            .filter_map(|candidate| self.locate(&candidate))
+            .find_map(|relative| self.library_at(&relative, binary))
+            .map_or(Resolution::Unresolved(UNBUNDLED), Resolution::Bundled)
+    }
+
+    /// Maps a loader path onto the audited binaries through the realized package roots.
+    fn locate(&self, candidate: &Path) -> Option<PathBuf> {
+        let (directory, root) = self
+            .roots
+            .iter()
+            .find(|(directory, _)| candidate.starts_with(directory))?;
+        let relative = candidate.strip_prefix(directory).ok()?;
+        let path = root.join(relative).canonicalize().ok()?;
+        let relative = path.strip_prefix(root).ok()?;
+        Some(directory.join(relative))
+    }
+
+    fn library_at(&self, path: &Path, binary: &Binary) -> Option<&'a Binary> {
+        self.binaries.iter().find(|other| {
+            other.path == path
+                && other.format == binary.format
+                && other.architecture == binary.architecture
+                && other.bits == binary.bits
+                && other.little_endian == binary.little_endian
+                && !other.is_executable
+        })
     }
 }
 
@@ -242,55 +368,4 @@ fn normalize(path: &Path) -> Result<PathBuf, &'static str> {
         }
     }
     Ok(result)
-}
-
-fn system_path(format: Format, path: &str) -> bool {
-    if Path::new(path)
-        .components()
-        .any(|part| matches!(part, Component::ParentDir | Component::CurDir))
-    {
-        return false;
-    }
-    match format {
-        Format::MachO => {
-            path == "/usr/lib" || Path::new(path).starts_with("/System/Library/Frameworks")
-        }
-        Format::Elf => matches!(
-            path,
-            "/lib"
-                | "/lib64"
-                | "/usr/lib"
-                | "/usr/lib64"
-                | "/lib/x86_64-linux-gnu"
-                | "/usr/lib/x86_64-linux-gnu"
-                | "/lib/aarch64-linux-gnu"
-                | "/usr/lib/aarch64-linux-gnu"
-        ),
-    }
-}
-
-fn system_library(format: Format, library: &str) -> bool {
-    match format {
-        Format::MachO => {
-            !Path::new(library)
-                .components()
-                .any(|part| matches!(part, Component::ParentDir))
-                && (Path::new(library).starts_with("/usr/lib")
-                    || Path::new(library).starts_with("/System/Library/Frameworks"))
-        }
-        Format::Elf => matches!(
-            library,
-            "libc.so.6"
-                | "libm.so.6"
-                | "libdl.so.2"
-                | "libpthread.so.0"
-                | "librt.so.1"
-                | "libgcc_s.so.1"
-                | "libstdc++.so.6"
-                | "libc.musl-x86_64.so.1"
-                | "libc.musl-aarch64.so.1"
-                | "ld-linux-x86-64.so.2"
-                | "ld-linux-aarch64.so.1"
-        ),
-    }
 }
