@@ -96,8 +96,6 @@ enum Command {
         cache: PathBuf,
         #[arg(long)]
         output: PathBuf,
-        #[arg(long, default_value_t = 20)]
-        max_pages: usize,
     },
     /// Discover GitHub releases and generate complete candidate package definitions
     /// List canonical names, approved defaults, and descriptions
@@ -356,16 +354,11 @@ fn execute(args: Args) -> Result<(), String> {
             let reference = rootbeer_packaging::push_package(&release, &public_key)?;
             writeln!(output, "published {reference}").map_err(|error| error.to_string())?;
         }
-        Command::Updates {
-            cache,
-            output,
-            max_pages,
-        } => {
+        Command::Updates { cache, output } => {
             let definitions = definitions
                 .as_ref()
                 .ok_or("updates requires --catalog pointing to package definitions")?;
-            let report =
-                rootbeer_packaging::discover_updates(definitions, &cache, &output, max_pages)?;
+            let report = rootbeer_packaging::discover_updates(definitions, &cache, &output)?;
             eprintln!(
                 "{} updates, {} unchanged, {} errors; report: {}",
                 report.updated.len(),

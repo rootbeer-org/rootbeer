@@ -139,7 +139,7 @@ impl PackageResolver for GitHubResolver {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Release {
     pub id: u64,
     pub tag_name: String,
@@ -150,7 +150,7 @@ pub struct Release {
     pub assets: Vec<Asset>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Asset {
     pub name: String,
     browser_download_url: String,

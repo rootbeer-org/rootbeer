@@ -26,30 +26,45 @@ fn version_key(version: &str) -> Result<Vec<u64>, String> {
     Ok(parts)
 }
 
-/// Stable versions an upstream publishes, ordered oldest to newest.
-fn stable_versions(
+/// Stable versions an upstream tags, ordered oldest to newest, with every tag that
+/// normalizes to each. Old repositories often carry both `v3.4` and `v3.4.0`.
+fn stable_versions<'a>(
     upstream: &PackageUpstream,
-    releases: &[Release],
-) -> Result<BTreeMap<Vec<u64>, String>, String> {
-    let mut ordered = BTreeMap::new();
-    for release in releases {
-        if release.draft || release.prerelease || upstream.exclude_tags.contains(&release.tag_name)
-        {
+    tags: &'a BTreeMap<String, String>,
+) -> BTreeMap<Vec<u64>, Vec<(String, &'a str)>> {
+    let mut ordered: BTreeMap<_, Vec<_>> = BTreeMap::new();
+    for tag in tags.keys() {
+        if upstream.exclude_tags.contains(tag) {
             continue;
         }
-        let Some(version) = upstream.version_of(&release.tag_name) else {
+        let Some(version) = upstream.version_of(tag) else {
             continue;
         };
         let Ok(key) = version_key(&version) else {
             continue;
         };
-        if ordered.insert(key, version.clone()).is_some() {
-            return Err(format!(
-                "multiple release tags normalize to version `{version}`; narrow the upstream tag"
-            ));
-        }
+        ordered
+            .entry(key)
+            .or_default()
+            .push((version, tag.as_str()));
     }
-    Ok(ordered)
+    ordered
+}
+
+/// GitHub releases looked up by tag, each fetched at most once per upstream.
+struct Releases<F> {
+    fetch: F,
+    known: BTreeMap<String, Option<Release>>,
+}
+
+impl<F: FnMut(&str) -> Result<Option<Release>, String>> Releases<F> {
+    fn get(&mut self, tag: &str) -> Result<Option<&Release>, String> {
+        if !self.known.contains_key(tag) {
+            let release = (self.fetch)(tag)?;
+            self.known.insert(tag.to_string(), release);
+        }
+        Ok(self.known[tag].as_ref())
+    }
 }
 
 /// The digest of exactly what `system` downloads for `version`, or None when that release
@@ -60,7 +75,7 @@ fn pin(
     system: &str,
     version: &str,
     commit: Option<&str>,
-    releases: &[Release],
+    releases: &mut Releases<impl FnMut(&str) -> Result<Option<Release>, String>>,
     hash: &mut impl FnMut(&str) -> Result<String, String>,
 ) -> Result<Option<String>, String> {
     let candidate = definition.candidate(system, version, commit)?;
@@ -78,15 +93,17 @@ fn pin(
         .strip_prefix("github:")
         .and_then(|reference| reference.rsplit_once('@'))
         .ok_or_else(|| format!("unsupported release source `{source}`"))?;
-    if !repository.eq_ignore_ascii_case(upstream.repository()) {
+    if !upstream
+        .github()
+        .is_some_and(|expected| repository.eq_ignore_ascii_case(expected))
+    {
         return Err(format!(
             "downloads from {repository}, but discovers from {}",
-            upstream.repository()
+            upstream.label()
         ));
     }
     let Some(asset) = releases
-        .iter()
-        .find(|release| release.tag_name == tag)
+        .get(tag)?
         .and_then(|release| release.assets.iter().find(|asset| &asset.name == name))
     else {
         return Ok(None);
@@ -99,23 +116,28 @@ fn pin(
     Ok(Some(digest.to_string()))
 }
 
-/// Advances each platform to the newest release that publishes what it downloads.
+/// Advances each platform to the newest tag that publishes what it downloads.
 ///
 /// A platform never moves below its current version, and one whose asset is missing from
-/// newer releases stays where it is. Errors are returned per platform rather than raised,
-/// so one platform's failure cannot hold the others back.
+/// newer releases stays where it is. A tag whose GitHub release is a draft or prerelease
+/// is skipped. Errors are returned per platform rather than raised, so one platform's
+/// failure cannot hold the others back.
 pub(super) fn discover(
     upstream: &PackageUpstream,
     systems: &[String],
-    releases: &[Release],
+    tags: &BTreeMap<String, String>,
     definition: &mut PackageDefinition,
     mut hash: impl FnMut(&str) -> Result<String, String>,
-    mut commit_of: impl FnMut(&str) -> Result<String, String>,
+    release_of: impl FnMut(&str) -> Result<Option<Release>, String>,
 ) -> Result<Vec<String>, String> {
-    let versions = stable_versions(upstream, releases)?;
+    let versions = stable_versions(upstream, tags);
     if versions.is_empty() {
-        return Err("no matching stable releases".into());
+        return Err("no matching stable tags".into());
     }
+    let mut releases = Releases {
+        fetch: release_of,
+        known: BTreeMap::new(),
+    };
 
     let mut hashed: BTreeMap<String, String> = BTreeMap::new();
     let mut hash_once = |url: &str| {
@@ -127,19 +149,7 @@ pub(super) fn discover(
         Ok(digest)
     };
     let is_commit_needed = definition.uses_commit();
-    let mut commits: BTreeMap<String, String> = BTreeMap::new();
-    let mut commit_for = |version: &str| -> Result<Option<String>, String> {
-        if !is_commit_needed {
-            return Ok(None);
-        }
-        if let Some(commit) = commits.get(version) {
-            return Ok(Some(commit.clone()));
-        }
-        let commit = commit_of(&upstream.tag_for(version))?;
-        commits.insert(version.to_string(), commit.clone());
-        Ok(Some(commit))
-    };
-    let mut selected: BTreeMap<&str, BTreeMap<String, String>> = BTreeMap::new();
+    let mut selected: BTreeMap<(&str, &str), BTreeMap<String, String>> = BTreeMap::new();
     let mut errors = Vec::new();
     for system in systems {
         let current = definition
@@ -154,29 +164,39 @@ pub(super) fn discover(
                 continue;
             }
         };
-        for (key, version) in versions.iter().rev() {
+        for (key, candidates) in versions.iter().rev() {
             if current.as_ref().is_some_and(|current| key <= current) {
                 break;
             }
-            let commit = match commit_for(version) {
-                Ok(commit) => commit,
+            let [(version, tag)] = candidates.as_slice() else {
+                let tags: Vec<&str> = candidates.iter().map(|(_, tag)| *tag).collect();
+                errors.push(format!(
+                    "{system}: tags {} publish one version; narrow the upstream tag",
+                    tags.join(", ")
+                ));
+                break;
+            };
+            match releases.get(tag) {
+                Ok(Some(release)) if release.draft || release.prerelease => continue,
+                Ok(_) => {}
                 Err(error) => {
                     errors.push(format!("{system}: {version}: {error}"));
                     break;
                 }
-            };
+            }
+            let commit = is_commit_needed.then(|| tags[*tag].as_str());
             match pin(
                 definition,
                 upstream,
                 system,
                 version,
-                commit.as_deref(),
-                releases,
+                commit,
+                &mut releases,
                 &mut hash_once,
             ) {
                 Ok(Some(digest)) => {
                     selected
-                        .entry(version)
+                        .entry((version.as_str(), *tag))
                         .or_default()
                         .insert(system.clone(), digest);
                     break;
@@ -190,9 +210,10 @@ pub(super) fn discover(
         }
     }
 
-    for (version, digests) in selected {
+    for ((version, tag), digests) in selected {
         let systems: Vec<String> = digests.keys().cloned().collect();
-        definition.add_version(version, digests, None, commits.get(version).cloned())?;
+        let commit = is_commit_needed.then(|| tags[tag].clone());
+        definition.add_version(version, digests, None, commit)?;
         for system in &systems {
             definition.set_default_version(system, version)?;
         }
@@ -251,15 +272,32 @@ mod tests {
 
     const UPSTREAM: &str = r#"{ github = "owner/tool" }"#;
 
+    /// Tags every release, as a repository with only released tags would.
+    fn tags(releases: &[Release]) -> BTreeMap<String, String> {
+        releases
+            .iter()
+            .map(|release| (release.tag_name.clone(), "e".repeat(40)))
+            .collect()
+    }
+
+    fn lookup(releases: &[Release]) -> impl FnMut(&str) -> Result<Option<Release>, String> + '_ {
+        |tag| {
+            Ok(releases
+                .iter()
+                .find(|release| release.tag_name == tag)
+                .cloned())
+        }
+    }
+
     fn run(recipe: &mut PackageDefinition, releases: &[Release]) -> Vec<String> {
         let upstream = recipe.upstreams().remove(0);
         discover(
             &upstream.0,
             &upstream.1,
-            releases,
+            &tags(releases),
             recipe,
             |url| panic!("a prebuilt must not download {url}"),
-            |tag| panic!("{tag} needs no commit"),
+            lookup(releases),
         )
         .unwrap()
     }
@@ -400,17 +438,30 @@ mod tests {
             release("2", &["tool-2-aarch64-macos.tar.gz"]),
             release("2.0", &["tool-2.0-aarch64-macos.tar.gz"]),
         ];
-        let (upstream, systems) = recipe.upstreams().remove(0);
-        let error = discover(
-            &upstream,
-            &systems,
-            &releases,
-            &mut recipe,
-            |_| unreachable!(),
-            |tag| panic!("{tag} needs no commit"),
-        )
-        .unwrap_err();
-        assert!(error.contains("narrow the upstream tag"), "{error}");
+        let errors = run(&mut recipe, &releases);
+        assert!(
+            errors[0].contains("tags 2, 2.0 publish one version"),
+            "{errors:?}"
+        );
+        assert_eq!(
+            recipe.package.default_version_for("aarch64-macos"),
+            Some("1")
+        );
+
+        let mut current = definition(UPSTREAM, "3", &["aarch64-macos"]);
+        let releases = [
+            release("2", &["tool-2-aarch64-macos.tar.gz"]),
+            release("2.0", &["tool-2.0-aarch64-macos.tar.gz"]),
+            release("4", &["tool-4-aarch64-macos.tar.gz"]),
+        ];
+        assert!(
+            run(&mut current, &releases).is_empty(),
+            "older ties are irrelevant"
+        );
+        assert_eq!(
+            current.package.default_version_for("aarch64-macos"),
+            Some("4")
+        );
     }
 
     #[test]
@@ -463,23 +514,21 @@ mod tests {
             digest = "b".repeat(64)
         ))
         .unwrap();
-        let releases = [release("v99", &[]), release("v98", &[])];
+        let tags = BTreeMap::from([
+            ("v99".to_string(), "d".repeat(40)),
+            ("v98".to_string(), "a".repeat(40)),
+        ]);
         let (upstream, systems) = recipe.upstreams().remove(0);
 
-        let mut resolved = Vec::new();
         discover(
             &upstream,
             &systems,
-            &releases,
+            &tags,
             &mut recipe,
             |_| Ok("c".repeat(64)),
-            |tag| {
-                resolved.push(tag.to_string());
-                Ok("d".repeat(40))
-            },
+            |_| Ok(None),
         )
         .unwrap();
-        assert_eq!(resolved, ["v99"]);
         for system in &systems {
             let build = recipe.package.versions["99"].platforms[system]
                 .build
@@ -497,6 +546,7 @@ mod tests {
         );
     }
 
+    /// Tag-only upstreams such as krb5 publish no GitHub releases at all.
     #[test]
     fn source_discovery_hashes_one_archive_for_every_platform() {
         let mut recipe = PackageDefinition::from_lua(&format!(
@@ -519,20 +569,20 @@ mod tests {
             digest = "b".repeat(64)
         ))
         .unwrap();
-        let releases = [release("v99", &[]), release("v98", &[])];
+        let tags = tags(&[release("v99", &[]), release("v98", &[])]);
         let (upstream, systems) = recipe.upstreams().remove(0);
 
         let mut fetched = Vec::new();
         discover(
             &upstream,
             &systems,
-            &releases,
+            &tags,
             &mut recipe,
             |url| {
                 fetched.push(url.to_string());
                 Ok("c".repeat(64))
             },
-            |tag| panic!("{tag} needs no commit"),
+            |_| Ok(None),
         )
         .unwrap();
         assert_eq!(fetched, ["https://example.com/tool-v99.tar.gz"]);
@@ -548,11 +598,57 @@ mod tests {
         discover(
             &upstream,
             &systems,
-            &releases,
+            &tags,
             &mut recipe,
             |_| panic!("an unchanged source must not be downloaded again"),
-            |tag| panic!("{tag} needs no commit"),
+            |_| Ok(None),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn a_release_asset_waits_for_its_release_to_be_published() {
+        let mut recipe = definition(UPSTREAM, "1", &["aarch64-macos"]);
+        let released = [release("1", &["tool-1-aarch64-macos.tar.gz"])];
+        let mut tags = tags(&released);
+        tags.insert("2".into(), "f".repeat(40));
+        let (upstream, systems) = recipe.upstreams().remove(0);
+        let errors = discover(
+            &upstream,
+            &systems,
+            &tags,
+            &mut recipe,
+            |url| panic!("a prebuilt must not download {url}"),
+            lookup(&released),
+        )
+        .unwrap();
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(
+            recipe.package.default_version_for("aarch64-macos"),
+            Some("1")
+        );
+    }
+
+    #[test]
+    fn a_git_upstream_cannot_pin_github_release_assets() {
+        let mut recipe = definition(
+            r#"{ git = "https://codeberg.org/owner/tool.git" }"#,
+            "1",
+            &["aarch64-macos"],
+        );
+        let (upstream, systems) = recipe.upstreams().remove(0);
+        let errors = discover(
+            &upstream,
+            &systems,
+            &tags(&[release("2", &[])]),
+            &mut recipe,
+            |url| panic!("a prebuilt must not download {url}"),
+            |_| Ok(None),
+        )
+        .unwrap();
+        assert!(
+            errors[0].contains("discovers from https://codeberg.org"),
+            "{errors:?}"
+        );
     }
 }

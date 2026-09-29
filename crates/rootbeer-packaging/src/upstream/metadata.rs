@@ -6,7 +6,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use rootbeer_package::download::http_request;
+use rootbeer_package::download::{http_post, http_request};
 use rootbeer_store::hash_bytes;
 
 const MAX_BYTES: usize = 16 * 1024 * 1024;
@@ -60,7 +60,8 @@ impl MetadataCache {
         })
     }
 
-    pub fn fetch(&mut self, url: &str) -> Result<Value, String> {
+    /// GitHub API metadata, or None when the resource does not exist.
+    pub fn fetch(&mut self, url: &str) -> Result<Option<Value>, String> {
         self.fetch_with(url, |etag| {
             let token = std::env::var("GITHUB_TOKEN").ok();
             let mut request =
@@ -84,29 +85,46 @@ impl MetadataCache {
                 .get("etag")
                 .and_then(|value| value.to_str().ok())
                 .map(String::from);
-            let mut bytes = Vec::new();
-            response
-                .body_mut()
-                .as_reader()
-                .take((MAX_BYTES + 1) as u64)
-                .read_to_end(&mut bytes)
-                .map_err(|e| RequestError::Retry(e.to_string()))?;
-            if bytes.len() > MAX_BYTES {
-                return Err(RequestError::Permanent(format!(
-                    "metadata exceeds {MAX_BYTES} bytes"
-                )));
-            }
-            let body =
-                String::from_utf8(bytes).map_err(|e| RequestError::Permanent(e.to_string()))?;
+            let body = String::from_utf8(read_body(&mut response)?)
+                .map_err(|e| RequestError::Permanent(e.to_string()))?;
             Ok((status, etag, body))
         })
+    }
+
+    /// A repository's tags over git protocol v2, as an unparsed `ls-refs` response.
+    ///
+    /// Not cached: smart-HTTP has no validators, and one request lists every tag.
+    pub fn ls_refs(&mut self, url: &str) -> Result<Vec<u8>, String> {
+        let endpoint = format!("{}/git-upload-pack", url.trim_end_matches('/'));
+        let (status, body) = with_retries(url, || {
+            let mut response = http_post(&endpoint)
+                .header("Git-Protocol", "version=2")
+                .header("Content-Type", "application/x-git-upload-pack-request")
+                .header("Accept", "application/x-git-upload-pack-result")
+                .config()
+                .timeout_global(Some(Duration::from_secs(60)))
+                .http_status_as_error(false)
+                .build()
+                .send(super::git::LS_REFS)
+                .map_err(RequestError::from)?;
+            let status = response.status().as_u16();
+            if status != 200 {
+                return Ok((status, Vec::new()));
+            }
+            Ok((status, read_body(&mut response)?))
+        })?;
+        if status != 200 {
+            return Err(format!("unexpected git HTTP status {status}: {url}"));
+        }
+        self.statistics.fetched += 1;
+        Ok(body)
     }
 
     fn fetch_with(
         &mut self,
         url: &str,
         mut request: impl FnMut(Option<&str>) -> Result<(u16, Option<String>, String), RequestError>,
-    ) -> Result<Value, String> {
+    ) -> Result<Option<Value>, String> {
         let path = self
             .directory
             .join(format!("{}.json", hash_bytes(url.as_bytes())));
@@ -126,35 +144,19 @@ impl MetadataCache {
             Err(error) => return Err(error.to_string()),
         };
         let etag = cached.as_ref().and_then(|entry| entry.etag.as_deref());
-        let mut attempts = 0;
-        let (status, new_etag, body) = loop {
-            attempts += 1;
-            let failure = match request(etag) {
-                Ok((status @ (408 | 429 | 500 | 502 | 503 | 504), _, _)) => {
-                    RequestError::Retry(format!("metadata HTTP status {status}"))
-                }
-                Ok(response) => break response,
-                Err(error) => error,
-            };
-            match failure {
-                RequestError::Retry(error) if attempts == MAX_ATTEMPTS => {
-                    return Err(format!(
-                        "cannot fetch {url} after {attempts} attempts: {error}"
-                    ));
-                }
-                RequestError::Permanent(error) => {
-                    return Err(format!("cannot fetch {url}: {error}"))
-                }
-                RequestError::Retry(_) => std::thread::sleep(Duration::from_secs(attempts as u64)),
-            }
-        };
+        let (status, (new_etag, body)) = with_retries(url, || {
+            request(etag).map(|(status, etag, body)| (status, (etag, body)))
+        })?;
+        if status == 404 {
+            return Ok(None);
+        }
         if status == 304 {
             let entry = cached
                 .filter(|entry| entry.etag.is_some())
                 .ok_or("received 304 without a cached validator")?;
             let value = serde_json::from_str(&entry.body).map_err(|e| e.to_string())?;
             self.statistics.not_modified += 1;
-            return Ok(value);
+            return Ok(Some(value));
         }
         if status != 200 {
             return Err(format!("unexpected metadata HTTP status {status}: {url}"));
@@ -175,7 +177,50 @@ impl MetadataCache {
         temporary.as_file().sync_all().map_err(|e| e.to_string())?;
         temporary.persist(path).map_err(|e| e.to_string())?;
         self.statistics.fetched += 1;
-        Ok(value)
+        Ok(Some(value))
+    }
+}
+
+fn read_body(response: &mut ureq::http::Response<ureq::Body>) -> Result<Vec<u8>, RequestError> {
+    let mut bytes = Vec::new();
+    response
+        .body_mut()
+        .as_reader()
+        .take((MAX_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|e| RequestError::Retry(e.to_string()))?;
+    if bytes.len() > MAX_BYTES {
+        return Err(RequestError::Permanent(format!(
+            "metadata exceeds {MAX_BYTES} bytes"
+        )));
+    }
+    Ok(bytes)
+}
+
+/// Retries transport failures and transient statuses, returning any other status.
+fn with_retries<T>(
+    url: &str,
+    mut request: impl FnMut() -> Result<(u16, T), RequestError>,
+) -> Result<(u16, T), String> {
+    let mut attempts = 0;
+    loop {
+        attempts += 1;
+        let failure = match request() {
+            Ok((status @ (408 | 429 | 500 | 502 | 503 | 504), _)) => {
+                RequestError::Retry(format!("metadata HTTP status {status}"))
+            }
+            Ok(response) => return Ok(response),
+            Err(error) => error,
+        };
+        match failure {
+            RequestError::Retry(error) if attempts == MAX_ATTEMPTS => {
+                return Err(format!(
+                    "cannot fetch {url} after {attempts} attempts: {error}"
+                ));
+            }
+            RequestError::Permanent(error) => return Err(format!("cannot fetch {url}: {error}")),
+            RequestError::Retry(_) => std::thread::sleep(Duration::from_secs(attempts as u64)),
+        }
     }
 }
 
@@ -193,12 +238,14 @@ mod tests {
                 assert!(etag.is_none());
                 Ok((200, Some("\"one\"".into()), "{\"id\":42}".into()))
             })
+            .unwrap()
             .unwrap();
         let repeated = cache
             .fetch_with(url, |etag| {
                 assert_eq!(etag, Some("\"one\""));
                 Ok((304, None, String::new()))
             })
+            .unwrap()
             .unwrap();
         assert_eq!(value, repeated);
         assert_eq!(cache.statistics.fetched, 1);
@@ -210,6 +257,7 @@ mod tests {
             .fetch_with(url, |_| {
                 Ok((200, Some("\"two\"".into()), "{\"id\":43}".into()))
             })
+            .unwrap()
             .unwrap();
         assert_eq!(updated["id"], 43);
         cache
@@ -267,6 +315,7 @@ mod tests {
                     _ => panic!("too many requests"),
                 }
             })
+            .unwrap()
             .unwrap();
         assert_eq!(attempts, 3);
         assert_eq!(value, serde_json::json!([42]));
@@ -314,6 +363,7 @@ mod tests {
                 assert_eq!(etag, Some("one"));
                 Ok((304, None, String::new()))
             })
+            .unwrap()
             .unwrap();
         assert_eq!(value, serde_json::json!([42]));
     }
@@ -325,7 +375,6 @@ mod tests {
         let url = "https://api.github.com/repos/owner/tool/releases";
         for response in [
             Ok((401, None, String::new())),
-            Ok((404, None, String::new())),
             Ok((501, None, String::new())),
             Ok((200, Some("invalid".into()), "not json".into())),
             Err(ureq::Error::BadUri("invalid".into()).into()),
@@ -339,5 +388,17 @@ mod tests {
             assert_eq!(cache.statistics.fetched, 0);
             assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
         }
+    }
+
+    #[test]
+    fn a_missing_resource_is_none_and_not_cached() {
+        let root = tempfile::tempdir().unwrap();
+        let mut cache = MetadataCache::new(root.path()).unwrap();
+        let url = "https://api.github.com/repos/owner/tool/releases/tags/v1";
+        let value = cache
+            .fetch_with(url, |_| Ok((404, None, String::new())))
+            .unwrap();
+        assert!(value.is_none());
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
     }
 }

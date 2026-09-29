@@ -29,15 +29,14 @@ pub fn discover_updates(
     definitions: &BTreeMap<String, PackageDefinition>,
     cache: &Path,
     output: &Path,
-    max_pages: usize,
 ) -> Result<UpdateReport, String> {
-    let mut cache = MetadataCache::new(cache)?;
+    let cache = std::cell::RefCell::new(MetadataCache::new(cache)?);
     let downloads = rootbeer_package::download::DownloadCache::default();
     let mut report = discover_with_fetch(
         definitions,
         output,
-        max_pages,
-        |url| cache.fetch(url),
+        |url| cache.borrow_mut().fetch(url),
+        |url| cache.borrow_mut().ls_refs(url),
         |url| {
             downloads
                 .materialize(url, None)
@@ -45,7 +44,7 @@ pub fn discover_updates(
                 .map_err(|error| error.to_string())
         },
     )?;
-    report.metadata = cache.statistics;
+    report.metadata = cache.into_inner().statistics;
     write_report(output, &report)?;
     Ok(report)
 }
@@ -53,15 +52,12 @@ pub fn discover_updates(
 fn discover_with_fetch(
     definitions: &BTreeMap<String, PackageDefinition>,
     output: &Path,
-    max_pages: usize,
-    mut fetch: impl FnMut(&str) -> Result<Value, String>,
+    mut fetch: impl FnMut(&str) -> Result<Option<Value>, String>,
+    mut ls_refs: impl FnMut(&str) -> Result<Vec<u8>, String>,
     mut hash: impl FnMut(&str) -> Result<String, String>,
 ) -> Result<UpdateReport, String> {
     let catalog = PackageCatalog::from_definitions(definitions)?;
     validate_upstreams(definitions)?;
-    if !(1..=100).contains(&max_pages) {
-        return Err("max-pages must be between 1 and 100".into());
-    }
     let staging = crate::staging::staging(output)?;
     let destination = staging.path().join("updates");
     fs::create_dir(&destination).map_err(|e| e.to_string())?;
@@ -88,18 +84,21 @@ fn discover_with_fetch(
         let mut errors = Vec::new();
         let mut has_rule_changes = false;
         for (upstream, systems) in definition.upstreams() {
-            eprintln!("Discover {name} from {}", upstream.repository());
+            eprintln!("Discover {name} from {}", upstream.label());
             let discovery = discover_upstream(
                 &upstream,
                 &systems,
                 &mut recipe,
-                max_pages,
                 &mut fetch,
+                &mut ls_refs,
                 &mut hash,
             );
             match discovery {
                 Ok(discovery) => {
-                    if let Some(owner) = identities.insert(discovery.repository_id, name) {
+                    let owner = discovery
+                        .repository_id
+                        .and_then(|id| identities.insert(id, name));
+                    if let Some(owner) = owner {
                         if owner != name {
                             errors.push(format!("repository is already tracked as `{owner}`"));
                             recipe = definition.clone();
@@ -111,10 +110,10 @@ fn discover_with_fetch(
                         discovery
                             .errors
                             .into_iter()
-                            .map(|error| format!("{}: {error}", upstream.repository())),
+                            .map(|error| format!("{}: {error}", upstream.label())),
                     );
                 }
-                Err(error) => errors.push(format!("{}: {error}", upstream.repository())),
+                Err(error) => errors.push(format!("{}: {error}", upstream.label())),
             }
         }
 
@@ -216,7 +215,7 @@ fn write_report(output: &Path, report: &UpdateReport) -> Result<(), String> {
     }
     if !report.untracked.is_empty() {
         summary.push_str(&format!(
-            "\nNot tracked by GitHub discovery: {}.\n",
+            "\nNot tracked by discovery: {}.\n",
             report
                 .untracked
                 .iter()
@@ -290,6 +289,32 @@ mod tests {
         )
     }
 
+    /// An `ls-refs` response tagging every release.
+    fn refs(releases: &Value) -> Vec<u8> {
+        let mut body = String::new();
+        for release in releases.as_array().unwrap() {
+            let line = format!(
+                "{} refs/tags/{}\n",
+                "e".repeat(40),
+                release["tag_name"].as_str().unwrap()
+            );
+            body.push_str(&format!("{:04x}{line}", line.len() + 4));
+        }
+        body.push_str("0000");
+        body.into_bytes()
+    }
+
+    /// Answers a `releases/tags/{tag}` request from a release list.
+    fn release_by_tag(releases: &Value, url: &str) -> Option<Option<Value>> {
+        let (_, tag) = url.split_once("/releases/tags/")?;
+        let found = releases
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|release| release["tag_name"] == tag);
+        Some(found.cloned())
+    }
+
     #[test]
     fn a_failing_upstream_does_not_stop_the_other_packages() {
         let root = tempfile::tempdir().unwrap();
@@ -310,15 +335,17 @@ mod tests {
             if url.contains("/broken") {
                 return Err("rate limited".into());
             }
-            if !url.contains("/releases") {
-                return Ok(
-                    serde_json::json!({"id": 42, "full_name": "owner/tool", "description": "Tool"}),
-                );
+            if let Some(release) = release_by_tag(&releases("tool", &["v1", "v2"]), url) {
+                return Ok(release);
             }
-            Ok(releases("tool", &["v1", "v2"]))
+            Ok(Some(
+                serde_json::json!({"id": 42, "full_name": "owner/tool", "description": "Tool"}),
+            ))
         };
+        let ls_refs = |_: &str| Ok(refs(&releases("tool", &["v1", "v2"])));
         let output = root.path().join("first");
-        let report = discover_with_fetch(&definitions, &output, 1, fetch, no_downloads).unwrap();
+        let report =
+            discover_with_fetch(&definitions, &output, fetch, ls_refs, no_downloads).unwrap();
         assert_eq!(report.updated, ["tool"]);
         assert_eq!(report.errors["broken"], "owner/broken: rate limited");
         assert_eq!(report.defaults["tool"]["aarch64-macos"], "2");
@@ -337,7 +364,8 @@ mod tests {
         );
 
         let repeat = root.path().join("repeat");
-        let report = discover_with_fetch(&candidates, &repeat, 1, fetch, no_downloads).unwrap();
+        let report =
+            discover_with_fetch(&candidates, &repeat, fetch, ls_refs, no_downloads).unwrap();
         assert!(report.updated.is_empty());
         assert_eq!(report.unchanged, ["tool"]);
     }
@@ -360,15 +388,15 @@ mod tests {
         let report = discover_with_fetch(
             &definitions,
             &output,
-            1,
             |url| {
-                if !url.contains("/releases") {
-                    return Ok(
-                        serde_json::json!({"id": 42, "full_name": "owner/tool", "description": "Tool"}),
-                    );
+                if let Some(release) = release_by_tag(&releases("tool", &["v1", "v2"]), url) {
+                    return Ok(release);
                 }
-                Ok(releases("tool", &["v1", "v2"]))
+                Ok(Some(
+                    serde_json::json!({"id": 42, "full_name": "owner/tool", "description": "Tool"}),
+                ))
             },
+            |_| Ok(refs(&releases("tool", &["v1", "v2"]))),
             no_downloads,
         )
         .unwrap();
@@ -437,30 +465,29 @@ mod tests {
                              "digest": format!("sha256:{}", digest(seed)) }],
             })
         };
+        let macos = Value::Array(vec![release("3", "helium_3_arm64-macos.dmg".into(), "3")]);
+        let linux = Value::Array(vec![release("2", "helium-2-x86_64.AppImage".into(), "2")]);
         let fetch = |url: &str| match url {
-            "https://api.github.com/repos/imputnet/helium-macos" => {
-                Ok(serde_json::json!({"id": 1, "full_name": "imputnet/helium-macos"}))
-            }
-            "https://api.github.com/repos/imputnet/helium-linux" => {
-                Ok(serde_json::json!({"id": 2, "full_name": "imputnet/helium-linux"}))
-            }
-            url if url.contains("helium-macos/releases") => Ok(Value::Array(vec![release(
-                "3",
-                "helium_3_arm64-macos.dmg".into(),
-                "3",
-            )])),
-            url if url.contains("helium-linux/releases") => Ok(Value::Array(vec![release(
-                "2",
-                "helium-2-x86_64.AppImage".into(),
-                "2",
-            )])),
+            "https://api.github.com/repos/imputnet/helium-macos" => Ok(Some(
+                serde_json::json!({"id": 1, "full_name": "imputnet/helium-macos"}),
+            )),
+            "https://api.github.com/repos/imputnet/helium-linux" => Ok(Some(
+                serde_json::json!({"id": 2, "full_name": "imputnet/helium-linux"}),
+            )),
+            url if url.contains("helium-macos/") => Ok(release_by_tag(&macos, url).unwrap()),
+            url if url.contains("helium-linux/") => Ok(release_by_tag(&linux, url).unwrap()),
+            url => Err(format!("unexpected {url}")),
+        };
+        let ls_refs = |url: &str| match url {
+            "https://github.com/imputnet/helium-macos.git" => Ok(refs(&macos)),
+            "https://github.com/imputnet/helium-linux.git" => Ok(refs(&linux)),
             url => Err(format!("unexpected {url}")),
         };
         let report = discover_with_fetch(
             &definitions,
             &root.path().join("output"),
-            1,
             fetch,
+            ls_refs,
             no_downloads,
         )
         .unwrap();

@@ -9,15 +9,14 @@ pub fn validate_upstreams(definitions: &BTreeMap<String, PackageDefinition>) -> 
     let mut ids = BTreeMap::new();
     for (name, definition) in definitions {
         for (upstream, _) in definition.upstreams() {
-            let repository = upstream.repository().to_ascii_lowercase();
             let owners = [
-                repositories.insert(repository, name),
+                repositories.insert(upstream.identity(), name),
                 upstream.repository_id.and_then(|id| ids.insert(id, name)),
             ];
             if owners.into_iter().flatten().any(|owner| owner != name) {
                 return Err(format!(
                     "{}: upstream already belongs to another package",
-                    upstream.repository()
+                    upstream.label()
                 ));
             }
         }

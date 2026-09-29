@@ -324,7 +324,9 @@ impl Recipe {
         );
         for upstream in declared {
             if upstream.repository_id.is_none()
-                && upstream.repository().eq_ignore_ascii_case(repository)
+                && upstream
+                    .github()
+                    .is_some_and(|declared| declared.eq_ignore_ascii_case(repository))
             {
                 upstream.repository_id = Some(id);
             }

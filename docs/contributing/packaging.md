@@ -206,7 +206,7 @@ digest. Omit `upstream` for these recipes and update them by hand.
 
 ## Track upstream releases
 
-`upstream` describes release discovery, independently of how the package is built:
+`upstream` describes version discovery, independently of how the package is built:
 
 ```lua
 upstream = {
@@ -217,24 +217,29 @@ upstream = {
 },
 ```
 
-- `tag` maps a version to its release tag; it defaults to `{version}`.
+- `tag` maps a version to its git tag; it defaults to `{version}`.
 - `separator` replaces the dots of a version inside its tag (`curl-8_22_0`).
 - `exclude_tags` drops unrelated tags that would otherwise fail discovery.
 - `repository_id` pins the repository's identity, so a rename or takeover stops
   discovery. Discovery fills it in on first run.
 
-GitHub is the only upstream provider today. Omit `upstream` to opt out of discovery.
+Repositories hosted elsewhere use `git` with an HTTPS URL, such as
+`git = "https://gitlab.com/cmocka/cmocka.git"`. Use `github` for GitHub, which also
+checks the repository's identity and releases. Omit `upstream` to opt out of discovery.
 
 ```sh
 rootbeer-forge --catalog packages updates --cache .upstream-metadata --output candidates
 ```
 
-Discovery considers stable dotted-numeric versions and skips drafts, prereleases,
-excluded tags, and tags the template doesn't match. Tags normalizing to the same
-version fail rather than guess. Each platform advances to the newest release that
-publishes what it downloads, and never moves below its current version. For a GitHub
-prebuilt, the digest is the one GitHub publishes for the asset; for a URL or source
-archive, discovery downloads it once and hashes the bytes. A new version inherits
+Discovery lists the repository's tags over git smart-HTTP and considers stable
+dotted-numeric versions, skipping excluded tags, tags the template doesn't match, and
+tags whose GitHub release is a draft or prerelease. A tag needs no GitHub release
+unless the platform downloads a release asset. When tags such as `v3.4` and `v3.4.0`
+normalize to a version a platform would move to, that platform fails rather than
+guess. Each platform advances to the newest tag that publishes what it downloads, and
+never moves below its current version. For a GitHub prebuilt, the digest is the one
+GitHub publishes for the asset; for a URL or source archive, discovery downloads it
+once and hashes the bytes. A new version inherits
 `default_license`. Nothing is built or executed during discovery.
 
 `updates` writes `report.json`, `summary.md`, and a complete candidate catalog in

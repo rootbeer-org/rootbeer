@@ -74,13 +74,16 @@ impl PackageCatalog {
         catalog.validate()?;
         for (name, definition) in definitions {
             for (upstream, _) in definition.upstreams() {
+                let Some(repository) = upstream.github() else {
+                    continue;
+                };
                 let is_source = definition
                     .package
                     .versions
                     .values()
                     .flat_map(|entry| entry.platforms.values())
                     .all(|recipe| recipe.build.is_some());
-                super::upstream::check_identity(&catalog, name, upstream.repository(), is_source)?;
+                super::upstream::check_identity(&catalog, name, repository, is_source)?;
             }
         }
         Ok(catalog)

@@ -551,11 +551,8 @@ fn retry_with_sleep<T>(
     unreachable!()
 }
 
-pub fn http_request(
-    url: &str,
-    token: Option<&str>,
-) -> ureq::RequestBuilder<ureq::typestate::WithoutBody> {
-    let agent: ureq::Agent = ureq::Agent::config_builder()
+fn http_agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
         .redirect_auth_headers(ureq::config::RedirectAuthHeaders::Never)
         .timeout_resolve(Some(Duration::from_secs(30)))
         .timeout_connect(Some(Duration::from_secs(30)))
@@ -563,8 +560,19 @@ pub fn http_request(
         .timeout_recv_response(Some(Duration::from_secs(30)))
         .timeout_recv_body(Some(Duration::from_secs(30)))
         .build()
-        .into();
-    let request = agent.get(url).header("User-Agent", USER_AGENT);
+        .into()
+}
+
+/// An unauthenticated POST, such as a git smart-HTTP request.
+pub fn http_post(url: &str) -> ureq::RequestBuilder<ureq::typestate::WithBody> {
+    http_agent().post(url).header("User-Agent", USER_AGENT)
+}
+
+pub fn http_request(
+    url: &str,
+    token: Option<&str>,
+) -> ureq::RequestBuilder<ureq::typestate::WithoutBody> {
+    let request = http_agent().get(url).header("User-Agent", USER_AGENT);
     let Some(token) = token.map(str::trim).filter(|token| !token.is_empty()) else {
         return request;
     };

@@ -32,7 +32,7 @@ pub struct PackageUpstream {
     /// Pins the GitHub repository's identity so a rename or takeover is noticed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repository_id: Option<u64>,
-    /// Release tag for a version, such as `v{version}`; `{version}` alone when omitted.
+    /// Git tag for a version, such as `v{version}`; `{version}` alone when omitted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tag: Option<String>,
     /// Replaces the dots of a version inside its tag, for tags such as `curl-8_22_0`.
@@ -45,20 +45,48 @@ pub struct PackageUpstream {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UpstreamProvider {
+    /// An `owner/repo` whose identity and release assets discovery also checks.
     Github(String),
+    /// An HTTPS repository on any other host, discovered from its tags alone.
+    Git(String),
 }
 
 impl PackageUpstream {
-    pub fn repository(&self) -> &str {
-        let UpstreamProvider::Github(repository) = &self.provider;
-        repository
+    /// The GitHub repository, when discovery can check its identity and releases.
+    pub fn github(&self) -> Option<&str> {
+        match &self.provider {
+            UpstreamProvider::Github(repository) => Some(repository),
+            UpstreamProvider::Git(_) => None,
+        }
+    }
+
+    /// Names the upstream in logs and errors, as its recipe spells it.
+    pub fn label(&self) -> &str {
+        match &self.provider {
+            UpstreamProvider::Github(name) | UpstreamProvider::Git(name) => name,
+        }
+    }
+
+    /// The repository discovery lists tags from.
+    pub fn git_url(&self) -> String {
+        match &self.provider {
+            UpstreamProvider::Github(repository) => format!("https://github.com/{repository}.git"),
+            UpstreamProvider::Git(url) => url.clone(),
+        }
+    }
+
+    /// Compares repositories regardless of case, trailing slashes, or a `.git` suffix.
+    pub fn identity(&self) -> String {
+        let url = self.git_url().to_ascii_lowercase();
+        let url = url.trim_end_matches('/');
+        url.strip_suffix(".git").unwrap_or(url).to_string()
     }
 
     fn tag_template(&self) -> &str {
         self.tag.as_deref().unwrap_or("{version}")
     }
 
-    /// The release tag that publishes `version`.
+    /// The tag that publishes `version`.
     pub fn tag_for(&self, version: &str) -> String {
         let version = match &self.separator {
             Some(separator) => version.replace('.', separator),
@@ -67,7 +95,7 @@ impl PackageUpstream {
         self.tag_template().replace("{version}", &version)
     }
 
-    /// The version a release tag publishes, when the tag belongs to this upstream.
+    /// The version a tag publishes, when the tag belongs to this upstream.
     pub fn version_of(&self, tag: &str) -> Option<String> {
         let (prefix, suffix) = self.tag_template().split_once("{version}")?;
         let version = tag.strip_prefix(prefix)?.strip_suffix(suffix)?;
@@ -81,7 +109,31 @@ impl PackageUpstream {
     }
 
     pub fn validate(&self) -> Result<(), String> {
-        super::github::repository(self.repository())?;
+        match &self.provider {
+            UpstreamProvider::Github(repository) => {
+                super::github::repository(repository)?;
+            }
+            UpstreamProvider::Git(url) => {
+                let host = url
+                    .strip_prefix("https://")
+                    .and_then(|rest| rest.split('/').next())
+                    .filter(|host| !host.is_empty())
+                    .ok_or_else(|| format!("git upstream `{url}` must be an HTTPS URL"))?;
+                if url.contains(|c: char| c.is_whitespace() || c == '?' || c == '#') {
+                    return Err(format!(
+                        "git upstream `{url}` must be a plain repository URL"
+                    ));
+                }
+                if host.eq_ignore_ascii_case("github.com") {
+                    return Err(format!(
+                        "declare `{url}` as `github` so discovery pins its identity"
+                    ));
+                }
+                if self.repository_id.is_some() {
+                    return Err("repository_id applies only to a github upstream".into());
+                }
+            }
+        }
         if self.repository_id == Some(0) {
             return Err("invalid repository ID".into());
         }
@@ -275,7 +327,7 @@ mod tests {
         let repositories: Vec<_> = definition
             .upstream
             .values()
-            .map(PackageUpstream::repository)
+            .map(PackageUpstream::label)
             .collect();
         assert_eq!(
             repositories,
@@ -349,6 +401,38 @@ mod tests {
     }
 
     #[test]
+    fn git_upstreams_are_plain_https_repositories_off_github() {
+        let git = |url: &str, fields: &str| {
+            let (lua, value) = lua::evaluate(&format!("return {{ git = \"{url}\", {fields} }}"))?;
+            let upstream: PackageUpstream =
+                lua.from_value(value).map_err(|error| error.to_string())?;
+            upstream.validate().map(|()| upstream)
+        };
+        let cmocka = git("https://gitlab.com/cmocka/cmocka.git", "").unwrap();
+        assert_eq!(cmocka.github(), None);
+        assert_eq!(
+            cmocka.identity(),
+            git("https://GitLab.com/cmocka/cmocka/", "")
+                .unwrap()
+                .identity()
+        );
+
+        for (url, fields) in [
+            ("http://gitlab.com/cmocka/cmocka.git", ""),
+            ("https:///cmocka.git", ""),
+            ("https://gitlab.com/cmocka/cmocka.git?ref=main", ""),
+            ("https://github.com/owner/tool.git", ""),
+            ("https://gitlab.com/cmocka/cmocka.git", "repository_id = 1"),
+        ] {
+            assert!(git(url, fields).is_err(), "accepted `{url}` {fields}");
+        }
+        assert_eq!(
+            upstream("").unwrap().identity(),
+            "https://github.com/owner/tool"
+        );
+    }
+
+    #[test]
     fn a_platform_upstream_overrides_the_shared_one() {
         let source = HELIUM
             .replace(r#"upstream = { github = "imputnet/helium-linux" },"#, "")
@@ -360,7 +444,7 @@ mod tests {
         let groups: Vec<_> = definition
             .upstreams()
             .into_iter()
-            .map(|(upstream, systems)| (upstream.repository().to_string(), systems))
+            .map(|(upstream, systems)| (upstream.label().to_string(), systems))
             .collect();
         assert_eq!(
             groups,
