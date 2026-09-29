@@ -5,6 +5,8 @@ use mlua::LuaSerdeExt;
 use serde::Serialize;
 use serde_json::Value;
 
+use super::comments::{Comments, Key};
+
 pub fn read<T: serde::de::DeserializeOwned>(source: &str) -> Result<T, String> {
     let (lua, value) = evaluate(source)?;
     lua.from_value(value).map_err(|e| e.to_string())
@@ -32,9 +34,22 @@ pub(crate) fn evaluate(source: &str) -> Result<(Lua, mlua::Value), String> {
     Ok((lua, value))
 }
 
-pub(crate) fn write(value: &impl Serialize) -> Result<String, String> {
+/// Renders `value`, placing each comment beside the field it documented.
+pub(crate) fn write_commented(
+    value: &impl Serialize,
+    comments: &Comments,
+) -> Result<String, String> {
     let value = serde_json::to_value(value).map_err(|e| e.to_string())?;
-    Ok(format!("return {}\n", render(&value, 0)))
+    let renderer = Renderer { comments };
+    let header: String = comments
+        .header
+        .iter()
+        .map(|line| format!("{line}\n"))
+        .collect();
+    Ok(format!(
+        "{header}return {}\n",
+        renderer.field(&value, 0, 0, &mut Vec::new())
+    ))
 }
 
 fn quote(value: &str) -> String {
@@ -53,48 +68,90 @@ fn quote(value: &str) -> String {
     output
 }
 
-fn render(value: &Value, depth: usize) -> String {
-    render_field(value, depth, 0)
+struct Renderer<'a> {
+    comments: &'a Comments,
 }
 
-fn render_field(value: &Value, depth: usize, prefix: usize) -> String {
-    match value {
-        Value::Null => "nil".into(),
-        Value::Bool(value) => value.to_string(),
-        Value::Number(value) => value.to_string(),
-        Value::String(value) => quote(value),
-        Value::Array(values) if values.is_empty() => "{}".into(),
-        Value::Object(values) if values.is_empty() => "{}".into(),
-        Value::Array(values) => {
-            if values
-                .iter()
-                .all(|value| !value.is_array() && !value.is_object())
-            {
-                let inline = format!(
-                    "{{ {} }}",
-                    values
-                        .iter()
-                        .map(|value| render(value, depth + 1))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                );
-                if depth * 4 + prefix + inline.len() < 100 {
-                    return inline;
+impl Renderer<'_> {
+    fn field(&self, value: &Value, depth: usize, prefix: usize, path: &mut Vec<Key>) -> String {
+        match value {
+            Value::Null => "nil".into(),
+            Value::Bool(value) => value.to_string(),
+            Value::Number(value) => value.to_string(),
+            Value::String(value) => quote(value),
+            Value::Array(values) if values.is_empty() => "{}".into(),
+            Value::Object(values) if values.is_empty() => "{}".into(),
+            Value::Array(values) => {
+                if values
+                    .iter()
+                    .all(|value| !value.is_array() && !value.is_object())
+                    && !self.comments.has_children(path)
+                {
+                    let inline = format!(
+                        "{{ {} }}",
+                        values
+                            .iter()
+                            .map(|value| self.field(value, depth + 1, 0, path))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                    if depth * 4 + prefix + inline.len() < 100 {
+                        return inline;
+                    }
                 }
+                let entries = values.iter().enumerate().map(|(index, value)| {
+                    path.push(Key::Index(index));
+                    let entry = self.field(value, depth + 1, 0, path);
+                    let entry = (path.clone(), entry);
+                    path.pop();
+                    entry
+                });
+                let entries: Vec<_> = entries.collect();
+                self.table(entries, depth, path)
             }
-            let entries = values.iter().map(|value| render(value, depth + 1));
-            table(entries, depth)
+            Value::Object(values) => {
+                // A flattened recipe reads `{}` back as a map, so an empty list has no spelling
+                // that survives; every list field defaults, so omitting it means the same thing.
+                let entries = values.iter().filter(|(_, value)| !is_empty_list(value));
+                let entries: Vec<_> = entries
+                    .map(|(key, value)| {
+                        let name = field(key);
+                        path.push(Key::Field(key.clone()));
+                        let rendered = self.field(value, depth + 1, name.len() + 3, path);
+                        let entry = (path.clone(), format!("{name} = {rendered}"));
+                        path.pop();
+                        entry
+                    })
+                    .collect();
+                self.table(entries, depth, path)
+            }
         }
-        Value::Object(values) => {
-            // A flattened recipe reads `{}` back as a map, so an empty list has no spelling
-            // that survives; every list field defaults, so omitting it means the same thing.
-            let entries = values.iter().filter(|(_, value)| !is_empty_list(value));
-            let entries = entries.map(|(key, value)| {
-                let key = field(key);
-                format!("{key} = {}", render_field(value, depth + 1, key.len() + 3))
-            });
-            table(entries, depth)
+    }
+
+    fn table(&self, entries: Vec<(Vec<Key>, String)>, depth: usize, path: &[Key]) -> String {
+        let indent = "    ".repeat(depth + 1);
+        let mut lines = Vec::new();
+        for (key, entry) in entries {
+            let comment = self.comments.get(&key);
+            for line in comment.iter().flat_map(|comment| &comment.leading) {
+                lines.push(format!("{indent}{line}"));
+            }
+            match comment.and_then(|comment| comment.trailing.as_ref()) {
+                Some(trailing) => lines.push(format!("{indent}{entry}, {trailing}")),
+                None => lines.push(format!("{indent}{entry},")),
+            }
         }
+        let mut end = path.to_vec();
+        end.push(Key::End);
+        for line in self
+            .comments
+            .get(&end)
+            .iter()
+            .flat_map(|comment| &comment.leading)
+        {
+            lines.push(format!("{indent}{line}"));
+        }
+        format!("{{\n{}\n{}}}", lines.join("\n"), "    ".repeat(depth))
     }
 }
 
@@ -143,12 +200,6 @@ fn field(key: &str) -> String {
     format!("[{}]", quote(key))
 }
 
-fn table(entries: impl Iterator<Item = String>, depth: usize) -> String {
-    let indent = "    ".repeat(depth + 1);
-    let entries: Vec<_> = entries.map(|entry| format!("{indent}{entry},")).collect();
-    format!("{{\n{}\n{}}}", entries.join("\n"), "    ".repeat(depth))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -164,7 +215,7 @@ mod tests {
             ("end", "reserved Lua keyword"),
         ]);
         let output: std::collections::BTreeMap<String, String> =
-            read(&write(&input).unwrap()).unwrap();
+            read(&write_commented(&input, &Comments::default()).unwrap()).unwrap();
         for (key, value) in input {
             assert_eq!(output[key], value);
         }

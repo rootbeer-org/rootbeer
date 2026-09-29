@@ -438,6 +438,7 @@ impl Recipe {
             package,
             upstream: self.upstream(),
             authoring: Some(self.clone()),
+            comments: Default::default(),
         })
     }
 
