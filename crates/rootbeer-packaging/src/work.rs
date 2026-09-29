@@ -417,17 +417,7 @@ pub enum Outcome {
     },
 }
 
-/// Builds one planned task into `output`, installing the dependency builds found in
-/// `dependencies`. A job on another runner image than its planner keeps its own key.
-pub fn build_task(
-    catalog: &PackageCatalog,
-    plan: &WorkPlan,
-    package: &str,
-    output: &Path,
-    dependencies: &Path,
-    cache: &Path,
-    context: &str,
-) -> Result<Outcome, String> {
+fn check_plan(catalog: &PackageCatalog, plan: &WorkPlan) -> Result<String, String> {
     let system = ResolveContext::current().system;
     if plan.system != system {
         return Err(format!(
@@ -441,6 +431,58 @@ pub fn build_task(
     if plan.catalog_sha256 != catalog.sha256() {
         return Err("recipes changed since this plan was made".into());
     }
+    Ok(system)
+}
+
+/// The key each planned package has on a runner with `context`: its planned key on the planner's
+/// runner, and otherwise the key a job there builds it under, since runner images can roll out
+/// between planning and building.
+pub fn runner_keys(
+    catalog: &PackageCatalog,
+    plan: &WorkPlan,
+    packages: &[&str],
+    context: &str,
+) -> Result<BTreeMap<String, String>, String> {
+    check_plan(catalog, plan)?;
+    if context == plan.context || packages.is_empty() {
+        return packages
+            .iter()
+            .map(|package| Ok((package.to_string(), plan.task(package)?.key.clone())))
+            .collect();
+    }
+    let requests: Vec<_> = packages.iter().map(|package| package.to_string()).collect();
+    let pdr = RepositoryResolver::new(&plan.pdr);
+    let planned = plan_packages(
+        catalog,
+        &requests,
+        &BuildOptions::default(),
+        context,
+        Some(&pdr),
+    )?;
+    packages
+        .iter()
+        .map(|package| {
+            let task = planned
+                .iter()
+                .find(|task| task.package == *package)
+                .ok_or_else(|| format!("{package} has no recipe for {}", plan.system))?;
+            Ok((package.to_string(), task.key.clone()))
+        })
+        .collect()
+}
+
+/// Builds one planned task into `output`, installing the dependency builds found in
+/// `dependencies`. A job on another runner image than its planner keeps its own key.
+pub fn build_task(
+    catalog: &PackageCatalog,
+    plan: &WorkPlan,
+    package: &str,
+    output: &Path,
+    dependencies: &Path,
+    cache: &Path,
+    context: &str,
+) -> Result<Outcome, String> {
+    let system = check_plan(catalog, plan)?;
     let task = plan.task(package)?;
     let expected = match &task.work {
         Work::Build { dependencies, .. } => dependencies,
@@ -802,5 +844,41 @@ mod tests {
         assert_eq!(levels[0][0].package, "lib@1");
         assert_eq!(levels[1][0].package, "app@1");
         assert!(plan.task("missing@1").is_err());
+    }
+
+    #[test]
+    fn runner_keys_are_planned_keys_only_on_the_planner_runner() {
+        let catalog = crate::test_catalog::catalog();
+        let mut plan = WorkPlan {
+            schema: SCHEMA,
+            system: ResolveContext::current().system,
+            context: "planner".into(),
+            catalog_sha256: catalog.sha256(),
+            engine: rootbeer_build::engine_generation().into(),
+            pdr: RepositoryPin {
+                url: "https://example.invalid/current.json".into(),
+                public_key: "c".repeat(66),
+                root: "d".repeat(64),
+            },
+            registry: "owner/pdr".into(),
+            tasks: vec![WorkTask {
+                package: "missing@1".into(),
+                name: "missing".into(),
+                key: "f".repeat(64),
+                work: Work::Build {
+                    level: 0,
+                    dependencies: Vec::new(),
+                },
+            }],
+        };
+
+        let keys = runner_keys(catalog, &plan, &["missing@1"], "planner").unwrap();
+        assert_eq!(keys["missing@1"], "f".repeat(64));
+        // Another runner plans the package itself rather than trusting the planner's key.
+        assert!(runner_keys(catalog, &plan, &["missing@1"], "rolled-out").is_err());
+
+        plan.engine = "0".repeat(64);
+        let error = runner_keys(catalog, &plan, &["missing@1"], "planner").unwrap_err();
+        assert!(error.contains("another engine"), "{error}");
     }
 }
