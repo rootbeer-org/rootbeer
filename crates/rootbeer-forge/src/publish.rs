@@ -70,6 +70,7 @@ pub fn publish(
                 done.push(package);
             }
             Err(error) => {
+                eprintln!("error: {}: {error}", build.display());
                 text.push_str(&format!("- Failed `{}`: {error}\n", build.display()));
                 failures.push(error);
             }

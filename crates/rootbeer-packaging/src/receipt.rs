@@ -178,12 +178,7 @@ pub(crate) fn validate_receipt(
             .is_none_or(|sha| !is_sha256(sha))
         || !matches!(&package.source, LockedSource::File { sha256, .. } if is_sha256(sha256))
         || package.provides.apps != recipe.apps
-        || package.provides.bins.len() != recipe.bins.names().len()
-        || recipe
-            .bins
-            .names()
-            .iter()
-            .any(|bin| package.provides.bins.get(*bin) != Some(&PathBuf::from("bin").join(bin)))
+        || package.provides.bins != recipe.bins.source_paths()
     {
         return Err(format!(
             "{}: invalid artifact hash, layout, or commands",

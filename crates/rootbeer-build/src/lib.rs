@@ -741,15 +741,7 @@ fn compile(
             }
         }
     }
-    // A source build owns its prefix layout, so names without paths install under bin/.
-    let bins: BTreeMap<String, PathBuf> = recipe.bins.paths().cloned().unwrap_or_else(|| {
-        recipe
-            .bins
-            .names()
-            .into_iter()
-            .map(|bin| (bin.clone(), PathBuf::from("bin").join(bin)))
-            .collect()
-    });
+    let bins = recipe.bins.source_paths();
     for (name, path) in &bins {
         let path = prefix
             .join(path)

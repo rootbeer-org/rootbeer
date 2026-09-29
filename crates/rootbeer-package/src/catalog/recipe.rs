@@ -55,6 +55,16 @@ impl Bins {
     pub fn is_empty(&self) -> bool {
         self.names().is_empty()
     }
+
+    /// Where a source build installs each command: its declared path, else `bin/<name>`.
+    pub fn source_paths(&self) -> BTreeMap<String, PathBuf> {
+        self.paths().cloned().unwrap_or_else(|| {
+            self.names()
+                .into_iter()
+                .map(|bin| (bin.clone(), PathBuf::from("bin").join(bin)))
+                .collect()
+        })
+    }
 }
 
 /// A package's identity and the versions a PDR publishes for it.
@@ -367,5 +377,24 @@ mod forward_compatibility_tests {
             recipe.sha256(),
             rootbeer_catalog::canonical_sha256(&original).unwrap()
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_builds_install_named_commands_under_bin_unless_a_path_is_declared() {
+        let names = Bins::Names(vec!["ssh".into()]);
+        assert_eq!(
+            names.source_paths(),
+            BTreeMap::from([("ssh".to_string(), PathBuf::from("bin/ssh"))])
+        );
+        let paths = Bins::Paths(BTreeMap::from([(
+            "sshd".to_string(),
+            PathBuf::from("sbin/sshd"),
+        )]));
+        assert_eq!(paths.source_paths(), paths.paths().unwrap().clone());
     }
 }
