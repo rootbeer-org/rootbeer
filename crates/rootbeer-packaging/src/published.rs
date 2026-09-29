@@ -63,6 +63,16 @@ impl PublishedDependencies {
             let bytes = String::from_utf8(bytes).map_err(|error| error.to_string())?;
             records.insert(key.clone(), Published { record, bytes });
         }
+        let packages: BTreeMap<_, _> = records
+            .iter()
+            .map(|(key, published)| (key.clone(), &published.record.artifact.package))
+            .collect();
+        let is_source = |key: &str| {
+            find_recipe_for_system(catalog, key, system)
+                .is_ok_and(|(_, _, recipe)| recipe.build.is_some())
+        };
+        let consistent = consistent_closures(&packages, is_source);
+        records.retain(|key, _| consistent.contains(key));
         Ok(Self { records })
     }
 
@@ -129,6 +139,41 @@ impl PublishedDependencies {
             )?;
         }
         Ok(())
+    }
+}
+
+/// The published builds whose runtime closures name exactly the builds published now.
+///
+/// A record links the dependency builds that existed when it was published. Once one of those
+/// is republished or compiled anew, installing the record beside the current build would give
+/// it a runtime closure it was never linked against, so it is compiled instead, and so are its
+/// dependents in turn. Prebuilt runtime dependencies are never rebuilt, so they always match.
+fn consistent_closures(
+    packages: &BTreeMap<String, &LockedPackage>,
+    is_source: impl Fn(&str) -> bool,
+) -> std::collections::BTreeSet<String> {
+    let mut kept: std::collections::BTreeSet<String> = packages.keys().cloned().collect();
+    loop {
+        let stale: Vec<String> = kept
+            .iter()
+            .filter(|key| {
+                rootbeer_package::runtime::closure(packages[*key]).map_or(true, |closure| {
+                    closure.iter().any(|dependency| {
+                        let id = dependency.id();
+                        is_source(&id)
+                            && (!kept.contains(&id)
+                                || packages[&id].output_sha256 != dependency.output_sha256)
+                    })
+                })
+            })
+            .cloned()
+            .collect();
+        if stale.is_empty() {
+            return kept;
+        }
+        for key in stale {
+            kept.remove(&key);
+        }
     }
 }
 
@@ -342,5 +387,35 @@ mod tests {
         };
         let error = verify(&approved, rebuilt, &key).unwrap_err();
         assert!(error.contains("another build"), "{error}");
+    }
+
+    #[test]
+    fn stale_runtime_closures_are_compiled_along_with_their_dependents() {
+        let package = |name: &str, output: &str, runtime: &[&LockedPackage]| {
+            let mut package = lib_package();
+            package.name = name.into();
+            package.output_sha256 = Some(output.repeat(64));
+            package.runtime_dependencies = runtime
+                .iter()
+                .map(|dependency| (dependency.id(), (*dependency).clone()))
+                .collect();
+            package
+        };
+        let iconv_old = package("iconv", "0", &[]);
+        let iconv = package("iconv", "1", &[]);
+        let idn2 = package("idn2", "2", &[&iconv_old]);
+        let psl = package("psl", "3", &[&idn2]);
+        let lz4 = package("lz4", "4", &[]);
+        let zstd = package("zstd", "5", &[&lz4]);
+        let prebuilt = package("prebuilt", "6", &[]);
+        let tool = package("tool", "7", &[&prebuilt]);
+        let packages: BTreeMap<String, &LockedPackage> = [&iconv, &idn2, &psl, &lz4, &zstd, &tool]
+            .into_iter()
+            .map(|package| (package.id(), package))
+            .collect();
+
+        let kept = consistent_closures(&packages, |key| !key.starts_with("prebuilt@"));
+        let kept: Vec<_> = kept.iter().map(String::as_str).collect();
+        assert_eq!(kept, ["iconv@1", "lz4@1", "tool@1", "zstd@1"]);
     }
 }
