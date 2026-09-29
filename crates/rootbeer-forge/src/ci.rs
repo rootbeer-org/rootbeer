@@ -111,7 +111,7 @@ pub fn run(command: Ci, config: &Config, catalog: Option<&PackageCatalog>) -> Re
                     .collect(),
                 _ => Vec::new(),
             };
-            downloads(&plan, &packages, true)
+            downloads(&plan, &packages, Some(&task))
         }
         Ci::Builds { plan } => {
             let plan = WorkPlan::read(&plan)?;
@@ -121,7 +121,7 @@ pub fn run(command: Ci, config: &Config, catalog: Option<&PackageCatalog>) -> Re
                 .filter(|task| matches!(task.work, Work::Build { .. } | Work::Recover { .. }))
                 .map(|task| task.package.as_str())
                 .collect();
-            downloads(&plan, &packages, false)
+            downloads(&plan, &packages, None)
         }
         Ci::Publish {
             plan,
@@ -138,10 +138,10 @@ pub fn run(command: Ci, config: &Config, catalog: Option<&PackageCatalog>) -> Re
 }
 
 /// Step outputs naming the artifacts of `packages`: `ids` from this run, and `recovered-ids`
-/// from the verified run `recovered-run`. Builds this run failed to make are an error only
-/// when a dependent needs them.
-fn downloads(plan: &WorkPlan, packages: &[&str], is_required: bool) -> Result<(), String> {
-    let mut keys = Vec::new();
+/// from the verified run `recovered-run`. A build this run failed to make is skipped, unless
+/// `dependent` installs it and cannot build without it.
+fn downloads(plan: &WorkPlan, packages: &[&str], dependent: Option<&str>) -> Result<(), String> {
+    let mut built = Vec::new();
     let mut recovered = Vec::new();
     let mut runs = std::collections::BTreeSet::new();
     for package in packages {
@@ -151,20 +151,32 @@ fn downloads(plan: &WorkPlan, packages: &[&str], is_required: bool) -> Result<()
                 recovered.push(artifact.to_string());
                 runs.insert(*run);
             }
-            _ => keys.push(task.key.clone()),
+            _ => built.push((*package, task.key.clone())),
         }
     }
     if runs.len() > 1 {
         return Err("a plan recovers builds from one verified run".into());
     }
+    let keys: Vec<_> = built.iter().map(|(_, key)| key.clone()).collect();
     let ids = match keys.is_empty() {
         true => Vec::new(),
-        false => github::run_builds(&GitHub::from_env()?, &keys, is_required)?,
+        false => github::run_builds(&GitHub::from_env()?, &keys)?,
     };
-    output(
-        "ids",
-        &ids.iter().map(u64::to_string).collect::<Vec<_>>().join(","),
-    )?;
+    let failed: Vec<_> = built
+        .iter()
+        .zip(&ids)
+        .filter(|(_, id)| id.is_none())
+        .map(|((package, _), _)| *package)
+        .collect();
+    if let (Some(dependent), false) = (dependent, failed.is_empty()) {
+        return Err(format!(
+            "{} failed to build in this run, so {dependent} cannot install it; if it was published \
+             after planning instead, re-run all jobs to plan against it",
+            failed.join(", ")
+        ));
+    }
+    let ids: Vec<_> = ids.iter().flatten().map(u64::to_string).collect();
+    output("ids", &ids.join(","))?;
     output("recovered-ids", &recovered.join(","))?;
     output(
         "recovered-run",

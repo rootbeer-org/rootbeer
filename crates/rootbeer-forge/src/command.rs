@@ -272,7 +272,8 @@ fn execute(args: Args) -> Result<(), String> {
                 &dependencies,
                 &cache,
                 &context.unwrap_or_else(crate::config::detect_context),
-            )?;
+            )
+            .inspect_err(|_| show_log_tail(&destination))?;
             let summary = serde_json::to_vec_pretty(&outcome).map_err(|error| error.to_string())?;
             std::fs::write(destination.join("build.json"), &summary)
                 .map_err(|error| error.to_string())?;
@@ -565,7 +566,8 @@ fn execute(args: Args) -> Result<(), String> {
                 },
                 pdr.as_ref(),
                 &dependency_artifacts,
-            )?;
+            )
+            .inspect_err(|_| show_log_tail(&destination))?;
             writeln!(
                 output,
                 "prepared {} for {}\nartifact: {}",
@@ -587,4 +589,17 @@ fn read_environment(
             .map_err(|error| error.to_string())
     })
     .transpose()
+}
+
+/// Prints the end of a failed build's log, which otherwise stays in its output directory.
+fn show_log_tail(output: &std::path::Path) {
+    const LINES: usize = 80;
+    let Ok(log) = std::fs::read_to_string(output.join("build.log")) else {
+        return;
+    };
+    let lines: Vec<_> = log.lines().collect();
+    eprintln!("last {} lines of build.log:", LINES.min(lines.len()));
+    for line in &lines[lines.len().saturating_sub(LINES)..] {
+        eprintln!("  {line}");
+    }
 }

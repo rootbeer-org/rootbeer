@@ -444,9 +444,9 @@ fn uploaded_builds(log: &str) -> Vec<(String, String, u64, u64)> {
         .collect()
 }
 
-/// The newest unexpired build of each input key this run uploaded. A missing one means its job
-/// failed, or found a result published after planning; only a dependent `requires` every one.
-pub fn run_builds(github: &GitHub, keys: &[String], requires: bool) -> Result<Vec<u64>, String> {
+/// The newest unexpired build of each input key this run uploaded, or none for a key whose job
+/// failed, or found a result published after planning.
+pub fn run_builds(github: &GitHub, keys: &[String]) -> Result<Vec<Option<u64>>, String> {
     let artifacts = github.all(
         &format!(
             "repos/{}/actions/runs/{}/artifacts",
@@ -455,10 +455,10 @@ pub fn run_builds(github: &GitHub, keys: &[String], requires: bool) -> Result<Ve
         ),
         "artifacts",
     )?;
-    newest_builds(&artifacts, keys, requires)
+    Ok(newest_builds(&artifacts, keys))
 }
 
-fn newest_builds(artifacts: &[Value], keys: &[String], requires: bool) -> Result<Vec<u64>, String> {
+fn newest_builds(artifacts: &[Value], keys: &[String]) -> Vec<Option<u64>> {
     let mut builds: BTreeMap<&str, (u64, u64)> = BTreeMap::new();
     for artifact in artifacts {
         let Some(rest) = artifact["name"]
@@ -484,22 +484,9 @@ fn newest_builds(artifacts: &[Value], keys: &[String], requires: bool) -> Result
             builds.insert(key, (attempt, id));
         }
     }
-    let missing: Vec<_> = keys
-        .iter()
-        .filter(|key| !builds.contains_key(key.as_str()))
-        .cloned()
-        .collect();
-    if requires && !missing.is_empty() {
-        return Err(format!(
-            "no build in this run for dependency inputs {}: their job failed, or found a result \
-             published after planning; re-run all jobs to plan against it",
-            missing.join(", ")
-        ));
-    }
-    Ok(keys
-        .iter()
-        .filter_map(|key| builds.get(key.as_str()).map(|(_, id)| *id))
-        .collect())
+    keys.iter()
+        .map(|key| builds.get(key.as_str()).map(|(_, id)| *id))
+        .collect()
 }
 
 #[cfg(test)]
@@ -530,14 +517,11 @@ mod tests {
             json!({"id": 4, "name": format!("published-records-{b}"), "expired": false}),
         ];
         assert_eq!(
-            newest_builds(&artifacts, &[a.clone(), b.clone()], true).unwrap(),
-            [2, 3]
+            newest_builds(&artifacts, &[a.clone(), b.clone()]),
+            [Some(2), Some(3)]
         );
         artifacts[2]["expired"] = json!(true);
-        assert!(newest_builds(&artifacts, &[a.clone(), b.clone()], true)
-            .unwrap_err()
-            .contains("re-run"));
-        assert_eq!(newest_builds(&artifacts, &[a, b], false).unwrap(), [2]);
+        assert_eq!(newest_builds(&artifacts, &[a, b]), [Some(2), None]);
     }
 
     #[test]
