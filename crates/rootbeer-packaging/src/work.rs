@@ -327,7 +327,9 @@ fn signed_result(
     let repository = format!("{}/{}", distribution.registry, task.name);
     for key in std::iter::once(&task.key).chain(&task.compatible_keys) {
         let tag = format!("inputs-{key}");
-        let bytes = match tagged_manifest(&repository, &tag).map_err(|error| error.to_string())? {
+        let bytes = match retrying(|| {
+            tagged_manifest(&repository, &tag).map_err(|error| error.to_string())
+        })? {
             Tagged::Manifest(bytes) => bytes,
             Tagged::Missing => continue,
             Tagged::Denied if publishes_namespace(pdr, distribution, &task.name)? => {
@@ -352,7 +354,7 @@ fn signed_result(
             return Err(format!("{repository}:{tag}: invalid record digest"));
         }
         let reference = format!("ghcr://{repository}@sha256:{digest}");
-        let bytes = read_record(&reference)?;
+        let bytes = retrying(|| read_record(&reference))?;
         let record = verify_record(&bytes, &distribution.pdr.public_key, &task.package, system)?;
         if record.input_key() != *key {
             return Err(format!("{reference}: signed inputs differ from {tag}"));
@@ -360,6 +362,21 @@ fn signed_result(
         return Ok(Some((key.clone(), reference, bytes)));
     }
     Ok(None)
+}
+
+/// Retries a registry request that failed in transit; a missing tag or a denied repository is an
+/// answer, not a failure, so it is returned at once.
+fn retrying<T>(mut request: impl FnMut() -> Result<T, String>) -> Result<T, String> {
+    let mut delay = std::time::Duration::from_secs(2);
+    for _ in 1..4 {
+        match request() {
+            Ok(value) => return Ok(value),
+            Err(error) => eprintln!("retrying after {error}"),
+        }
+        std::thread::sleep(delay);
+        delay *= 2;
+    }
+    request()
 }
 
 /// Whether any published record of `name` is a build in this registry. Catalog entries can

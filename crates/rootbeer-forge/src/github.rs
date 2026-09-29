@@ -37,7 +37,28 @@ impl GitHub {
         })
     }
 
+    /// Sends a request, retrying a read that failed in transit or on GitHub's side; a write is
+    /// sent once, since repeating it could act twice.
     fn request(&self, method: &str, path: &str, body: Option<&Value>) -> Result<String, String> {
+        let mut delay = Duration::from_secs(2);
+        for _ in 1..4 {
+            match self.send(method, path, body) {
+                Err((error, true)) if method == "GET" => eprintln!("retrying after {error}"),
+                result => return result.map_err(|(error, _)| error),
+            }
+            std::thread::sleep(delay);
+            delay *= 2;
+        }
+        self.send(method, path, body).map_err(|(error, _)| error)
+    }
+
+    /// One attempt, with whether its failure is worth retrying.
+    fn send(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&Value>,
+    ) -> Result<String, (String, bool)> {
         let url = format!("{API}/{}", path.trim_start_matches('/'));
         let request = ureq::http::Request::builder()
             .method(method)
@@ -49,18 +70,21 @@ impl GitHub {
         let payload = body.map(Value::to_string).unwrap_or_default();
         let request = request
             .body(payload)
-            .map_err(|error| format!("{method} {url}: {error}"))?;
-        let mut response = self
-            .agent
-            .run(request)
-            .map_err(|error| format!("{method} {url}: {error}"))?;
+            .map_err(|error| (format!("{method} {url}: {error}"), false))?;
+        let mut response = self.agent.run(request).map_err(|error| {
+            let is_transient = match &error {
+                ureq::Error::StatusCode(status) => *status >= 500 || *status == 429,
+                _ => true,
+            };
+            (format!("{method} {url}: {error}"), is_transient)
+        })?;
         let mut text = String::new();
         response
             .body_mut()
             .as_reader()
             .take(64 << 20)
             .read_to_string(&mut text)
-            .map_err(|error| format!("{method} {url}: {error}"))?;
+            .map_err(|error| (format!("{method} {url}: {error}"), true))?;
         Ok(text)
     }
 
