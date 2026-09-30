@@ -278,6 +278,59 @@ impl Recipe {
         }
     }
 
+    pub(super) fn set_download_url(&mut self, version: &str, url: &str) -> Result<(), String> {
+        if url.contains(['{', '}']) {
+            return Err(format!(
+                "{version}: download URL `{url}` looks like a template"
+            ));
+        }
+        let entry = self
+            .versions
+            .get(version)
+            .ok_or_else(|| format!("{}@{version} is not recorded", self.name))?;
+        // Prebuilts compare by their rendering, since install contracts are not `Eq`.
+        let rendered = |prebuilt: &Option<Prebuilt>| serde_json::to_string(prebuilt).ok();
+        let prebuilts: Vec<Option<Prebuilt>> = entry
+            .digests
+            .keys()
+            .map(|system| {
+                let platform = &self.platforms[system];
+                self.shared.overlay(&platform.overrides).prebuilt
+            })
+            .collect();
+        if prebuilts
+            .iter()
+            .any(|other| rendered(other) != rendered(&prebuilts[0]))
+        {
+            return Err(format!(
+                "{}@{version}: platforms with different prebuilts cannot share one URL",
+                self.name
+            ));
+        }
+        let Some(Some(mut prebuilt)) = prebuilts.into_iter().next() else {
+            return Err(format!(
+                "{}@{version}: only a prebuilt can download a URL",
+                self.name
+            ));
+        };
+        prebuilt.provider = Provider::Url(url.to_string());
+        prebuilt.tag = None;
+        prebuilt.asset = None;
+        let prebuilt = Some(prebuilt);
+
+        let entry = self.versions.get_mut(version).expect("checked above");
+        if entry.overrides.prebuilt.is_some()
+            && rendered(&entry.overrides.prebuilt) != rendered(&prebuilt)
+        {
+            return Err(format!(
+                "{}@{version} already downloads from another URL",
+                self.name
+            ));
+        }
+        entry.overrides.prebuilt = prebuilt;
+        Ok(())
+    }
+
     pub(super) fn set_default_version(
         &mut self,
         system: &str,

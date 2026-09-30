@@ -40,6 +40,12 @@ pub struct PackageUpstream {
     pub separator: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub exclude_tags: Vec<String>,
+    /// The app's `SUPublicEDKey`, which every appcast download must be signed by.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_key: Option<String>,
+    /// An appcast channel to follow besides the default, such as OrbStack's `stable`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -49,6 +55,8 @@ pub enum UpstreamProvider {
     Github(String),
     /// An HTTPS repository on any other host, discovered from its tags alone.
     Git(String),
+    /// A macOS app's Sparkle appcast feed.
+    Sparkle(String),
 }
 
 impl PackageUpstream {
@@ -56,28 +64,36 @@ impl PackageUpstream {
     pub fn github(&self) -> Option<&str> {
         match &self.provider {
             UpstreamProvider::Github(repository) => Some(repository),
-            UpstreamProvider::Git(_) => None,
+            UpstreamProvider::Git(_) | UpstreamProvider::Sparkle(_) => None,
         }
     }
 
     /// Names the upstream in logs and errors, as its recipe spells it.
     pub fn label(&self) -> &str {
         match &self.provider {
-            UpstreamProvider::Github(name) | UpstreamProvider::Git(name) => name,
+            UpstreamProvider::Github(name)
+            | UpstreamProvider::Git(name)
+            | UpstreamProvider::Sparkle(name) => name,
         }
     }
 
-    /// The repository discovery lists tags from.
-    pub fn git_url(&self) -> String {
+    /// The repository discovery lists tags from, unless versions come from an appcast.
+    pub fn git_url(&self) -> Option<String> {
         match &self.provider {
-            UpstreamProvider::Github(repository) => format!("https://github.com/{repository}.git"),
-            UpstreamProvider::Git(url) => url.clone(),
+            UpstreamProvider::Github(repository) => {
+                Some(format!("https://github.com/{repository}.git"))
+            }
+            UpstreamProvider::Git(url) => Some(url.clone()),
+            UpstreamProvider::Sparkle(_) => None,
         }
     }
 
-    /// Compares repositories regardless of case, trailing slashes, or a `.git` suffix.
+    /// Compares upstreams regardless of case, trailing slashes, or a `.git` suffix.
     pub fn identity(&self) -> String {
-        let url = self.git_url().to_ascii_lowercase();
+        let url = self
+            .git_url()
+            .unwrap_or_else(|| self.label().to_string())
+            .to_ascii_lowercase();
         let url = url.trim_end_matches('/');
         url.strip_suffix(".git").unwrap_or(url).to_string()
     }
@@ -114,12 +130,8 @@ impl PackageUpstream {
                 super::github::repository(repository)?;
             }
             UpstreamProvider::Git(url) => {
-                let host = url
-                    .strip_prefix("https://")
-                    .and_then(|rest| rest.split('/').next())
-                    .filter(|host| !host.is_empty())
-                    .ok_or_else(|| format!("git upstream `{url}` must be an HTTPS URL"))?;
-                if url.contains(|c: char| c.is_whitespace() || c == '?' || c == '#') {
+                let host = https_host(url)?;
+                if url.contains(['?', '#']) {
                     return Err(format!(
                         "git upstream `{url}` must be a plain repository URL"
                     ));
@@ -129,10 +141,34 @@ impl PackageUpstream {
                         "declare `{url}` as `github` so discovery pins its identity"
                     ));
                 }
-                if self.repository_id.is_some() {
-                    return Err("repository_id applies only to a github upstream".into());
+            }
+            UpstreamProvider::Sparkle(url) => {
+                https_host(url)?;
+                let key = self
+                    .public_key
+                    .as_deref()
+                    .ok_or("a sparkle upstream requires the app's `public_key`")?;
+                // A base64 Ed25519 key: 32 bytes encode to 43 characters and one `=`.
+                let (body, padding) = key.split_at(key.len().min(43));
+                if body.len() != 43
+                    || padding != "="
+                    || !body
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || b"+/".contains(&byte))
+                {
+                    return Err("public_key must be the app's base64 SUPublicEDKey".into());
+                }
+                if self.tag.is_some() || self.separator.is_some() {
+                    return Err("an appcast publishes versions, not tags".into());
                 }
             }
+        }
+        let is_sparkle = matches!(self.provider, UpstreamProvider::Sparkle(_));
+        if !is_sparkle && (self.public_key.is_some() || self.channel.is_some()) {
+            return Err("public_key and channel apply only to a sparkle upstream".into());
+        }
+        if self.github().is_none() && self.repository_id.is_some() {
+            return Err("repository_id applies only to a github upstream".into());
         }
         if self.repository_id == Some(0) {
             return Err("invalid repository ID".into());
@@ -154,6 +190,18 @@ impl PackageUpstream {
         }
         Ok(())
     }
+}
+
+fn https_host(url: &str) -> Result<&str, String> {
+    let host = url
+        .strip_prefix("https://")
+        .and_then(|rest| rest.split('/').next())
+        .filter(|host| !host.is_empty())
+        .ok_or_else(|| format!("upstream `{url}` must be an HTTPS URL"))?;
+    if url.contains(char::is_whitespace) {
+        return Err(format!("upstream `{url}` must not contain whitespace"));
+    }
+    Ok(host)
 }
 
 impl PackageDefinition {
@@ -214,6 +262,18 @@ impl PackageDefinition {
             return Err(format!("{version}: a version builds at least one platform"));
         }
         recipe.insert_version(version, digests, license, commit);
+        *self = recipe.expand()?;
+        Ok(())
+    }
+
+    /// Points a version's prebuilt at a URL its template cannot express, such as an
+    /// appcast download named after its build number.
+    pub fn set_download_url(&mut self, version: &str, url: &str) -> Result<(), String> {
+        let mut recipe = self
+            .authoring
+            .clone()
+            .ok_or("overriding a download requires an authored recipe")?;
+        recipe.set_download_url(version, url)?;
         *self = recipe.expand()?;
         Ok(())
     }
@@ -429,6 +489,35 @@ mod tests {
         assert_eq!(
             upstream("").unwrap().identity(),
             "https://github.com/owner/tool"
+        );
+    }
+
+    #[test]
+    fn sparkle_upstreams_require_the_apps_signing_key() {
+        let sparkle = |fields: &str| {
+            let (lua, value) = lua::evaluate(&format!(
+                "return {{ sparkle = \"https://example.com/appcast.xml\", {fields} }}"
+            ))?;
+            let upstream: PackageUpstream =
+                lua.from_value(value).map_err(|error| error.to_string())?;
+            upstream.validate().map(|()| upstream)
+        };
+        let key = format!("public_key = \"{}=\"", "A".repeat(43));
+        let feed = sparkle(&format!("{key}, channel = \"stable\"")).unwrap();
+        assert_eq!(feed.git_url(), None);
+        assert_eq!(feed.identity(), "https://example.com/appcast.xml");
+
+        for invalid in [
+            String::new(),
+            "public_key = \"short=\"".into(),
+            format!("{key}, tag = \"v{{version}}\""),
+            format!("{key}, repository_id = 1"),
+        ] {
+            assert!(sparkle(&invalid).is_err(), "accepted `{invalid}`");
+        }
+        assert!(
+            upstream(&key).is_err(),
+            "a github upstream took a public_key"
         );
     }
 

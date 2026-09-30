@@ -1,3 +1,9 @@
+use std::cell::RefCell;
+use std::collections::BTreeMap;
+use std::fs;
+
+use base64::Engine;
+use rootbeer_package::download::DownloadedFile;
 use rootbeer_package::github::Release;
 use rootbeer_package::{PackageDefinition, PackageUpstream};
 use serde::Deserialize;
@@ -6,8 +12,22 @@ use serde_json::Value;
 mod generate;
 mod git;
 mod metadata;
+mod sparkle;
 mod updates;
+use generate::Published;
 pub use updates::{discover_updates, UpdateReport};
+
+/// Everything discovery reads from the network, so tests can serve it from memory.
+trait Remote {
+    /// GitHub API JSON, or None when the resource does not exist.
+    fn json(&mut self, url: &str) -> Result<Option<Value>, String>;
+    /// A document such as an appcast, or None when it does not exist.
+    fn text(&mut self, url: &str) -> Result<Option<String>, String>;
+    /// A repository's tags, as an `ls-refs` response.
+    fn ls_refs(&mut self, url: &str) -> Result<Vec<u8>, String>;
+    /// Downloads a file, returning where it is cached and its SHA-256.
+    fn download(&mut self, url: &str) -> Result<DownloadedFile, String>;
+}
 
 #[derive(Debug, Deserialize)]
 struct Repository {
@@ -28,16 +48,30 @@ fn discover_upstream(
     upstream: &PackageUpstream,
     systems: &[String],
     recipe: &mut PackageDefinition,
-    fetch: &mut impl FnMut(&str) -> Result<Option<Value>, String>,
-    ls_refs: &mut impl FnMut(&str) -> Result<Vec<u8>, String>,
-    hash: &mut impl FnMut(&str) -> Result<String, String>,
+    remote: &mut impl Remote,
 ) -> Result<Discovery, String> {
     let repository_id = match upstream.github() {
-        Some(repository) => Some(check_repository(upstream, repository, fetch)?),
+        Some(repository) => Some(check_repository(upstream, repository, remote)?),
         None => None,
     };
-    let tags = git::parse_tags(&ls_refs(&upstream.git_url())?)?;
+    let (published, signatures) = match upstream.git_url() {
+        Some(url) => (tags(&url, remote)?, BTreeMap::new()),
+        None => appcast(upstream, remote)?,
+    };
+    let key = upstream.public_key.as_deref().map(decode_key).transpose()?;
 
+    let remote = RefCell::new(remote);
+    let hash = |url: &str| -> Result<String, String> {
+        let file = remote.borrow_mut().download(url)?;
+        if let Some(key) = &key {
+            let signature = signatures
+                .get(url)
+                .and_then(Option::as_deref)
+                .ok_or_else(|| format!("{url}: the appcast publishes no edSignature"))?;
+            verify(key, signature, &file)?;
+        }
+        Ok(file.sha256)
+    };
     let release_of = |tag: &str| -> Result<Option<Release>, String> {
         let Some(repository) = upstream.github() else {
             return Ok(None);
@@ -46,12 +80,14 @@ fn discover_upstream(
             "https://api.github.com/repos/{repository}/releases/tags/{}",
             path_segment(tag)
         );
-        fetch(&url)?
+        remote
+            .borrow_mut()
+            .json(&url)?
             .map(serde_json::from_value)
             .transpose()
             .map_err(|e| e.to_string())
     };
-    let errors = generate::discover(upstream, systems, &tags, recipe, hash, release_of)?;
+    let errors = generate::discover(upstream, systems, &published, recipe, hash, release_of)?;
 
     let is_newly_pinned = repository_id.is_some() && upstream.repository_id.is_none();
     if let (true, Some(repository), Some(id)) = (is_newly_pinned, upstream.github(), repository_id)
@@ -65,13 +101,70 @@ fn discover_upstream(
     })
 }
 
+fn tags(url: &str, remote: &mut impl Remote) -> Result<BTreeMap<String, Published>, String> {
+    let tags = git::parse_tags(&remote.ls_refs(url)?)?;
+    Ok(tags
+        .into_iter()
+        .map(|(tag, commit)| {
+            let published = Published {
+                commit: Some(commit),
+                url: None,
+            };
+            (tag, published)
+        })
+        .collect())
+}
+
+/// An appcast's versions, and the signature it publishes for each download.
+type Appcast = (
+    BTreeMap<String, Published>,
+    BTreeMap<String, Option<String>>,
+);
+
+fn appcast(upstream: &PackageUpstream, remote: &mut impl Remote) -> Result<Appcast, String> {
+    let feed = remote.text(upstream.label())?.ok_or("appcast not found")?;
+    let mut signatures = BTreeMap::new();
+    let published = sparkle::parse(&feed, upstream.channel.as_deref())?
+        .into_iter()
+        .map(|(version, item)| {
+            signatures.insert(item.url.clone(), item.signature);
+            let published = Published {
+                commit: None,
+                url: Some(item.url),
+            };
+            (version, published)
+        })
+        .collect();
+    Ok((published, signatures))
+}
+
+fn decode_key(key: &str) -> Result<Vec<u8>, String> {
+    base64::engine::general_purpose::STANDARD
+        .decode(key)
+        .ok()
+        .filter(|key| key.len() == 32)
+        .ok_or_else(|| "public_key is not a base64 Ed25519 key".into())
+}
+
+/// Checks a download against the app's EdDSA key, as Sparkle does before installing it.
+fn verify(key: &[u8], signature: &str, file: &DownloadedFile) -> Result<(), String> {
+    let signature = base64::engine::general_purpose::STANDARD
+        .decode(signature)
+        .map_err(|_| "invalid edSignature")?;
+    let bytes = fs::read(&file.path).map_err(|e| e.to_string())?;
+    ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, key)
+        .verify(&bytes, &signature)
+        .map_err(|_| "download is not signed by the app's public_key".to_string())
+}
+
 /// The repository's ID, once it matches the one pinned and has not moved.
 fn check_repository(
     upstream: &PackageUpstream,
     repository: &str,
-    fetch: &mut impl FnMut(&str) -> Result<Option<Value>, String>,
+    remote: &mut impl Remote,
 ) -> Result<u64, String> {
-    let found: Repository = fetch(&format!("https://api.github.com/repos/{repository}"))?
+    let found: Repository = remote
+        .json(&format!("https://api.github.com/repos/{repository}"))?
         .ok_or("GitHub repository not found; review upstream ownership")
         .and_then(|value| serde_json::from_value(value).map_err(|_| "invalid GitHub repository"))?;
     if found.id == 0 || upstream.repository_id.is_some_and(|id| id != found.id) {

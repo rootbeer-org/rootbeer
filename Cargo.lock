@@ -1683,8 +1683,10 @@ dependencies = [
 name = "rootbeer-packaging"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "flate2",
  "proc-macro2",
+ "quick-xml",
  "ring",
  "rootbeer-build",
  "rootbeer-catalog",

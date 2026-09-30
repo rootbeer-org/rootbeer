@@ -3,7 +3,18 @@ use std::collections::BTreeMap;
 use rootbeer_package::github::Release;
 use rootbeer_package::{PackageDefinition, PackageUpstream};
 
+/// What an upstream publishes under one tag.
+#[derive(Debug, Default)]
+pub(super) struct Published {
+    /// The commit a git tag points at.
+    pub commit: Option<String>,
+    /// The download an appcast names for the version.
+    pub url: Option<String>,
+}
+
+/// Orders dotted numeric versions, ignoring build metadata such as OrbStack's `+20963`.
 fn version_key(version: &str) -> Result<Vec<u64>, String> {
+    let (version, _) = version.split_once('+').unwrap_or((version, ""));
     if version.is_empty()
         || !version
             .bytes()
@@ -30,7 +41,7 @@ fn version_key(version: &str) -> Result<Vec<u64>, String> {
 /// normalizes to each. Old repositories often carry both `v3.4` and `v3.4.0`.
 fn stable_versions<'a>(
     upstream: &PackageUpstream,
-    tags: &'a BTreeMap<String, String>,
+    tags: &'a BTreeMap<String, Published>,
 ) -> BTreeMap<Vec<u64>, Vec<(String, &'a str)>> {
     let mut ordered: BTreeMap<_, Vec<_>> = BTreeMap::new();
     for tag in tags.keys() {
@@ -67,6 +78,20 @@ impl<F: FnMut(&str) -> Result<Option<Release>, String>> Releases<F> {
     }
 }
 
+/// The platforms one version advances, and the URL they share when the template can't
+/// produce it.
+#[derive(Default)]
+struct Selected {
+    digests: BTreeMap<String, String>,
+    url: Option<String>,
+}
+
+struct Pin {
+    digest: String,
+    /// An appcast download the recipe's template does not produce.
+    url: Option<String>,
+}
+
 /// The digest of exactly what `system` downloads for `version`, or None when that release
 /// does not publish it.
 fn pin(
@@ -74,20 +99,37 @@ fn pin(
     upstream: &PackageUpstream,
     system: &str,
     version: &str,
-    commit: Option<&str>,
+    published: &Published,
     releases: &mut Releases<impl FnMut(&str) -> Result<Option<Release>, String>>,
     hash: &mut impl FnMut(&str) -> Result<String, String>,
-) -> Result<Option<String>, String> {
+) -> Result<Option<Pin>, String> {
+    let commit = match &published.commit {
+        _ if !definition.uses_commit() => None,
+        Some(commit) => Some(commit.as_str()),
+        None => return Err(format!("{version}: upstream records no commit")),
+    };
     let candidate = definition.candidate(system, version, commit)?;
+    let pinned = |digest: String| Some(Pin { digest, url: None });
+    if let Some(url) = &published.url {
+        if candidate.build.is_some() || candidate.asset.is_some() {
+            return Err("an appcast publishes only direct prebuilt downloads".into());
+        }
+        let digest = hash(url)?;
+        let is_templated = candidate.source.as_deref() == Some(url.as_str());
+        return Ok(Some(Pin {
+            digest,
+            url: (!is_templated).then(|| url.clone()),
+        }));
+    }
     if let Some(build) = &candidate.build {
-        return hash(&build.url).map(Some);
+        return hash(&build.url).map(pinned);
     }
     let source = candidate
         .source
         .as_deref()
         .ok_or("a candidate downloads nothing")?;
     let Some(name) = &candidate.asset else {
-        return hash(source).map(Some);
+        return hash(source).map(pinned);
     };
     let (repository, tag) = source
         .strip_prefix("github:")
@@ -113,7 +155,7 @@ fn pin(
     let digest = asset
         .sha256()
         .ok_or_else(|| format!("release asset `{name}` publishes no sha256 digest"))?;
-    Ok(Some(digest.to_string()))
+    Ok(pinned(digest.to_string()))
 }
 
 /// Advances each platform to the newest tag that publishes what it downloads.
@@ -125,7 +167,7 @@ fn pin(
 pub(super) fn discover(
     upstream: &PackageUpstream,
     systems: &[String],
-    tags: &BTreeMap<String, String>,
+    tags: &BTreeMap<String, Published>,
     definition: &mut PackageDefinition,
     mut hash: impl FnMut(&str) -> Result<String, String>,
     release_of: impl FnMut(&str) -> Result<Option<Release>, String>,
@@ -149,7 +191,7 @@ pub(super) fn discover(
         Ok(digest)
     };
     let is_commit_needed = definition.uses_commit();
-    let mut selected: BTreeMap<(&str, &str), BTreeMap<String, String>> = BTreeMap::new();
+    let mut selected: BTreeMap<(&str, &str), Selected> = BTreeMap::new();
     let mut errors = Vec::new();
     for system in systems {
         let current = definition
@@ -184,21 +226,25 @@ pub(super) fn discover(
                     break;
                 }
             }
-            let commit = is_commit_needed.then(|| tags[*tag].as_str());
             match pin(
                 definition,
                 upstream,
                 system,
                 version,
-                commit,
+                &tags[*tag],
                 &mut releases,
                 &mut hash_once,
             ) {
-                Ok(Some(digest)) => {
-                    selected
-                        .entry((version.as_str(), *tag))
-                        .or_default()
-                        .insert(system.clone(), digest);
+                Ok(Some(pinned)) => {
+                    let entry = selected.entry((version.as_str(), *tag)).or_default();
+                    if !entry.digests.is_empty() && entry.url != pinned.url {
+                        errors.push(format!(
+                            "{system}: {version} downloads from another URL than its other platforms"
+                        ));
+                        break;
+                    }
+                    entry.digests.insert(system.clone(), pinned.digest);
+                    entry.url = pinned.url;
                     break;
                 }
                 Ok(None) => continue,
@@ -210,10 +256,13 @@ pub(super) fn discover(
         }
     }
 
-    for ((version, tag), digests) in selected {
+    for ((version, tag), Selected { digests, url }) in selected {
         let systems: Vec<String> = digests.keys().cloned().collect();
-        let commit = is_commit_needed.then(|| tags[tag].clone());
+        let commit = tags[tag].commit.clone().filter(|_| is_commit_needed);
         definition.add_version(version, digests, None, commit)?;
+        if let Some(url) = url {
+            definition.set_download_url(version, &url)?;
+        }
         for system in &systems {
             definition.set_default_version(system, version)?;
         }
@@ -273,10 +322,17 @@ mod tests {
     const UPSTREAM: &str = r#"{ github = "owner/tool" }"#;
 
     /// Tags every release, as a repository with only released tags would.
-    fn tags(releases: &[Release]) -> BTreeMap<String, String> {
+    fn tagged(commit: String) -> Published {
+        Published {
+            commit: Some(commit),
+            url: None,
+        }
+    }
+
+    fn tags(releases: &[Release]) -> BTreeMap<String, Published> {
         releases
             .iter()
-            .map(|release| (release.tag_name.clone(), "e".repeat(40)))
+            .map(|release| (release.tag_name.clone(), tagged("e".repeat(40))))
             .collect()
     }
 
@@ -515,8 +571,8 @@ mod tests {
         ))
         .unwrap();
         let tags = BTreeMap::from([
-            ("v99".to_string(), "d".repeat(40)),
-            ("v98".to_string(), "a".repeat(40)),
+            ("v99".to_string(), tagged("d".repeat(40))),
+            ("v98".to_string(), tagged("a".repeat(40))),
         ]);
         let (upstream, systems) = recipe.upstreams().remove(0);
 
@@ -611,7 +667,7 @@ mod tests {
         let mut recipe = definition(UPSTREAM, "1", &["aarch64-macos"]);
         let released = [release("1", &["tool-1-aarch64-macos.tar.gz"])];
         let mut tags = tags(&released);
-        tags.insert("2".into(), "f".repeat(40));
+        tags.insert("2".into(), tagged("f".repeat(40)));
         let (upstream, systems) = recipe.upstreams().remove(0);
         let errors = discover(
             &upstream,

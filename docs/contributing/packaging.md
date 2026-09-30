@@ -242,12 +242,36 @@ GitHub publishes for the asset; for a URL or source archive, discovery downloads
 once and hashes the bytes. A new version inherits
 `default_license`. Nothing is built or executed during discovery.
 
+### Sparkle appcasts
+
+A macOS app that updates itself with Sparkle can follow its appcast instead of tags:
+
+```lua
+upstream = {
+    sparkle = "https://apphousekitchen.com/aldente/aldenteproappcast.xml",
+    public_key = "QXLHUNZcvghym92nG0zfv/ibtTwLOLD7SurlZOJ/TPU=",
+},
+```
+
+- `public_key` is the app's `SUPublicEDKey` from its `Info.plist`. Discovery verifies
+  each download's `edSignature` against it before pinning the digest, as Sparkle does
+  before installing.
+- `channel` follows one named channel besides the default, such as `stable` for feeds
+  that label every item.
+- Versions come from `shortVersionString`. Delta updates, other operating systems, and
+  non-HTTPS downloads are skipped.
+
+The feed URL is often set in code rather than `Info.plist`; `strings` on the app binary
+finds it. When the recipe's template doesn't produce the URL the appcast names, such as
+a download carrying a build number, the new version records a `prebuilt` override with
+that URL.
+
 `updates` writes `report.json`, `summary.md`, and a complete candidate catalog in
 `candidates/packages/` when recipes change. One platform's failure doesn't hold back
 the others; errors are reported with a nonzero exit after successful candidates are
 written. The metadata cache sends ETags and reuses responses only after HTTP 304; use
 a trusted cache directory, since its entries are not signed. `GITHUB_TOKEN`
-authenticates API requests, and `--max-pages` (20 by default) bounds release history.
+authenticates API requests.
 
 The PDR runs discovery daily and proposes each update as a pull request, which goes
 through the same package CI as a hand-written change.

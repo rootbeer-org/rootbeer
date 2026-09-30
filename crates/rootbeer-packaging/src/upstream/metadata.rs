@@ -62,33 +62,12 @@ impl MetadataCache {
 
     /// GitHub API metadata, or None when the resource does not exist.
     pub fn fetch(&mut self, url: &str) -> Result<Option<Value>, String> {
-        self.fetch_with(url, |etag| {
-            let token = std::env::var("GITHUB_TOKEN").ok();
-            let mut request =
-                http_request(url, token.as_deref()).header("Accept", "application/vnd.github+json");
-            if let Some(etag) = etag {
-                request = request.header("If-None-Match", etag);
-            }
-            let mut response = request
-                .config()
-                .timeout_global(Some(Duration::from_secs(60)))
-                .http_status_as_error(false)
-                .build()
-                .call()
-                .map_err(RequestError::from)?;
-            let status = response.status().as_u16();
-            if status != 200 {
-                return Ok((status, None, String::new()));
-            }
-            let etag = response
-                .headers()
-                .get("etag")
-                .and_then(|value| value.to_str().ok())
-                .map(String::from);
-            let body = String::from_utf8(read_body(&mut response)?)
-                .map_err(|e| RequestError::Permanent(e.to_string()))?;
-            Ok((status, etag, body))
-        })
+        self.fetch_with(url, |etag| get(url, etag))
+    }
+
+    /// A document such as an appcast, or None when it does not exist.
+    pub fn fetch_text(&mut self, url: &str) -> Result<Option<String>, String> {
+        self.fetch_body_with(url, |_| Ok(()), |etag| get(url, etag))
     }
 
     /// A repository's tags over git protocol v2, as an unparsed `ls-refs` response.
@@ -123,8 +102,23 @@ impl MetadataCache {
     fn fetch_with(
         &mut self,
         url: &str,
-        mut request: impl FnMut(Option<&str>) -> Result<(u16, Option<String>, String), RequestError>,
+        request: impl FnMut(Option<&str>) -> Result<(u16, Option<String>, String), RequestError>,
     ) -> Result<Option<Value>, String> {
+        let parse = |body: &str| {
+            serde_json::from_str::<Value>(body)
+                .map_err(|e| format!("invalid metadata JSON from {url}: {e}"))
+        };
+        let body = self.fetch_body_with(url, |body| parse(body).map(|_| ()), request)?;
+        body.as_deref().map(parse).transpose()
+    }
+
+    /// Revalidates a cached body, caching a new one only once `validate` accepts it.
+    fn fetch_body_with(
+        &mut self,
+        url: &str,
+        validate: impl Fn(&str) -> Result<(), String>,
+        mut request: impl FnMut(Option<&str>) -> Result<(u16, Option<String>, String), RequestError>,
+    ) -> Result<Option<String>, String> {
         let path = self
             .directory
             .join(format!("{}.json", hash_bytes(url.as_bytes())));
@@ -154,15 +148,13 @@ impl MetadataCache {
             let entry = cached
                 .filter(|entry| entry.etag.is_some())
                 .ok_or("received 304 without a cached validator")?;
-            let value = serde_json::from_str(&entry.body).map_err(|e| e.to_string())?;
             self.statistics.not_modified += 1;
-            return Ok(Some(value));
+            return Ok(Some(entry.body));
         }
         if status != 200 {
             return Err(format!("unexpected metadata HTTP status {status}: {url}"));
         }
-        let value = serde_json::from_str(&body)
-            .map_err(|e| format!("invalid metadata JSON from {url}: {e}"))?;
+        validate(&body)?;
         let entry = Entry {
             url: url.into(),
             etag: new_etag,
@@ -177,8 +169,39 @@ impl MetadataCache {
         temporary.as_file().sync_all().map_err(|e| e.to_string())?;
         temporary.persist(path).map_err(|e| e.to_string())?;
         self.statistics.fetched += 1;
-        Ok(Some(value))
+        Ok(Some(entry.body))
     }
+}
+
+/// One conditional GET, authenticated and versioned only for the GitHub API.
+fn get(url: &str, etag: Option<&str>) -> Result<(u16, Option<String>, String), RequestError> {
+    let token = std::env::var("GITHUB_TOKEN").ok();
+    let mut request = http_request(url, token.as_deref());
+    if url.starts_with("https://api.github.com/") {
+        request = request.header("Accept", "application/vnd.github+json");
+    }
+    if let Some(etag) = etag {
+        request = request.header("If-None-Match", etag);
+    }
+    let mut response = request
+        .config()
+        .timeout_global(Some(Duration::from_secs(60)))
+        .http_status_as_error(false)
+        .build()
+        .call()
+        .map_err(RequestError::from)?;
+    let status = response.status().as_u16();
+    if status != 200 {
+        return Ok((status, None, String::new()));
+    }
+    let etag = response
+        .headers()
+        .get("etag")
+        .and_then(|value| value.to_str().ok())
+        .map(String::from);
+    let body = String::from_utf8(read_body(&mut response)?)
+        .map_err(|e| RequestError::Permanent(e.to_string()))?;
+    Ok((status, etag, body))
 }
 
 fn read_body(response: &mut ureq::http::Response<ureq::Body>) -> Result<Vec<u8>, RequestError> {
