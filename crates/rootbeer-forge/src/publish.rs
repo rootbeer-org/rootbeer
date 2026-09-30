@@ -109,11 +109,9 @@ fn release(
     public_key: &str,
 ) -> Result<(String, String, String), String> {
     let receipt = build.join("receipt.json");
-    let artifact: BuildArtifact = serde_json::from_slice(
+    let package = receipt_package(
         &fs::read(&receipt).map_err(|error| format!("{}: {error}", receipt.display()))?,
-    )
-    .map_err(|error| error.to_string())?;
-    let package = artifact.package.id();
+    )?;
     let task = plan.task(&package)?;
     let key = match fs::read(build.join("build.json")) {
         Ok(bytes) => serde_json::from_slice::<serde_json::Value>(&bytes)
@@ -136,6 +134,17 @@ fn release(
     )?;
     let reference = rootbeer_packaging::push_package(&destination, &registry, public_key)?;
     Ok((package, key, reference))
+}
+
+/// The package a source build's or an upstream binary's receipt qualifies.
+fn receipt_package(bytes: &[u8]) -> Result<String, String> {
+    let receipt: serde_json::Value =
+        serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
+    let package = &receipt["package"];
+    match (package["name"].as_str(), package["version"].as_str()) {
+        (Some(name), Some(version)) => Ok(format!("{name}@{version}")),
+        _ => Err("receipt names no package".into()),
+    }
 }
 
 /// Each downloaded build, found by its receipt, in this run's and the recovered run's groups; a
@@ -164,6 +173,16 @@ fn builds(directory: &Path) -> Result<Vec<PathBuf>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn names_the_package_of_source_and_binary_receipts() {
+        let binary = br#"{"schema": 2, "system": "x86_64-linux", "recipe_sha256": "a",
+            "package": {"name": "jq", "version": "1.8.2"}, "provenance": {}}"#;
+        let source = br#"{"catalog_sha256": "b", "package": {"name": "zlib", "version": "1.3.2"}}"#;
+        assert_eq!(receipt_package(binary).unwrap(), "jq@1.8.2");
+        assert_eq!(receipt_package(source).unwrap(), "zlib@1.3.2");
+        assert!(receipt_package(b"{}").is_err());
+    }
 
     #[test]
     fn finds_each_build_in_both_groups_however_they_were_extracted() {
