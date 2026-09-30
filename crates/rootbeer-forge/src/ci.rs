@@ -343,26 +343,7 @@ fn plan(
         serde_json::to_vec_pretty(&plan).map_err(|error| error.to_string())?,
     )
     .map_err(|error| error.to_string())?;
-    let levels: Vec<_> = plan
-        .levels()
-        .into_iter()
-        .enumerate()
-        .filter(|(_, tasks)| !tasks.is_empty())
-        .map(|(level, tasks)| {
-            let tasks: Vec<_> = tasks
-                .iter()
-                .map(|task| {
-                    let mut entry =
-                        json!({"package": task.package, "name": task.name, "key": task.key});
-                    if let Work::Error(error) = &task.work {
-                        entry["error"] = json!(error);
-                    }
-                    entry
-                })
-                .collect();
-            json!({"level": level, "tasks": {"include": tasks}})
-        })
-        .collect();
+    let levels = build_matrix(&plan);
     let publishes = plan
         .tasks
         .iter()
@@ -374,6 +355,36 @@ fn plan(
     )?;
     output("has-publish", if publishes { "true" } else { "false" })?;
     summary(&describe(&plan))
+}
+
+/// GitHub rejects a matrix of more than 256 jobs and then creates none of them.
+const MATRIX_JOBS: usize = 256;
+
+/// The plan's levels in order, each split so its matrix fits GitHub's job limit. Entries run
+/// one at a time, and an entry's `level` is its own index.
+fn build_matrix(plan: &WorkPlan) -> Vec<serde_json::Value> {
+    plan.levels()
+        .into_iter()
+        .flat_map(|tasks| {
+            tasks
+                .chunks(MATRIX_JOBS)
+                .map(|chunk| {
+                    chunk
+                        .iter()
+                        .map(|task| {
+                            let mut entry = json!({"package": task.package, "name": task.name, "key": task.key});
+                            if let Work::Error(error) = &task.work {
+                                entry["error"] = json!(error);
+                            }
+                            entry
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        })
+        .enumerate()
+        .map(|(index, tasks)| json!({"level": index, "tasks": {"include": tasks}}))
+        .collect()
 }
 
 /// A readable account of a plan: what each task does, and why.
@@ -455,6 +466,49 @@ mod tests {
         assert_eq!(
             unreadable_base("unknown field".into(), "a\n", "a").unwrap_err(),
             "unknown field"
+        );
+    }
+
+    #[test]
+    fn build_matrix_splits_levels_past_the_job_limit_in_order() {
+        let task = |index: usize, level: usize| rootbeer_packaging::work::WorkTask {
+            package: format!("p{index}@1"),
+            name: format!("p{index}"),
+            key: index.to_string(),
+            work: Work::Build {
+                level,
+                dependencies: Vec::new(),
+            },
+        };
+        let mut tasks: Vec<_> = (0..MATRIX_JOBS + 1).map(|index| task(index, 0)).collect();
+        tasks.push(task(MATRIX_JOBS + 1, 1));
+        let plan = WorkPlan {
+            schema: 1,
+            system: "x86_64-linux".into(),
+            context: String::new(),
+            catalog_sha256: String::new(),
+            engine: String::new(),
+            pdr: rootbeer_packaging::repository::RepositoryPin {
+                url: String::new(),
+                public_key: String::new(),
+                root: String::new(),
+            },
+            registry: String::new(),
+            tasks,
+        };
+
+        let matrix = build_matrix(&plan);
+        let sizes: Vec<_> = matrix
+            .iter()
+            .map(|entry| entry["tasks"]["include"].as_array().unwrap().len())
+            .collect();
+        assert_eq!(sizes, [MATRIX_JOBS, 1, 1]);
+        for (index, entry) in matrix.iter().enumerate() {
+            assert_eq!(entry["level"], index);
+        }
+        assert_eq!(
+            matrix[2]["tasks"]["include"][0]["name"],
+            format!("p{}", MATRIX_JOBS + 1)
         );
     }
 }
