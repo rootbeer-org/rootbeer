@@ -1,12 +1,32 @@
 use super::{Context, Phase};
 use rootbeer_package::GoBuild;
 use std::collections::BTreeSet;
+use std::path::PathBuf;
 
-pub(super) fn plan(options: &GoBuild, context: &Context<'_>) -> Result<Vec<Phase>, String> {
+/// Prefers the Go distribution an exact catalog dependency provides over the pinned host toolchain.
+fn toolchain(context: &Context<'_>) -> Result<(PathBuf, Option<PathBuf>), String> {
+    let catalog = context.tools.join("go");
+    if catalog.is_file() {
+        let go = catalog.canonicalize().map_err(|error| error.to_string())?;
+        let root = go
+            .parent()
+            .and_then(|bin| bin.parent())
+            .filter(|root| root.join("pkg/tool").is_dir())
+            .ok_or("catalog go must sit in the bin directory of a Go distribution")?
+            .to_path_buf();
+        return Ok((go, Some(root)));
+    }
+
     let go = context.host_tools.join("go");
     if !go.is_file() {
         return Err("Go builds require a pinned toolchain providing go".into());
     }
+    Ok((go, None))
+}
+
+pub(super) fn plan(options: &GoBuild, context: &Context<'_>) -> Result<Vec<Phase>, String> {
+    let (go, root) = toolchain(context)?;
+    let goroot = root.map(|root| format!("GOROOT={}", root.display()));
     if options.binaries.keys().collect::<BTreeSet<_>>()
         != context.bins.iter().collect::<BTreeSet<_>>()
     {
@@ -14,8 +34,9 @@ pub(super) fn plan(options: &GoBuild, context: &Context<'_>) -> Result<Vec<Phase
     }
     let go = go.to_string_lossy().into_owned();
     let command = |action: &str| {
-        let mut command = vec![
-            "/usr/bin/env".into(),
+        let mut command: Vec<String> = vec!["/usr/bin/env".into()];
+        command.extend(goroot.clone());
+        command.extend([
             "GOPROXY=off".into(),
             "GOSUMDB=off".into(),
             go.clone(),
@@ -25,7 +46,7 @@ pub(super) fn plan(options: &GoBuild, context: &Context<'_>) -> Result<Vec<Phase
             "-buildvcs=false".into(),
             "-p".into(),
             context.jobs.to_string(),
-        ];
+        ]);
         if !options.tags.is_empty() {
             command.extend(["-tags".into(), options.tags.join(",")]);
         }
@@ -52,7 +73,7 @@ pub(super) fn plan(options: &GoBuild, context: &Context<'_>) -> Result<Vec<Phase
     ]];
     if !options.generate.is_empty() {
         let mut generate = command("generate");
-        generate.insert(3, "GOFLAGS=-mod=vendor".into());
+        generate.insert(1, "GOFLAGS=-mod=vendor".into());
         generate.extend(options.generate.clone());
         build.push(generate);
     }
@@ -77,19 +98,30 @@ pub(super) fn plan(options: &GoBuild, context: &Context<'_>) -> Result<Vec<Phase
             bin_directory.join(bin).to_string_lossy().into_owned(),
         ]);
     }
+    let mut fetch: Vec<String> = vec!["/usr/bin/env".into()];
+    fetch.extend(goroot);
+    fetch.extend([
+        format!("GOMODCACHE={}", context.workspace.join("go-modules").display()), "GOFLAGS=-modcacherw".into(), "GOPROXY=https://proxy.golang.org".into(),
+        "GOSUMDB=sum.golang.org".into(), "sh".into(), "-ec".into(),
+        "test -f go.mod && test -f go.sum || { echo 'Go builds require go.mod and go.sum' >&2; exit 1; }; mkdir -p \"$GOMODCACHE/cache\" \"$3\"; ln -s \"$3\" \"$GOMODCACHE/cache/download\"; cp go.mod \"$2/go.mod\"; cp go.sum \"$2/go.sum\"; \"$1\" mod vendor; cmp go.mod \"$2/go.mod\"; cmp go.sum \"$2/go.sum\"; \"$1\" mod verify".into(),
+        "go-vendor".into(), go, context.workspace.to_string_lossy().into_owned(), context.downloads.join("go/cache/download").to_string_lossy().into_owned(),
+    ]);
     Ok(vec![
         Phase {
             name: "fetch",
             requires_network: true,
-            commands: vec![vec![
-                "/usr/bin/env".into(), format!("GOMODCACHE={}", context.workspace.join("go-modules").display()), "GOFLAGS=-modcacherw".into(), "GOPROXY=https://proxy.golang.org".into(),
-                "GOSUMDB=sum.golang.org".into(), "sh".into(), "-ec".into(),
-                "test -f go.mod && test -f go.sum || { echo 'Go builds require go.mod and go.sum' >&2; exit 1; }; mkdir -p \"$GOMODCACHE/cache\" \"$3\"; ln -s \"$3\" \"$GOMODCACHE/cache/download\"; cp go.mod \"$2/go.mod\"; cp go.sum \"$2/go.sum\"; \"$1\" mod vendor; cmp go.mod \"$2/go.mod\"; cmp go.sum \"$2/go.sum\"; \"$1\" mod verify".into(),
-                "go-vendor".into(), go, context.workspace.to_string_lossy().into_owned(), context.downloads.join("go/cache/download").to_string_lossy().into_owned(),
-            ]],
+            commands: vec![fetch],
         },
-        Phase { name: "build", requires_network: false, commands: build },
-        Phase { name: "install", requires_network: false, commands: install },
+        Phase {
+            name: "build",
+            requires_network: false,
+            commands: build,
+        },
+        Phase {
+            name: "install",
+            requires_network: false,
+            commands: install,
+        },
     ])
 }
 
@@ -195,5 +227,53 @@ func main() { if err := os.WriteFile("generated.go", []byte("package main\nconst
             Duration::from_secs(10)
         )
         .is_err());
+    }
+
+    #[test]
+    fn prefers_a_catalog_distribution_over_the_host_toolchain() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = directory.path().canonicalize().unwrap();
+        let host = crate::environment::Environment::resolve(None)
+            .unwrap()
+            .with_go()
+            .unwrap();
+        let distribution = host.lock.inputs["go-toolchain"].path.clone();
+        let tools = workspace.join("tools");
+        let host_tools = workspace.join("host-tools");
+        fs::create_dir_all(&tools).unwrap();
+        fs::create_dir_all(&host_tools).unwrap();
+        std::os::unix::fs::symlink(distribution.join("bin/go"), tools.join("go")).unwrap();
+        let bins = vec!["probe".into()];
+        let runtime = BTreeMap::new();
+        let context = Context {
+            prefix: &workspace,
+            downloads: &workspace,
+            host_tools: &host_tools,
+            bins: &bins,
+            dependencies: &workspace,
+            tools: &tools,
+            workspace: &workspace,
+            jobs: 1,
+            runtime: &runtime,
+        };
+        let options = GoBuild {
+            binaries: BTreeMap::from([("probe".into(), ".".into())]),
+            ..Default::default()
+        };
+
+        let phases = plan(&options, &context).unwrap();
+        let goroot = format!("GOROOT={}", distribution.canonicalize().unwrap().display());
+        let go = distribution.join("bin/go").canonicalize().unwrap();
+        for command in phases[..2].iter().flat_map(|phase| &phase.commands) {
+            if command[0] != "/usr/bin/env" {
+                continue;
+            }
+            assert_eq!(command[1], goroot);
+            assert!(command.contains(&go.to_string_lossy().into_owned()));
+        }
+
+        fs::remove_file(tools.join("go")).unwrap();
+        fs::write(tools.join("go"), "").unwrap();
+        assert!(plan(&options, &context).is_err());
     }
 }
