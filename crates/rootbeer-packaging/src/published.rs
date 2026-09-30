@@ -231,7 +231,7 @@ mod tests {
         );
         let app = recipe(
             "app",
-            r#"{ backend = "autotools", dependencies = { "lib@1" } }"#,
+            r#"{ backend = "autotools", dependencies = { { package = "lib", version = "1", kind = "all" } } }"#,
         );
         PackageCatalog::from_definitions(&BTreeMap::from([
             ("lib".into(), lib),

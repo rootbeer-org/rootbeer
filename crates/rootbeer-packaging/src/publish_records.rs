@@ -705,7 +705,10 @@ mod tests {
 
     /// `app` is built with `lib`; both are source builds published on Linux.
     fn dependent_catalog(lib_configure: &str) -> PackageCatalog {
-        linked_catalog(lib_configure, r#""lib@1""#)
+        linked_catalog(
+            lib_configure,
+            r#"{ package = "lib", version = "1", kind = "all" }"#,
+        )
     }
 
     /// `app` depends on `lib` through `dependency`, a Lua dependency entry.
@@ -805,8 +808,11 @@ mod tests {
 
     #[test]
     fn only_packages_with_runtime_dependencies_need_a_newer_rb() {
-        let runtime = r#"{ package = "lib@1", kind = "link_runtime" }"#;
-        for (dependency, expected) in [(r#""lib@1""#, None), (runtime, Some(2))] {
+        let runtime = r#"{ package = "lib", version = "1", kind = "link_runtime" }"#;
+        for (dependency, expected) in [
+            (r#"{ package = "lib", version = "1", kind = "all" }"#, None),
+            (runtime, Some(2)),
+        ] {
             let catalog = linked_catalog("--shared", dependency);
             let (root, _) = assemble(&catalog, None, &published_all(&catalog), 1).unwrap();
             assert_eq!(root.packages["app"].min_engine_level, expected);

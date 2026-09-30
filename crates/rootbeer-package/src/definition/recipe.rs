@@ -114,11 +114,54 @@ pub(super) struct Build {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub args: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub dependencies: Vec<crate::BuildDependency>,
+    pub dependencies: Vec<Dependency>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub libraries: Vec<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub steps: Option<crate::BuildSteps>,
+}
+
+/// Another catalog package at an exact version, and which of its exports the build uses.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Dependency {
+    pub package: String,
+    pub version: String,
+    pub kind: crate::DependencyKind,
+}
+
+impl Dependency {
+    /// Lowers to the catalog's `name@version` request, which clients and cache keys read.
+    fn lower(&self) -> Result<crate::BuildDependency, String> {
+        let is_name = |value: &str| {
+            !value.is_empty()
+                && value.bytes().all(|byte| {
+                    byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"._+-".contains(&byte)
+                })
+        };
+        if !is_name(&self.package) {
+            return Err(format!(
+                "dependency `{}` must be a canonical package name",
+                self.package
+            ));
+        }
+
+        let is_exact = !self.version.is_empty()
+            && self.version != "HEAD"
+            && !self.version.contains(['@', ':', ' ']);
+        if !is_exact {
+            return Err(format!(
+                "dependency `{}` needs an exact version, not `{}`",
+                self.package, self.version
+            ));
+        }
+
+        let package = format!("{}@{}", self.package, self.version);
+        Ok(match self.kind {
+            crate::DependencyKind::All => crate::BuildDependency::All(package),
+            kind => crate::BuildDependency::Scoped { package, kind },
+        })
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -614,7 +657,11 @@ impl Recipe {
                 configure: values.command(&build.configure)?,
                 args: values.command(&build.args)?,
                 patches: source.patches.clone(),
-                dependencies: build.dependencies.clone(),
+                dependencies: build
+                    .dependencies
+                    .iter()
+                    .map(Dependency::lower)
+                    .collect::<Result<_, _>>()?,
                 libraries: build
                     .libraries
                     .iter()
@@ -659,6 +706,51 @@ mod tests {
 
     fn parse(json: &str) -> Recipe {
         serde_json::from_str(json).unwrap_or_else(|error| panic!("{error}\n{json}"))
+    }
+
+    #[test]
+    fn dependencies_lower_to_exact_catalog_requests() {
+        let dependency = |package: &str, version: &str, kind| Dependency {
+            package: package.into(),
+            version: version.into(),
+            kind,
+        };
+
+        assert_eq!(
+            dependency("zlib", "1.3.2", crate::DependencyKind::All).lower(),
+            Ok(crate::BuildDependency::All("zlib@1.3.2".into()))
+        );
+        assert_eq!(
+            dependency("go", "1.27.1", crate::DependencyKind::Build).lower(),
+            Ok(crate::BuildDependency::Scoped {
+                package: "go@1.27.1".into(),
+                kind: crate::DependencyKind::Build,
+            })
+        );
+        for (package, version) in [
+            ("zlib@1.3.2", "1.3.2"),
+            ("Zlib", "1.3.2"),
+            ("rootbeer:zlib", "1.3.2"),
+            ("zlib", ""),
+            ("zlib", "HEAD"),
+            ("zlib", "branch:main"),
+        ] {
+            assert!(dependency(package, version, crate::DependencyKind::Link)
+                .lower()
+                .is_err());
+        }
+    }
+
+    #[test]
+    fn dependencies_reject_the_request_string_form() {
+        assert!(serde_json::from_str::<Build>(
+            r#"{ "backend": "autotools", "dependencies": ["zlib@1.3.2"] }"#
+        )
+        .is_err());
+        assert!(serde_json::from_str::<Build>(
+            r#"{ "backend": "autotools", "dependencies": [{ "package": "zlib", "version": "1.3.2" }] }"#
+        )
+        .is_err());
     }
 
     #[test]

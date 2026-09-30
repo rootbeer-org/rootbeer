@@ -299,7 +299,10 @@ source = {
 build = {
     backend = "autotools",
     configure = { "--disable-shared", "--with-openssl={dependencies}" },
-    dependencies = { "openssl@4.0.2", "zlib@1.3.2" },
+    dependencies = {
+        { package = "openssl", version = "4.0.2", kind = "link" },
+        { package = "zlib", version = "1.3.2", kind = "link" },
+    },
 },
 ```
 
@@ -358,6 +361,9 @@ compilation; generators must already be vendored or declared build dependencies.
 `experiments` selects `GOEXPERIMENT` values. Projects needing frontend assets must
 provide them in the verified source or use a custom build.
 
+Declare the compiler as a build dependency on an exact catalog Go, such as
+`{ package = "go", version = "1.27.1", kind = "build" }`; its distribution becomes
+`GOROOT`. Recipes without one fall back to the host toolchain while they migrate.
 Host builds hash the installed Go compiler and its toolchain directory. Pinned
 environments must declare `tools.go` and `inputs.go-toolchain` pointing to that
 compiler's GOROOT. Rootbeer disables automatic toolchain downloads, workspace
@@ -395,13 +401,13 @@ explicitly and pass paths as positional arguments.
 
 ### Dependencies
 
-`build.dependencies` takes exact packages. A bare string exposes everything; a table
-scopes the dependency:
+`build.dependencies` takes catalog packages at exact versions. `kind` scopes what each
+one exposes to the build:
 
 ```lua
 dependencies = {
-    { package = "cmake@4.4.3", kind = "build" },
-    { package = "zlib@1.3.2", kind = "link" },
+    { package = "cmake", version = "4.4.3", kind = "build" },
+    { package = "zlib", version = "1.3.2", kind = "link" },
 },
 ```
 
@@ -409,7 +415,7 @@ dependencies = {
 | --- | --- |
 | `build` | Exposes its commands on `PATH` |
 | `link` | Exposes its libraries and headers, including transitive link inputs, without its build tools |
-| `all` | Both; the same as a bare string |
+| `all` | Both |
 | `runtime` | Installs it with the package, without exposing commands or headers |
 | `link_runtime` | Exposes link inputs and installs it |
 

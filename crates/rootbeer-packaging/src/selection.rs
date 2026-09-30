@@ -181,7 +181,12 @@ mod tests {
             let systems = ["aarch64-linux", "aarch64-macos", "x86_64-linux"];
             let library = recipe("library", "", &systems, library_revision);
             std::fs::write(directory.path().join("library.lua"), library).unwrap();
-            let app = recipe("app", "dependencies = { \"library@1\" },", &systems[1..], 1);
+            let app = recipe(
+                "app",
+                r#"dependencies = { { package = "library", version = "1", kind = "all" } },"#,
+                &systems[1..],
+                1,
+            );
             std::fs::write(directory.path().join("app.lua"), app).unwrap();
             PackageCatalog::from_directory(directory.path()).unwrap()
         };
