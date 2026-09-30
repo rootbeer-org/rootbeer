@@ -145,7 +145,11 @@ fn prepare_source(
         let bytes =
             fs::read(directory.join("package.json")).map_err(|error| format!("{key}: {error}"))?;
         let record = verify_record(&bytes, public_key, key, &build.system)?;
-        let archive = Some(directory.join("package.tar.gz"));
+        // A build or upstream binary released alongside, installed from its local copy.
+        let archive = ["package.tar.gz", crate::prepare::UPSTREAM_FILE]
+            .into_iter()
+            .map(|file| directory.join(file))
+            .find(|path| path.is_file());
         let package = record.artifact.package;
         runtime.insert(key.clone(), ReleasedDependency { package, archive });
     }
@@ -226,34 +230,47 @@ fn prepare_binary(
 ) -> Result<Qualified, String> {
     let receipt: crate::prepare::BinaryReceipt =
         serde_json::from_slice(receipt_bytes).map_err(|error| error.to_string())?;
-    if receipt.schema != 1
+    if receipt.schema != 2
         || receipt.recipe_sha256 != recipe.sha256()
         || receipt.provenance.engine_sha256 != rootbeer_build::engine_identity(None)
     {
         return Err("binary receipt does not match the approved recipe or engine".into());
     }
-    let LockedSource::File { sha256, .. } = &receipt.package.source else {
-        return Err("binary receipt requires a local package archive".into());
+    if receipt.package != receipt.provenance.upstream {
+        return Err("binary receipt publishes something other than the upstream download".into());
+    }
+    let LockedSource::Url { sha256, .. } = &receipt.package.source else {
+        return Err("binary receipt requires an upstream download".into());
     };
     let sha256 = sha256.clone();
-    let archive = destination.join("package.tar.gz");
+    let copy = destination.join(crate::prepare::UPSTREAM_FILE);
     fs::copy(
         receipt_path
             .parent()
             .unwrap_or(Path::new("."))
-            .join("package.tar.gz"),
-        &archive,
+            .join(crate::prepare::UPSTREAM_FILE),
+        &copy,
     )
     .map_err(|error| error.to_string())?;
-    if rootbeer_store::hash_file(&archive).map_err(|error| error.to_string())? != sha256 {
-        return Err("binary archive hash mismatch".into());
+    if rootbeer_store::hash_file(&copy).map_err(|error| error.to_string())? != sha256 {
+        return Err("upstream file hash mismatch".into());
     }
     let mut package = receipt.package;
-    package.source = LockedSource::Url {
-        url: format!("ghcr://{registry}@sha256:{sha256}"),
+    let mut local = package.clone();
+    local.source = LockedSource::File {
+        path: copy,
         sha256: sha256.clone(),
     };
-    let qualified = Qualified {
+    if recipe.mirror {
+        package.source = LockedSource::Url {
+            url: format!("ghcr://{registry}@sha256:{sha256}"),
+            sha256,
+        };
+    }
+    realizer
+        .realize(&local)
+        .map_err(|error| error.to_string())?;
+    Ok(Qualified {
         system: receipt.system,
         artifact: PublishedArtifact {
             revision,
@@ -261,20 +278,12 @@ fn prepare_binary(
             package,
         },
         provenance: PackageProvenance::Upstream(Box::new(receipt.provenance)),
-    };
-    let mut local = qualified.artifact.package.clone();
-    local.source = LockedSource::File {
-        path: archive,
-        sha256,
-    };
-    realizer
-        .realize(&local)
-        .map_err(|error| error.to_string())?;
-    Ok(qualified)
+    })
 }
 
 /// Uploads a verified package release as an OCI artifact, retaining all three blobs together.
-pub fn push_package(release: &Path, public_key: &str) -> Result<String, String> {
+pub fn push_package(release: &Path, registry: &str, public_key: &str) -> Result<String, String> {
+    rootbeer_package::ghcr::validate_repository(registry)?;
     let release = release.canonicalize().map_err(|error| error.to_string())?;
     let bytes = fs::read(release.join("package.json")).map_err(|error| error.to_string())?;
     let signed: rootbeer_package::distribution::SignedPackageRecord =
@@ -290,28 +299,48 @@ pub fn push_package(release: &Path, public_key: &str) -> Result<String, String> 
     let LockedSource::Url { url, sha256 } = &record.artifact.package.source else {
         unreachable!()
     };
-    let blob = rootbeer_package::ghcr::GhcrBlob::parse(url)?;
-    if rootbeer_store::hash_file(release.join("package.tar.gz"))
-        .map_err(|error| error.to_string())?
-        != *sha256
-        || rootbeer_store::hash_file(release.join("receipt.json"))
-            .map_err(|error| error.to_string())?
-            != record.artifact.receipt_sha256
+    // Only builds and mirrors live in the registry; other upstream binaries stay the vendor's.
+    let hosted = match url.starts_with("ghcr://") {
+        true => {
+            if rootbeer_package::ghcr::GhcrBlob::parse(url)?.repository != registry {
+                return Err("package artifact belongs to another registry".into());
+            }
+            Some(match &record.provenance {
+                PackageProvenance::Source(_) => ("package.tar.gz", "application/gzip"),
+                PackageProvenance::Upstream(_) => {
+                    (crate::prepare::UPSTREAM_FILE, "application/octet-stream")
+                }
+            })
+        }
+        false => None,
+    };
+    if let Some((file, _)) = hosted {
+        if rootbeer_store::hash_file(release.join(file)).map_err(|error| error.to_string())?
+            != *sha256
+        {
+            return Err("package release contents changed".into());
+        }
+    }
+    if rootbeer_store::hash_file(release.join("receipt.json")).map_err(|error| error.to_string())?
+        != record.artifact.receipt_sha256
     {
         return Err("package release contents changed".into());
     }
     let digest = hash_bytes(&bytes);
+    let mut files = vec![
+        "package.json:application/vnd.rootbeer.package.record.v1+json".to_string(),
+        "receipt.json:application/json".to_string(),
+    ];
+    files.extend(hosted.map(|(file, media)| format!("{file}:{media}")));
     let status = Command::new("oras")
         .current_dir(&release)
         .args([
             "push",
-            &format!("ghcr.io/{}:package-{digest}", blob.repository),
+            &format!("ghcr.io/{registry}:package-{digest}"),
             "--artifact-type",
             "application/vnd.rootbeer.package.v1",
-            "package.json:application/vnd.rootbeer.package.record.v1+json",
-            "package.tar.gz:application/gzip",
-            "receipt.json:application/json",
         ])
+        .args(&files)
         .status()
         .map_err(|error| error.to_string())?;
     if !status.success() {
@@ -319,15 +348,20 @@ pub fn push_package(release: &Path, public_key: &str) -> Result<String, String> 
     }
     let downloads = tempfile::tempdir().map_err(|error| error.to_string())?;
     let cache = rootbeer_package::download::DownloadCache::new(downloads.path());
-    for hash in [&digest, sha256, &record.artifact.receipt_sha256] {
+    let hashes = [
+        Some(&digest),
+        Some(&record.artifact.receipt_sha256),
+        hosted.map(|_| sha256),
+    ];
+    for hash in hashes.into_iter().flatten() {
         cache
-            .materialize_verified(&format!("ghcr://{}@sha256:{hash}", blob.repository), hash)
+            .materialize_verified(&format!("ghcr://{registry}@sha256:{hash}"), hash)
             .map_err(|error| format!("cannot verify public package download: {error}"))?;
     }
     let status = Command::new("oras")
         .args([
             "tag",
-            &format!("ghcr.io/{}:package-{digest}", blob.repository),
+            &format!("ghcr.io/{registry}:package-{digest}"),
             &format!("inputs-{}", record.input_key()),
         ])
         .status()
@@ -335,7 +369,7 @@ pub fn push_package(release: &Path, public_key: &str) -> Result<String, String> 
     if !status.success() {
         return Err(format!("package input locator upload failed: {status}"));
     }
-    Ok(format!("ghcr://{}@sha256:{digest}", blob.repository))
+    Ok(format!("ghcr://{registry}@sha256:{digest}"))
 }
 
 #[cfg(test)]

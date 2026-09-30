@@ -212,26 +212,61 @@ impl PackageRecord {
                     ..self.artifact.clone()
                 }
                 .validate(&package.id(), &self.system, self.revision, &recipe)?;
-                if !matches!(&provenance.upstream.source, crate::LockedSource::Url { url, .. } if url.starts_with("https://"))
-                {
+                let crate::LockedSource::Url { url, sha256 } = &provenance.upstream.source else {
+                    return Err("upstream evidence requires an HTTPS artifact".into());
+                };
+                if !url.starts_with("https://") {
                     return Err("upstream evidence requires an HTTPS artifact".into());
                 }
-                recipe.mirror = true;
-                self.artifact
-                    .validate(&package.id(), &self.system, self.revision, &recipe)?;
+                // Clients install the vendor's bytes, from the vendor or a mirror of them.
                 let mut expected = provenance.upstream.clone();
-                expected.source = package.source.clone();
-                expected.install = crate::LockedInstall::Archive {
-                    format: crate::ArchiveFormat::TarGz,
-                    strip_prefix: None,
-                };
-                if expected != *package {
-                    return Err("repackaged artifact differs from its upstream output".into());
+                if self.recipe.mirror {
+                    expected.source = package.source.clone();
                 }
-                Ok(())
+                let is_same_bytes = matches!(
+                    &package.source,
+                    crate::LockedSource::Url { sha256: published, .. } if published == sha256
+                );
+                if expected == *package && is_same_bytes {
+                    return self.artifact.validate(
+                        &package.id(),
+                        &self.system,
+                        self.revision,
+                        &self.recipe,
+                    );
+                }
+                let is_repackaged = matches!(
+                    &package.source,
+                    crate::LockedSource::Url { url, sha256: published }
+                        if url.starts_with("ghcr://") && published != sha256
+                );
+                if !is_repackaged {
+                    return Err("published artifact differs from its upstream download".into());
+                }
+                self.validate_repackaged(provenance)
             }
             _ => Err("package provenance does not match its recipe kind".into()),
         }
+    }
+
+    /// Records published before upstream binaries were installed as their vendors ship them
+    /// carry a tarball of the qualified output instead. They stay valid until superseded.
+    fn validate_repackaged(&self, provenance: &UpstreamProvenance) -> Result<(), String> {
+        let package = &self.artifact.package;
+        let mut recipe = self.recipe.clone();
+        recipe.mirror = true;
+        self.artifact
+            .validate(&package.id(), &self.system, self.revision, &recipe)?;
+        let mut expected = provenance.upstream.clone();
+        expected.source = package.source.clone();
+        expected.install = crate::LockedInstall::Archive {
+            format: crate::ArchiveFormat::TarGz,
+            strip_prefix: None,
+        };
+        if expected != *package {
+            return Err("published artifact differs from its upstream download".into());
+        }
+        Ok(())
     }
 }
 

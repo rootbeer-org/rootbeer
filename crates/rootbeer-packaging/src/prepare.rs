@@ -4,14 +4,18 @@ use std::path::{Path, PathBuf};
 use rootbeer_package::distribution::UpstreamProvenance;
 use rootbeer_package::repository::RepositoryResolver;
 use rootbeer_package::{
-    ArchiveFormat, LockedInstall, LockedPackage, LockedSource, PackageCatalog, PackageRealizer,
-    PackageRequest, PackageRequestResolver, PackageResolution, PackageResolverInputs,
-    ResolveContext, ResolverInput,
+    LockedPackage, LockedSource, PackageCatalog, PackageRealizer, PackageRequest,
+    PackageRequestResolver, PackageResolution, PackageResolverInputs, ResolveContext,
+    ResolverInput,
 };
-use rootbeer_store::{hash_file, Store};
+use rootbeer_store::Store;
 use serde::{Deserialize, Serialize};
 
 use crate::BuildOptions;
+
+/// An upstream binary's exact bytes, carried beside its receipt so release can verify them
+/// without downloading again. Only a mirror publishes them.
+pub(crate) const UPSTREAM_FILE: &str = "upstream";
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -23,7 +27,7 @@ pub(crate) struct BinaryReceipt {
     pub provenance: UpstreamProvenance,
 }
 
-/// Qualifies a source build or repackages a verified upstream binary without compiling it.
+/// Qualifies a source build, or an upstream binary exactly as its vendor publishes it.
 /// With a PDR, dependencies it has published builds of are installed rather than compiled, as are
 /// the `built` dependency builds earlier jobs qualified.
 pub fn prepare_package(
@@ -49,7 +53,7 @@ pub fn prepare_package(
             .map(|artifact| artifact.package);
     }
     if !built.is_empty() {
-        return Err("an upstream binary is repackaged without dependency builds".into());
+        return Err("an upstream binary is qualified without dependency builds".into());
     }
     let inputs = package_inputs(catalog);
     let mut resolver = rootbeer_package::backend_stack().with_implicit_resolver("rootbeer");
@@ -109,20 +113,17 @@ fn prepare_binary(
     if options.environment_identity(catalog, request, context)? != environment {
         return Err("package environment changed during qualification".into());
     }
-    let archive = destination.join("package.tar.gz");
-    rootbeer_build::pack(&realized.store_entry.path, &archive)
+    // Clients install the vendor's file as published; a mirror only relocates those bytes.
+    let LockedSource::Url { url, sha256 } = &upstream.source else {
+        return Err("an upstream binary must be a remote download".into());
+    };
+    let file = rootbeer_package::download::DownloadCache::new(&options.downloads)
+        .materialize_verified(url, sha256)
         .map_err(|error| error.to_string())?;
-    let mut package = upstream.clone();
-    package.source = LockedSource::File {
-        path: output.join("package.tar.gz"),
-        sha256: hash_file(&archive).map_err(|error| error.to_string())?,
-    };
-    package.install = LockedInstall::Archive {
-        format: ArchiveFormat::TarGz,
-        strip_prefix: None,
-    };
+    fs::copy(file, destination.join(UPSTREAM_FILE)).map_err(|error| error.to_string())?;
+    let package = upstream.clone();
     let receipt = BinaryReceipt {
-        schema: 1,
+        schema: 2,
         system: ResolveContext::current().system,
         recipe_sha256: recipe.sha256(),
         package: package.clone(),
@@ -161,14 +162,15 @@ mod tests {
     use ring::signature::{Ed25519KeyPair, KeyPair};
     use rootbeer_package::distribution::{verify_record, PackageProvenance};
     use rootbeer_package::{
-        download::DownloadCache, Provides, ResolutionProof, SnapshotProof, SnapshotSource,
+        download::DownloadCache, ArchiveFormat, LockedInstall, Provides, ResolutionProof,
+        SnapshotProof, SnapshotSource,
     };
     use std::collections::BTreeMap;
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
     #[cfg(target_os = "macos")]
-    fn dmg_roundtrip_preserves_code_signatures_resources_and_output_identity() {
+    fn a_dmg_is_published_as_the_vendor_ships_it() {
         use std::os::unix::fs::symlink;
         use std::process::Command;
 
@@ -268,17 +270,17 @@ mod tests {
             "demo@1",
             &prepared,
             &options,
-            resolution,
+            resolution.clone(),
             PackageResolverInputs::default(),
         )
         .unwrap();
-        assert!(matches!(
-            package.install,
-            LockedInstall::Archive {
-                format: ArchiveFormat::TarGz,
-                ..
-            }
-        ));
+        assert_eq!(package.install, LockedInstall::Dmg);
+        assert_eq!(package.source, resolution.package.source);
+        assert_eq!(
+            fs::read(prepared.join(UPSTREAM_FILE)).unwrap(),
+            fs::read(&archive).unwrap(),
+            "release verifies the vendor's exact bytes"
+        );
         let installed = PackageRealizer::with_dirs(
             Store::new(root.path().join("consumer")),
             root.path().join("downloads"),
@@ -450,7 +452,26 @@ mod tests {
             assert!(changed.validate().unwrap_err().contains("checksum"));
             changed = record.clone();
             changed.artifact.package.output_sha256 = Some("f".repeat(64));
-            assert!(changed.validate().unwrap_err().contains("upstream output"));
+            assert!(changed
+                .validate()
+                .unwrap_err()
+                .contains("upstream download"));
+            assert_eq!(
+                record.artifact.package.source, resolution.package.source,
+                "clients download the vendor's file"
+            );
+            let mut repackaged = record.clone();
+            repackaged.artifact.package.source = LockedSource::Url {
+                url: format!("ghcr://example/demo@sha256:{}", "e".repeat(64)),
+                sha256: "e".repeat(64),
+            };
+            repackaged.artifact.package.install = LockedInstall::Archive {
+                format: ArchiveFormat::TarGz,
+                strip_prefix: None,
+            };
+            repackaged
+                .validate()
+                .expect("records published as repacks stay valid until superseded");
             assert!(crate::release_package(
                 &catalog,
                 &prepared.join("receipt.json"),
@@ -482,23 +503,76 @@ mod tests {
                 "demo@1",
                 &root.path().join("failed"),
                 &options,
-                resolution,
+                resolution.clone(),
                 PackageResolverInputs::default()
             )
             .is_err());
             assert!(!root.path().join("failed").exists());
-            fs::write(prepared.join("package.tar.gz"), b"tampered").unwrap();
+            let mut mirrored = catalog.clone();
+            let platform = mirrored
+                .packages
+                .get_mut("demo")
+                .unwrap()
+                .versions
+                .get_mut("1")
+                .unwrap()
+                .platforms
+                .get_mut(&system)
+                .unwrap();
+            platform.mirror = true;
+            let prepared = root.path().join("mirrored");
+            prepare_binary(
+                &mirrored,
+                "demo@1",
+                &prepared,
+                &options,
+                resolution.clone(),
+                PackageResolverInputs::default(),
+            )
+            .unwrap();
+            assert_eq!(
+                fs::read(prepared.join(UPSTREAM_FILE)).unwrap(),
+                fs::read(&source).unwrap(),
+                "a mirror holds the vendor's exact bytes"
+            );
+            let signer = crate::release::Signer {
+                key_der: key.as_ref(),
+                public_key: &public_key,
+                published: 1,
+            };
+            let release = root.path().join("mirror-release");
+            crate::release_package(
+                &mirrored,
+                &prepared.join("receipt.json"),
+                "example/demo",
+                &release,
+                &signer,
+                None,
+                &Default::default(),
+            )
+            .unwrap();
+            let bytes = fs::read(release.join("package.json")).unwrap();
+            let record = verify_record(&bytes, &public_key, "demo@1", &system).unwrap();
+            let LockedSource::Url { sha256, .. } = &resolution.package.source else {
+                unreachable!()
+            };
+            assert_eq!(
+                record.artifact.package.source,
+                LockedSource::Url {
+                    url: format!("ghcr://example/demo@sha256:{sha256}"),
+                    sha256: sha256.clone(),
+                }
+            );
+            assert_eq!(record.artifact.package.install, resolution.package.install);
+
+            fs::write(prepared.join(UPSTREAM_FILE), b"tampered").unwrap();
             assert!(crate::release_package(
-                &catalog,
+                &mirrored,
                 &prepared.join("receipt.json"),
                 "example/demo",
                 &root.path().join("tampered"),
-                &crate::release::Signer {
-                    key_der: key.as_ref(),
-                    public_key: &public_key,
-                    published: 1
-                },
-                Some(&task.key),
+                &signer,
+                None,
                 &Default::default()
             )
             .unwrap_err()

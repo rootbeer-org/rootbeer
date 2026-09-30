@@ -199,10 +199,12 @@ remain intact. PKG installers and installer scripts are unsupported.
 ### Moving releases and mirroring
 
 A moving tag such as `tip` or a "latest" URL is not a version. Give each approved
-snapshot an exact version and pin its digest. Set `mirror = true` on the prebuilt
-to retain the qualified artifact in the PDR's registry, so old installations keep
-working if upstream replaces or removes it. Receipts retain the original URL and
-digest. Omit `upstream` for these recipes and update them by hand.
+snapshot an exact version and pin its digest. Clients install a prebuilt exactly as
+its vendor publishes it, downloading from the vendor as a Homebrew cask does. Set
+`mirror = true` to also keep a byte-identical copy in the PDR's registry, so old
+installations keep working if upstream replaces or removes the file; the record then
+points at that copy, with the same digest. Omit `upstream` for these recipes and
+update them by hand.
 
 ## Track upstream releases
 

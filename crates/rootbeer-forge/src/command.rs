@@ -73,6 +73,9 @@ enum Command {
     /// Upload a signed package release to GHCR without rebuilding or signing again
     Push {
         release: PathBuf,
+        /// The registry repository the release was prepared for
+        #[arg(long)]
+        registry: String,
         #[arg(long)]
         public_key: String,
     },
@@ -349,9 +352,10 @@ fn execute(args: Args) -> Result<(), String> {
         }
         Command::Push {
             release,
+            registry,
             public_key,
         } => {
-            let reference = rootbeer_packaging::push_package(&release, &public_key)?;
+            let reference = rootbeer_packaging::push_package(&release, &registry, &public_key)?;
             writeln!(output, "published {reference}").map_err(|error| error.to_string())?;
         }
         Command::Updates { cache, output } => {
@@ -561,12 +565,16 @@ fn execute(args: Args) -> Result<(), String> {
                 &dependency_artifacts,
             )
             .inspect_err(|_| show_log_tail(&destination))?;
+            let location = match &artifact.source {
+                rootbeer_packaging::LockedSource::Url { url, .. } => url.clone(),
+                rootbeer_packaging::LockedSource::File { path, .. }
+                | rootbeer_packaging::LockedSource::Path { path, .. } => path.display().to_string(),
+            };
             writeln!(
                 output,
-                "prepared {} for {}\nartifact: {}",
+                "prepared {} for {}\nartifact: {location}",
                 artifact.id(),
                 rootbeer_packaging::ResolveContext::current().system,
-                destination.join("package.tar.gz").display()
             )
             .map_err(|e| e.to_string())?;
         }

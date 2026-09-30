@@ -124,16 +124,17 @@ fn release(
         Err(_) => task.key.clone(),
     };
     let destination = releases.join(&key);
+    let registry = format!("{}/{}", plan.registry, task.name);
     rootbeer_packaging::release_package(
         catalog,
         &receipt,
-        &format!("{}/{}", plan.registry, task.name),
+        &registry,
         &destination,
         signer,
         Some(&key),
         released,
     )?;
-    let reference = rootbeer_packaging::push_package(&destination, public_key)?;
+    let reference = rootbeer_packaging::push_package(&destination, &registry, public_key)?;
     Ok((package, key, reference))
 }
 

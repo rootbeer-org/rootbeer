@@ -4,11 +4,12 @@
 | --------------- | ----------------------------------------------------------------------------- |
 | `rbpkg.com`     | Documentation, package search, installer, and nightly CLI binaries.           |
 | `pdr.rbpkg.com` | The signed root, one document per package, and independently signed records. |
-| GHCR            | Immutable package archives addressed by digest.                               |
+| GHCR            | Source builds and byte-identical upstream mirrors, addressed by digest.       |
 
 The web UI and `rb search` read the signed root alone. Installing a package fetches
-that package's document and the one signed record it names, then the archive; no
-other package's data is downloaded.
+that package's document and the one signed record it names, then the artifact: a
+source build from GHCR, or an upstream binary from its vendor or mirror. No other
+package's data is downloaded.
 
 ## Published files
 
