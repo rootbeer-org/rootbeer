@@ -66,7 +66,53 @@ pub fn prepare_package(
     let resolution = resolver
         .resolve_package(&PackageRequest::parse(request), &platform)
         .map_err(|error| error.to_string())?;
+    if let Some(pdr) = pdr.filter(|_| recipe.mirror) {
+        restore_mirrored(pdr, request, &resolution.package, options);
+    }
     prepare_binary(catalog, request, output, options, resolution, inputs)
+}
+
+/// Requalifying a mirrored binary takes the vendor's bytes from our copy, so a vendor that has
+/// since replaced its file cannot fail it. The digest still verifies them either way.
+fn restore_mirrored(
+    pdr: &RepositoryResolver,
+    request: &str,
+    upstream: &LockedPackage,
+    options: &BuildOptions,
+) {
+    let Ok((record, _)) = pdr.record(&PackageRequest::parse(request), &ResolveContext::current())
+    else {
+        return;
+    };
+    let Some((url, sha256)) = mirror_of(upstream, &record.artifact.package) else {
+        return;
+    };
+
+    let downloads = rootbeer_package::download::DownloadCache::new(&options.downloads)
+        .with_execution(options.execution.clone());
+    match downloads.materialize_verified(url, sha256) {
+        Ok(_) => eprintln!("restored {request} from its mirror"),
+        Err(error) => eprintln!("mirror of {request} is unavailable, using the vendor: {error}"),
+    }
+}
+
+/// The published copy holding exactly the vendor's bytes. Records from before mirrors kept the
+/// vendor's file hold a repackaged archive instead, which cannot stand in for it.
+fn mirror_of<'a>(
+    upstream: &'a LockedPackage,
+    published: &'a LockedPackage,
+) -> Option<(&'a str, &'a str)> {
+    let LockedSource::Url { sha256, .. } = &upstream.source else {
+        return None;
+    };
+    let LockedSource::Url {
+        url,
+        sha256: mirrored,
+    } = &published.source
+    else {
+        return None;
+    };
+    (url.starts_with("ghcr://") && mirrored == sha256).then_some((url.as_str(), sha256.as_str()))
 }
 
 fn prepare_binary(
@@ -159,6 +205,51 @@ fn package_inputs(catalog: &PackageCatalog) -> PackageResolverInputs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_mirror_stands_in_only_for_the_vendors_exact_bytes() {
+        let vendor = "a".repeat(64);
+        let package = |url: String, sha256: &str| LockedPackage {
+            name: "app".into(),
+            version: "1".into(),
+            source: LockedSource::Url {
+                url,
+                sha256: sha256.into(),
+            },
+            install: LockedInstall::Dmg,
+            provides: Provides {
+                bins: BTreeMap::new(),
+                apps: BTreeMap::new(),
+            },
+            output_sha256: None,
+            runtime_dependencies: BTreeMap::new(),
+        };
+        let upstream = package("https://vendor.example/app.dmg".into(), &vendor);
+        let mirrored = format!("ghcr://org/pdr/app@sha256:{vendor}");
+
+        assert_eq!(
+            mirror_of(&upstream, &package(mirrored.clone(), &vendor)),
+            Some((mirrored.as_str(), vendor.as_str()))
+        );
+        let repackaged = "b".repeat(64);
+        assert_eq!(
+            mirror_of(
+                &upstream,
+                &package(
+                    format!("ghcr://org/pdr/app@sha256:{repackaged}"),
+                    &repackaged
+                )
+            ),
+            None
+        );
+        assert_eq!(
+            mirror_of(
+                &upstream,
+                &package("https://vendor.example/app.dmg".into(), &vendor)
+            ),
+            None
+        );
+    }
     use ring::signature::{Ed25519KeyPair, KeyPair};
     use rootbeer_package::distribution::{verify_record, PackageProvenance};
     use rootbeer_package::{
