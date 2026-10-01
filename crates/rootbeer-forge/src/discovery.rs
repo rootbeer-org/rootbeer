@@ -286,7 +286,6 @@ pub fn propose(config: &Config, requests: &[String]) -> Result<(), String> {
             number,
             branch: pull["head"]["ref"].as_str().unwrap_or_default().to_string(),
             url: pull["html_url"].as_str().unwrap_or_default().to_string(),
-            body: pull["body"].as_str().unwrap_or_default().to_string(),
             files: files
                 .iter()
                 .filter_map(|file| file["filename"].as_str().map(str::to_string))
@@ -331,7 +330,6 @@ struct Proposal {
     number: u64,
     branch: String,
     url: String,
-    body: String,
     files: Vec<String>,
 }
 
@@ -388,23 +386,6 @@ fn conflicting_proposal<'a>(
 }
 
 /// A lane keeps one open proposal, so a package's new versions replace its pending ones.
-fn coalesced_requests(body: &str, requests: &[String]) -> Vec<String> {
-    let replaced: Vec<_> = requests
-        .iter()
-        .map(|request| package_name(request))
-        .collect();
-    let mut selections: Vec<String> = body
-        .lines()
-        .filter_map(|line| line.strip_prefix("- `")?.strip_suffix('`'))
-        .filter(|pending| !replaced.contains(&package_name(pending)))
-        .map(str::to_string)
-        .chain(requests.iter().cloned())
-        .collect();
-    selections.sort();
-    selections.dedup();
-    selections
-}
-
 fn body_text(requests: &[String]) -> String {
     let list: Vec<_> = requests
         .iter()
@@ -435,23 +416,17 @@ fn propose_lane(
         ));
     }
     let is_engine = lane == Lane::Engine;
-    // The engine lane holds one whole recipe, so it restarts from main and never goes stale.
-    let (branch, start) = match current {
-        Some(pull) if !is_engine => {
-            git(&["fetch", "origin", &pull.branch])?;
-            (pull.branch.clone(), format!("origin/{}", pull.branch))
-        }
-        Some(pull) => (pull.branch.clone(), "origin/main".to_string()),
-        None => (
-            format!(
-                "updates/{}-{}",
-                lane.name(),
-                crate::github::env("GITHUB_RUN_ID")?
-            ),
-            "origin/main".to_string(),
+    // Each run proposes every available update, so a lane restarts from main and never
+    // conflicts with recipe changes merged since its last run.
+    let branch = match current {
+        Some(pull) => pull.branch.clone(),
+        None => format!(
+            "updates/{}-{}",
+            lane.name(),
+            crate::github::env("GITHUB_RUN_ID")?
         ),
     };
-    git(&["switch", "--force-create", &branch, &start])?;
+    git(&["switch", "--force-create", &branch, "origin/main"])?;
     let paths: Vec<String> = names
         .iter()
         .map(|name| format!("packages/{name}.lua"))
@@ -469,22 +444,14 @@ fn propose_lane(
     }
     git(&["commit", "-m", "chore(packages): propose upstream updates"])?;
     let target = format!("HEAD:refs/heads/{branch}");
-    let mut push = vec!["push", "origin", target.as_str()];
-    if is_engine {
-        push.push("--force");
-    }
-    git(&push)?;
+    git(&["push", "--force", "origin", target.as_str()])?;
 
-    let selections = match (is_engine, current) {
-        (false, Some(pull)) => coalesced_requests(&pull.body, requests),
-        _ => requests.to_vec(),
-    };
     let title = if is_engine {
         format!("chore(packages): update {}", engine.package)
     } else {
         "chore(packages): update available packages".to_string()
     };
-    let body = body_text(&selections);
+    let body = body_text(requests);
     let (number, url) = match current {
         Some(pull) => {
             github.patch(
@@ -565,7 +532,6 @@ mod tests {
             number,
             branch: branch.into(),
             url: format!("https://example.com/{branch}"),
-            body: String::new(),
             files: files.iter().map(|file| file.to_string()).collect(),
         }
     }
@@ -619,22 +585,7 @@ mod tests {
     }
 
     #[test]
-    fn newer_versions_replace_pending_ones_and_bodies_round_trip() {
-        let body = body_text(&requests(&["kitty@0.48.2", "zoxide@1.0"]));
-        assert_eq!(
-            coalesced_requests(&body, &requests(&["kitty@0.49.0"])),
-            ["kitty@0.49.0", "zoxide@1.0"]
-        );
-        assert_eq!(
-            coalesced_requests(&body, &requests(&["kitty@0.49.0", "kitty@0.49.1"])),
-            ["kitty@0.49.0", "kitty@0.49.1", "zoxide@1.0"]
-        );
-        assert_eq!(
-            coalesced_requests("", &requests(&["kitty@0.49.0"])),
-            ["kitty@0.49.0"]
-        );
-        let selections = requests(&["kitty@0.49.0", "rootbeer@0.1.0-main+a248a77d983a"]);
-        assert_eq!(coalesced_requests(&body_text(&selections), &[]), selections);
+    fn requests_name_exact_lowercase_versions() {
         assert!(
             is_request("rootbeer@0.1.0-main+a248a77d983a")
                 && !is_request("Kitty@1")

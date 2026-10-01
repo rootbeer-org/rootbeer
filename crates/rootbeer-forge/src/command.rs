@@ -92,6 +92,14 @@ enum Command {
         #[arg(long)]
         public_key: String,
     },
+    /// Report every declared package platform the PDR at `site` lacks or serves from an outdated
+    /// record, failing when there is one
+    Coverage {
+        #[arg(long)]
+        site: PathBuf,
+        #[arg(long)]
+        public_key: String,
+    },
     /// Add inferred update rules to copies of the selected catalog's GitHub packages
     /// Check tracked upstreams, caching metadata and reporting independent failures
     Updates {
@@ -312,6 +320,28 @@ fn execute(args: Args) -> Result<(), String> {
                 rootbeer_packaging::publish_records(catalog()?, &record, &site, &key, &public_key)?;
             writeln!(output, "published {count} package platforms")
                 .map_err(|error| error.to_string())?;
+        }
+        Command::Coverage { site, public_key } => {
+            let coverage = rootbeer_packaging::coverage(catalog()?, &site, &public_key)?;
+            for label in &coverage.missing {
+                writeln!(output, "missing: {label}").map_err(|error| error.to_string())?;
+            }
+            for label in &coverage.stale {
+                writeln!(output, "stale: {label}").map_err(|error| error.to_string())?;
+            }
+            if !coverage.is_complete() {
+                return Err(format!(
+                    "{} declared package platforms are missing and {} are served from outdated \
+                     records; build them with the Packages workflow",
+                    coverage.missing.len(),
+                    coverage.stale.len()
+                ));
+            }
+            writeln!(
+                output,
+                "every declared package platform is published and current"
+            )
+            .map_err(|error| error.to_string())?;
         }
         Command::Release {
             receipt,
