@@ -31,9 +31,10 @@ const INPUT_NAME: Pattern = Pattern {
     rest: |c| matches!(c, b'a'..=b'z' | b'0'..=b'9' | b'_'),
 };
 
+// Lowercase names are the sandbox's ($out, $deps, inputs), so env can never shadow one.
 const ENV_NAME: Pattern = Pattern {
-    reason: "must match [A-Za-z_][A-Za-z0-9_]*",
-    first: |c| c.is_ascii_alphabetic() || c == b'_',
+    reason: "must match [A-Z][A-Za-z0-9_]*",
+    first: |c| c.is_ascii_uppercase(),
     rest: |c| c.is_ascii_alphanumeric() || c == b'_',
 };
 
@@ -42,6 +43,16 @@ const OUTPUT_NAME: Pattern = Pattern {
     first: |c| c.is_ascii_lowercase(),
     rest: |c| c.is_ascii_lowercase() || c.is_ascii_digit(),
 };
+
+const SANDBOX_ENV: [&str; 6] = [
+    "PATH",
+    "HOME",
+    "TMPDIR",
+    "LC_ALL",
+    "TZ",
+    "SOURCE_DATE_EPOCH",
+];
+const SANDBOX_INPUTS: [&str; 3] = ["deps", "jobs", "target"];
 
 impl Pattern {
     fn check(&self, field: &str, value: &str) -> Result<(), Error> {
@@ -76,8 +87,8 @@ impl Build {
 
         self.inputs.keys().try_for_each(|name| {
             INPUT_NAME.check("inputs", name)?;
-            if self.env.contains_key(name) {
-                return Err(Error::invalid("env", name, "collides with an input"));
+            if SANDBOX_INPUTS.contains(&name.as_str()) || self.outputs.contains(name) {
+                return Err(Error::invalid("inputs", name, "is set by the sandbox"));
             }
 
             Ok(())
@@ -158,6 +169,10 @@ fn dependencies(dependencies: &[Dependency]) -> Result<(), Error> {
 fn env(env: &BTreeMap<String, String>) -> Result<(), Error> {
     env.iter().try_for_each(|(name, value)| {
         ENV_NAME.check("env", name)?;
+        if SANDBOX_ENV.contains(&name.as_str()) {
+            return Err(Error::invalid("env", name, "is set by the sandbox"));
+        }
+
         if value.contains('\0') {
             return Err(Error::invalid(
                 format!("env.{name}"),
