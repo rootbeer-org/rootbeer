@@ -9,18 +9,19 @@ urls:
   - https://example.com/auto-5.8.tar.gz
 
 # bipfmhbihkeqclkp3ux5mniqc5bn2gdc
-dependencies:
-  - f5bo4mtpggcspiokfi2mbylipiq5viqa linked libz
-env:
-  RB_SYSTEM: builder-sha256:0000
-inputs:
-  source: gskd7oqlctnsyj5ziiallfivhtzbfp27
 kind: build
 name: auto
-outputs:
-  - out
+version: 5.8
 platform: x86_64-linux
 sandbox: linux-v1
+inputs:
+  source: gskd7oqlctnsyj5ziiallfivhtzbfp27
+dependencies:
+  - libz (linked) f5bo4mtpggcspiokfi2mbylipiq5viqa
+env:
+  RB_SYSTEM: builder-sha256:0000
+outputs:
+  - out
 script: |
   set -eu
   tar -xzf "${source}" -C .
@@ -29,4 +30,3 @@ script: |
   make "-j${jobs}"
   make check
   make "DESTDIR=${out}" install
-version: 5.8

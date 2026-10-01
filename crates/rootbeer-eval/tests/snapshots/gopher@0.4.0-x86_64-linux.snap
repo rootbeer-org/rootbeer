@@ -9,8 +9,15 @@ urls:
   - https://example.com/gopher/archive/v0.4.0.tar.gz
 
 # zcov5gjuslmn3q4kaqffzjk6lhsjjdx5
+kind: build
+name: gopher-vendor
+version: 0.4.0
+platform: x86_64-linux
+sandbox: linux-v1-net
+inputs:
+  source: oxwds6bv5rm75pxp65ffbezfkvw2swoo
 dependencies:
-  - zny7lluton2szdexdko53y5iqjnd4xup build go
+  - go (build) zny7lluton2szdexdko53y5iqjnd4xup
 env:
   GO111MODULE: on
   GOENV: off
@@ -19,14 +26,8 @@ env:
   GOSUMDB: sum.golang.org
   GOTOOLCHAIN: local
   GOWORK: off
-inputs:
-  source: oxwds6bv5rm75pxp65ffbezfkvw2swoo
-kind: build
-name: gopher-vendor
 outputs:
   - out
-platform: x86_64-linux
-sandbox: linux-v1-net
 script: |
   set -eu
   tar -xzf "${source}" -C .
@@ -39,11 +40,18 @@ script: |
   cmp go.sum "${TMPDIR}/go.sum"
   go mod verify
   cp -R vendor "${out}"
-version: 0.4.0
 
 # tdbdvfgi7w4nezd2ffndjrea2leoghry
+kind: build
+name: gopher
+version: 0.4.0
+platform: x86_64-linux
+sandbox: linux-v1
+inputs:
+  source: oxwds6bv5rm75pxp65ffbezfkvw2swoo
+  vendor: zcov5gjuslmn3q4kaqffzjk6lhsjjdx5
 dependencies:
-  - zny7lluton2szdexdko53y5iqjnd4xup build go
+  - go (build) zny7lluton2szdexdko53y5iqjnd4xup
 env:
   CGO_ENABLED: 0
   GO111MODULE: on
@@ -56,15 +64,8 @@ env:
   GOVCS: *:off
   GOWORK: off
   RB_SYSTEM: builder-sha256:0000
-inputs:
-  source: oxwds6bv5rm75pxp65ffbezfkvw2swoo
-  vendor: zcov5gjuslmn3q4kaqffzjk6lhsjjdx5
-kind: build
-name: gopher
 outputs:
   - out
-platform: x86_64-linux
-sandbox: linux-v1
 script: |
   set -eu
   tar -xzf "${source}" -C .
@@ -75,4 +76,3 @@ script: |
   go generate -tags netgo,osusergo ./internal/gen
   mkdir -p "${out}/bin"
   go build -trimpath -buildvcs=false -p "${jobs}" -tags netgo,osusergo -ldflags "-X 'main.version=0.4.0'" -o "${out}/bin/gopher" ./cmd/gopher
-version: 0.4.0

@@ -9,17 +9,17 @@ urls:
   - https://example.com/tool-2.0.0-darwin-arm64
 
 # e3rtcvq5o2vghgq5chw5txhptocnekd2
-inputs:
-  source: l5dyidyao2hrmjzeagefjebwdmc4dhxp
 kind: build
 name: tool
-outputs:
-  - out
+version: 2.0.0
 platform: aarch64-macos
 sandbox: darwin-v1
+inputs:
+  source: l5dyidyao2hrmjzeagefjebwdmc4dhxp
+outputs:
+  - out
 script: |
   set -eu
   mkdir -p "${out}/bin"
   cp "${source}" "${out}/bin/tool"
   chmod 755 "${out}/bin/tool"
-version: 2.0.0

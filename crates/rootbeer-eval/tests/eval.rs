@@ -2,7 +2,6 @@
 
 use rootbeer_drv::{Derivation, Key, Platform};
 use rootbeer_eval::{Catalog, Error, Graph, Host, Target};
-use serde_json::Value;
 use std::collections::BTreeMap;
 
 const FIXTURES: [(&str, &str); 9] = [
@@ -46,13 +45,7 @@ fn build_keys(fixtures: &[(&str, &str)], system: &str) -> BTreeMap<String, Strin
 }
 
 fn label(target: &Target) -> String {
-    let platform = serde_json::to_value(target.platform).unwrap();
-    format!(
-        "{}@{} {}",
-        target.name,
-        target.version,
-        platform.as_str().unwrap()
-    )
+    format!("{}@{}-{}", target.name, target.version, target.platform)
 }
 
 fn parse_error(source: &str) -> String {
@@ -77,15 +70,10 @@ fn fixtures_evaluate_to_the_pinned_derivations() {
 
         let mut snapshot = String::new();
         for key in keys {
-            snapshot.push_str(&format!("\n# {key}\n"));
-            render(
-                &serde_json::to_value(&graph.derivations[key]).unwrap(),
-                "",
-                &mut snapshot,
-            );
+            snapshot.push_str(&format!("\n# {key}\n{}", graph.derivations[key]));
         }
 
-        let name = label(target).replace(' ', "-");
+        let name = label(target);
         insta::with_settings!({
             omit_expression => true,
             prepend_module_to_snapshot => false
@@ -107,50 +95,6 @@ fn inputs_first<'a>(graph: &'a Graph, key: &'a Key, keys: &mut Vec<&'a Key>) {
     }
 
     keys.push(key);
-}
-
-fn render(value: &Value, indent: &str, out: &mut String) {
-    let Value::Object(fields) = value else {
-        return;
-    };
-
-    for (name, value) in fields.iter().collect::<BTreeMap<_, _>>() {
-        match value {
-            Value::String(text) if text.contains('\n') => {
-                out.push_str(&format!("{indent}{name}: |\n"));
-                for line in text.lines() {
-                    out.push_str(&format!("{indent}  {line}\n"));
-                }
-            }
-            Value::Object(_) => {
-                out.push_str(&format!("{indent}{name}:\n"));
-                render(value, &format!("{indent}  "), out);
-            }
-            Value::Array(items) => {
-                out.push_str(&format!("{indent}{name}:\n"));
-                for item in items {
-                    out.push_str(&format!("{indent}  - {}\n", scalar(item)));
-                }
-            }
-            value => out.push_str(&format!("{indent}{name}: {}\n", scalar(value))),
-        }
-    }
-}
-
-fn scalar(value: &Value) -> String {
-    match value {
-        Value::String(text) => text.clone(),
-        Value::Object(fields) => {
-            let fields = fields.iter().collect::<BTreeMap<_, _>>();
-            fields
-                .values()
-                .map(|field| scalar(field))
-                .collect::<Vec<_>>()
-                .join(" ")
-        }
-
-        value => value.to_string(),
-    }
 }
 
 #[test]

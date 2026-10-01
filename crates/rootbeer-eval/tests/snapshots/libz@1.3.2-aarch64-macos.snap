@@ -9,19 +9,20 @@ urls:
   - https://example.com/libz-1.3.2.tar.xz
 
 # htp4z4thjxnlw64nt6rj5xlvu4osy7of
-dependencies:
-  - e3rtcvq5o2vghgq5chw5txhptocnekd2 build tool
-  - e3rtcvq5o2vghgq5chw5txhptocnekd2 linked tool
-env:
-  RB_SYSTEM: builder-sha256:0000
-inputs:
-  source: 46ju3wvob5d7a26rjdk7mbpceliybsev
 kind: build
 name: libz
-outputs:
-  - out
+version: 1.3.2
 platform: aarch64-macos
 sandbox: darwin-v1
+inputs:
+  source: 46ju3wvob5d7a26rjdk7mbpceliybsev
+dependencies:
+  - tool (build) e3rtcvq5o2vghgq5chw5txhptocnekd2
+  - tool (linked) e3rtcvq5o2vghgq5chw5txhptocnekd2
+env:
+  RB_SYSTEM: builder-sha256:0000
+outputs:
+  - out
 script: |
   set -eu
   tar -xJf "${source}" -C .
@@ -37,18 +38,17 @@ script: |
   make "-j${jobs}" VERSION=1.3
   make "DESTDIR=${out}" install
   sh -c "echo \"\$1\" > ${out}/note" note "it's \`done\`"
-version: 1.3.2
 
 # hhabwqau3vnj6otgrxiucmfc4chs2xsn
-env:
-  RB_SYSTEM: builder-sha256:0000
 kind: check
 name: libz
+target: htp4z4thjxnlw64nt6rj5xlvu4osy7of
 platform: aarch64-macos
 sandbox: darwin-v1
+env:
+  RB_SYSTEM: builder-sha256:0000
 script: |
   set -eu
   find . -exec true "{}" ";"
   test -e "${target}/lib/libz.a"
   test -e "${target}/lib/libz.dylib"
-target: htp4z4thjxnlw64nt6rj5xlvu4osy7of

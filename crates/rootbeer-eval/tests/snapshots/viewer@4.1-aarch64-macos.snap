@@ -9,14 +9,15 @@ urls:
   - https://example.com/Viewer-4.1.dmg
 
 # vtgqivxvgevk72ix4po4zpxo7ekykttc
-inputs:
-  source: zt4dc4nb6fbhwnjghszk4f5kyhcpikzh
 kind: build
 name: viewer
-outputs:
-  - out
+version: 4.1
 platform: aarch64-macos
 sandbox: darwin-v1
+inputs:
+  source: zt4dc4nb6fbhwnjghszk4f5kyhcpikzh
+outputs:
+  - out
 script: |
   set -eu
   mkdir -p "${out}"
@@ -25,4 +26,3 @@ script: |
   hdiutil detach "${TMPDIR}/dmg"
   mkdir -p "${out}/bin"
   ln -s ../Viewer.app/Contents/MacOS/viewer "${out}/bin/viewer"
-version: 4.1

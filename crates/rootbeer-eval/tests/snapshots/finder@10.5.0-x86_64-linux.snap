@@ -9,14 +9,15 @@ urls:
   - https://github.com/example/finder/releases/download/v10.5.0/finder-v10.5.0-x86_64-unknown-linux-musl.tar.gz
 
 # yq6sp3zrthemeem6javcnqwdkxrbuc3g
-inputs:
-  source: lct3jqakjuifas4jpa5kd76jj23fblhv
 kind: build
 name: finder
-outputs:
-  - out
+version: 10.5.0
 platform: x86_64-linux
 sandbox: linux-v1
+inputs:
+  source: lct3jqakjuifas4jpa5kd76jj23fblhv
+outputs:
+  - out
 script: |
   set -eu
   mkdir -p "${out}"
@@ -28,16 +29,15 @@ script: |
     [ $# -eq 1 ] || { echo "expected one executable named $name, found $#" >&2; exit 1; }
     ln -s "../${1#./}" "${out}/bin/$name"
   done
-version: 10.5.0
 
 # rcfjh6ykeqpvtqbbjieulf3qji352xpm
-env:
-  RB_SYSTEM: builder-sha256:0000
 kind: check
 name: finder
+target: yq6sp3zrthemeem6javcnqwdkxrbuc3g
 platform: x86_64-linux
 sandbox: linux-v1
+env:
+  RB_SYSTEM: builder-sha256:0000
 script: |
   set -eu
   finder --version
-target: yq6sp3zrthemeem6javcnqwdkxrbuc3g

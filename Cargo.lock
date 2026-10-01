@@ -1710,7 +1710,6 @@ dependencies = [
  "percent-encoding",
  "rootbeer-drv",
  "serde",
- "serde_json",
 ]
 
 [[package]]

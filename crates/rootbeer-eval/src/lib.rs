@@ -307,10 +307,9 @@ impl<'a> Evaluation<'a> {
     }
 }
 
-// TODO: Print the platform's serde name once rootbeer-drv's Platform implements Display
 impl fmt::Display for Target {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}@{} ({:?})", self.name, self.version, self.platform)
+        write!(f, "{}@{} ({})", self.name, self.version, self.platform)
     }
 }
 

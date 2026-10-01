@@ -9,19 +9,19 @@ urls:
   - https://example.com/ziggy/archive/294212ebd35f5b755062186a66bcfd6436d3627a.tar.gz
 
 # osm7lnipfcfx4lpm4xflw35mxlthgyu7
-env:
-  RB_SYSTEM: builder-sha256:0000
-inputs:
-  source: btesvzirtlgwsyo7zmq7pfbwwgw25enj
 kind: build
 name: ziggy
-outputs:
-  - out
+version: 0.1.0-dev.1
 platform: x86_64-linux
 sandbox: linux-v1
+inputs:
+  source: btesvzirtlgwsyo7zmq7pfbwwgw25enj
+env:
+  RB_SYSTEM: builder-sha256:0000
+outputs:
+  - out
 script: |
   set -eu
   tar -xzf "${source}" -C .
   cd ziggy-294212ebd35f5b755062186a66bcfd6436d3627a
   zig build --prefix "${out}" --cache-dir zig-cache --global-cache-dir zig-global-cache "-j${jobs}" -Doptimize=ReleaseSafe -Dversion=0.1.0-dev.1
-version: 0.1.0-dev.1

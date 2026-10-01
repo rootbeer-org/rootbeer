@@ -9,6 +9,7 @@
 mod error;
 mod key;
 mod validate;
+mod view;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -86,7 +87,7 @@ pub struct Dependency {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(into = "&'static str", try_from = "String")]
 pub enum DependencyKind {
     /// Required to build the derivation but not a part of its output
     Build,
@@ -98,13 +99,78 @@ pub enum DependencyKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(into = "&'static str", try_from = "String")]
 pub enum Platform {
-    #[serde(rename = "aarch64-macos")]
     Aarch64Macos,
-    #[serde(rename = "aarch64-linux")]
     Aarch64Linux,
-    #[serde(rename = "x86_64-linux")]
     X86_64Linux,
+}
+
+// The only spelling of each name: serde and Display both go through as_str.
+impl DependencyKind {
+    const ALL: [DependencyKind; 3] = [
+        DependencyKind::Build,
+        DependencyKind::Linked,
+        DependencyKind::Runtime,
+    ];
+
+    fn as_str(self) -> &'static str {
+        match self {
+            DependencyKind::Build => "build",
+            DependencyKind::Linked => "linked",
+            DependencyKind::Runtime => "runtime",
+        }
+    }
+}
+
+impl Platform {
+    const ALL: [Platform; 3] = [
+        Platform::Aarch64Macos,
+        Platform::Aarch64Linux,
+        Platform::X86_64Linux,
+    ];
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Platform::Aarch64Macos => "aarch64-macos",
+            Platform::Aarch64Linux => "aarch64-linux",
+            Platform::X86_64Linux => "x86_64-linux",
+        }
+    }
+}
+
+impl From<Platform> for &'static str {
+    fn from(platform: Platform) -> Self {
+        platform.as_str()
+    }
+}
+
+impl From<DependencyKind> for &'static str {
+    fn from(kind: DependencyKind) -> Self {
+        kind.as_str()
+    }
+}
+
+impl TryFrom<String> for Platform {
+    type Error = Error;
+
+    fn try_from(value: String) -> Result<Self, Error> {
+        Platform::ALL
+            .into_iter()
+            .find(|platform| platform.as_str() == value)
+            .ok_or_else(|| Error::invalid("platform", &value, "is not a supported platform"))
+    }
+}
+
+impl TryFrom<String> for DependencyKind {
+    type Error = Error;
+
+    fn try_from(value: String) -> Result<Self, Error> {
+        DependencyKind::ALL
+            .into_iter()
+            .find(|kind| kind.as_str() == value)
+            .ok_or_else(|| Error::invalid("kind", &value, "is not a dependency kind"))
+    }
 }
 
 impl Derivation {

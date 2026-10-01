@@ -238,3 +238,49 @@ fn output_paths_suffix_non_default_outputs() {
         PathBuf::from(format!("/opt/rb/store/{DEPENDENCY_KEY}-zlib-1.3.2-dev"))
     );
 }
+
+#[test]
+fn view_keeps_script_lines_and_quotes_what_would_hide() {
+    let view = Derivation::Build(Build {
+        env: BTreeMap::from([("CFLAGS".to_string(), " -O2".to_string())]),
+        script: "./configure\n\nmake".to_string(),
+        ..build()
+    })
+    .to_string();
+
+    let expected = r#"kind: build
+name: zlib
+version: 1.3.2
+platform: x86_64-linux
+sandbox: linux-v1
+inputs:
+  source: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+dependencies:
+  - cmake (build) aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+env:
+  CFLAGS: " -O2"
+outputs:
+  - out
+script: |-
+  ./configure
+
+  make
+"#;
+
+    assert_eq!(view, expected);
+    let scripts = [
+        ("make\n", "script: |\n  make\n"),
+        ("make\n\n", "script: \"make\\n\\n\"\n"),
+        ("make\r\n", "script: \"make\\r\\n\"\n"),
+    ];
+
+    for (script, expected) in scripts {
+        let view = Derivation::Build(Build {
+            script: script.to_string(),
+            ..build()
+        })
+        .to_string();
+
+        assert!(view.ends_with(expected), "{view}");
+    }
+}
