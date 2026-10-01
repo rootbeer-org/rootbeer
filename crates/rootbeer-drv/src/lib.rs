@@ -1,26 +1,22 @@
-//! Derivations: complete descriptions of builds, and the keys that identify them.
+//! rootbeer-drv is a pure functional library that describes builds with keys.
 //!
-//! A key is the hash of a derivation's canonical encoding. Derivations with the
-//! same key produce the same output, so a key already in a trusted cache never
-//! needs building again.
-//!
-//! The encoding is permanent. Every optional field is omitted at its default, so
-//! a missing field and an empty one hash the same, and a new optional field
-//! leaves existing keys unchanged.
+//! A key is a hash of a derivation's encoding. Identical keys will always
+//! produce the same output so a key in a cache can avoid rebuilding. Encoding
+//! is critical: it MUST be stable and deterministic because it underpins the
+//! entire system that we use to build packages. New fields MUST be optional and
+//! omitted at their default, or every existing key changes.
 
 mod error;
 mod key;
 mod validate;
-
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
-
-use serde::{Deserialize, Serialize};
 
 pub use error::Error;
 pub use key::{Key, Sha256};
 
-/// Root of the store. Fixed by this encoding version; outputs embed it.
+/// The store root (fixed by the encoding version and embedded in every output)
 pub const STORE_ROOT: &str = "/opt/rb/store";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -31,7 +27,8 @@ pub enum Derivation {
     Check(Check),
 }
 
-/// Produces store outputs by running a script in a sandbox.
+/// A build that produces outputs from a set of inputs with a script and an
+/// environment. Inputs are keyed derivations, so the build is reproducible.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Build {
@@ -39,20 +36,21 @@ pub struct Build {
     pub version: String,
     pub platform: Platform,
     pub sandbox: String,
-    /// Fetch derivations, by the variable name the script sees them under.
+
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub inputs: BTreeMap<String, Key>,
-    /// Ordered: earlier dependencies take precedence on search paths.
+
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub deps: Vec<Dep>,
+    pub dependencies: Vec<Dependency>,
+
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
     pub script: String,
     pub outputs: BTreeSet<String>,
 }
 
-/// Content known in advance by hash. Only the hash is keyed, so mirrors can
-/// change without rebuilding anything.
+/// Remote content known in advance with a hash. The URLs can change as long
+/// as the hashes continue to match, allowing mirrors to be added/removed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Fetch {
@@ -61,8 +59,8 @@ pub struct Fetch {
     pub urls: Vec<String>,
 }
 
-/// Verifies a build's output without changing it, so editing a check never
-/// rebuilds its target.
+/// Validates a build's output without modifying it, allowing checks to be
+/// edited without triggering cache invalidations and rebuilds of their targets.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Check {
@@ -70,8 +68,10 @@ pub struct Check {
     pub target: Key,
     pub platform: Platform,
     pub sandbox: String,
+
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub deps: Vec<Dep>,
+    pub dependencies: Vec<Dependency>,
+
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
     pub script: String,
@@ -79,21 +79,22 @@ pub struct Check {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Dep {
+pub struct Dependency {
     pub key: Key,
     pub name: String,
-    pub kind: DepKind,
+    pub kind: DependencyKind,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum DepKind {
-    /// Runs on the builder: compilers, cmake, pkgconf.
+pub enum DependencyKind {
+    /// Required to build the derivation but not a part of its output
     Build,
-    /// Linked into the output: headers and libraries.
-    Host,
-    /// Needed at runtime without being referenced by path.
-    Run,
+    /// Linked into the output (e.g. headers, libraries, etc.)
+    Linked,
+    /// Required at runtime without being referenced by path (e.g. plugins/tools
+    /// found on PATH). Linked libraries are discovered by scanning the output
+    Runtime,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -113,7 +114,7 @@ impl Derivation {
         Ok(Key::digest(&self.canonical_bytes()))
     }
 
-    // RFC 8785 JSON of the keyed fields: everything except fetch URLs.
+    // RFC 8785 JSON of the keyed fields (minus the fetched URLs)
     fn canonical_bytes(&self) -> Vec<u8> {
         let keyed = match self {
             Derivation::Fetch(fetch) => &Derivation::Fetch(Fetch {
@@ -127,7 +128,7 @@ impl Derivation {
     }
 }
 
-/// Store path of one output of a build.
+/// Store path of one output of a build
 pub fn output_path(key: &Key, name: &str, version: &str, output: &str) -> PathBuf {
     let path = format!("{STORE_ROOT}/{key}-{name}-{version}");
 

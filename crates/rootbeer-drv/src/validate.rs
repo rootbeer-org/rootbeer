@@ -1,8 +1,6 @@
+use crate::{Build, Check, Dependency, Derivation, Error, Fetch};
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::{Build, Check, Dep, Derivation, Error, Fetch};
-
-// A `[first][rest]*` pattern; every `rest` class here includes `first`.
 struct Pattern {
     reason: &'static str,
     first: fn(u8) -> bool,
@@ -71,8 +69,9 @@ impl Build {
         PACKAGE_NAME.check("name", &self.name)?;
         VERSION.check("version", &self.version)?;
         SANDBOX.check("sandbox", &self.sandbox)?;
+
         script(&self.script)?;
-        deps(&self.deps)?;
+        dependencies(&self.dependencies)?;
         env(&self.env)?;
 
         self.inputs.keys().try_for_each(|name| {
@@ -118,8 +117,9 @@ impl Check {
     fn validate(&self) -> Result<(), Error> {
         PACKAGE_NAME.check("name", &self.name)?;
         SANDBOX.check("sandbox", &self.sandbox)?;
+
         script(&self.script)?;
-        deps(&self.deps)?;
+        dependencies(&self.dependencies)?;
         env(&self.env)
     }
 }
@@ -128,6 +128,7 @@ fn script(value: &str) -> Result<(), Error> {
     if value.trim().is_empty() {
         return Err(Error::invalid("script", value, "must not be empty"));
     }
+
     if value.contains('\0') {
         return Err(Error::invalid("script", value, "must not contain NUL"));
     }
@@ -135,21 +136,23 @@ fn script(value: &str) -> Result<(), Error> {
     Ok(())
 }
 
-fn deps(deps: &[Dep]) -> Result<(), Error> {
+fn dependencies(dependencies: &[Dependency]) -> Result<(), Error> {
     let mut seen = BTreeSet::new();
+    dependencies
+        .iter()
+        .enumerate()
+        .try_for_each(|(index, dependency)| {
+            PACKAGE_NAME.check(&format!("dependencies[{index}].name"), &dependency.name)?;
+            if !seen.insert((&dependency.key, dependency.kind)) {
+                return Err(Error::invalid(
+                    format!("dependencies[{index}]"),
+                    dependency.key.as_str(),
+                    "is listed twice with the same kind",
+                ));
+            }
 
-    deps.iter().enumerate().try_for_each(|(index, dep)| {
-        PACKAGE_NAME.check(&format!("deps[{index}].name"), &dep.name)?;
-        if !seen.insert((&dep.key, dep.kind)) {
-            return Err(Error::invalid(
-                format!("deps[{index}]"),
-                dep.key.as_str(),
-                "is listed twice with the same kind",
-            ));
-        }
-
-        Ok(())
-    })
+            Ok(())
+        })
 }
 
 fn env(env: &BTreeMap<String, String>) -> Result<(), Error> {

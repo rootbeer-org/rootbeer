@@ -1,8 +1,7 @@
+use super::*;
 use serde_json::json;
 
-use super::*;
-
-const DEP_KEY: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const DEPENDENCY_KEY: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const SOURCE_KEY: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const SHA256: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
@@ -15,10 +14,10 @@ fn build() -> Build {
         platform: Platform::X86_64Linux,
         sandbox: "linux-v1".to_string(),
         inputs: BTreeMap::from([("source".to_string(), SOURCE_KEY.parse().unwrap())]),
-        deps: vec![Dep {
-            key: DEP_KEY.parse().unwrap(),
+        dependencies: vec![Dependency {
+            key: DEPENDENCY_KEY.parse().unwrap(),
             name: "cmake".to_string(),
-            kind: DepKind::Build,
+            kind: DependencyKind::Build,
         }],
         env: BTreeMap::from([("CFLAGS".to_string(), "-O2".to_string())]),
         script: "make install".to_string(),
@@ -41,14 +40,13 @@ fn key(build: Build) -> Key {
 fn canonical_bytes_omit_empty_fields_and_escape_like_jcs() {
     let minimal = Build {
         inputs: BTreeMap::new(),
-        deps: Vec::new(),
+        dependencies: Vec::new(),
         env: BTreeMap::new(),
         script: "q\"b\\\u{08}\t\n\u{0c}\r\u{01}\u{1f}\u{7f}é😀".to_string(),
         ..build()
     };
 
     let bytes = Derivation::Build(minimal).canonical_bytes();
-
     let expected = concat!(
         r#"{"kind":"build","name":"zlib","outputs":["out"],"platform":"x86_64-linux","#,
         r#""sandbox":"linux-v1","script":"q\"b\\\b\t\n\f\r\u0001\u001f"#,
@@ -68,11 +66,17 @@ fn every_build_field_changes_the_key() {
         ("sandbox", |b| b.sandbox = "linux-v2".to_string()),
         ("inputs", |b| {
             b.inputs
-                .insert("data".to_string(), DEP_KEY.parse().unwrap());
+                .insert("data".to_string(), DEPENDENCY_KEY.parse().unwrap());
         }),
-        ("deps key", |b| b.deps[0].key = SOURCE_KEY.parse().unwrap()),
-        ("deps name", |b| b.deps[0].name = "cmake3".to_string()),
-        ("deps kind", |b| b.deps[0].kind = DepKind::Host),
+        ("dependencies key", |b| {
+            b.dependencies[0].key = SOURCE_KEY.parse().unwrap()
+        }),
+        ("dependencies name", |b| {
+            b.dependencies[0].name = "cmake3".to_string()
+        }),
+        ("dependencies kind", |b| {
+            b.dependencies[0].kind = DependencyKind::Linked
+        }),
         ("env", |b| {
             b.env.insert("CFLAGS".to_string(), "-O3".to_string());
         }),
@@ -90,16 +94,16 @@ fn every_build_field_changes_the_key() {
 }
 
 #[test]
-fn dep_order_changes_the_key() {
+fn dependency_order_changes_the_key() {
     let mut first = build();
-    first.deps.push(Dep {
+    first.dependencies.push(Dependency {
         key: SOURCE_KEY.parse().unwrap(),
         name: "pkgconf".to_string(),
-        kind: DepKind::Build,
+        kind: DependencyKind::Build,
     });
-    let mut second = first.clone();
-    second.deps.reverse();
 
+    let mut second = first.clone();
+    second.dependencies.reverse();
     assert_ne!(key(first), key(second));
 }
 
@@ -124,18 +128,23 @@ fn unknown_fields_are_rejected() {
         "urls": ["https://example.com/a"],
         "mode": "tree",
     }));
+
     let mut nested = serde_json::to_value(Derivation::Build(build())).unwrap();
-    nested["deps"][0]["optional"] = json!(true);
+    nested["dependencies"][0]["optional"] = json!(true);
     let nested = serde_json::from_value::<Derivation>(nested);
 
-    assert!(top_level
-        .unwrap_err()
-        .to_string()
-        .contains("unknown field `mode`"));
-    assert!(nested
-        .unwrap_err()
-        .to_string()
-        .contains("unknown field `optional`"));
+    assert!(
+        top_level
+            .unwrap_err()
+            .to_string()
+            .contains("unknown field `mode`")
+    );
+    assert!(
+        nested
+            .unwrap_err()
+            .to_string()
+            .contains("unknown field `optional`")
+    );
 }
 
 #[test]
@@ -150,7 +159,7 @@ fn invalid_derivations_have_no_key() {
         }),
         ("inputs", |b| {
             b.inputs
-                .insert("Data".to_string(), DEP_KEY.parse().unwrap());
+                .insert("Data".to_string(), DEPENDENCY_KEY.parse().unwrap());
         }),
         ("env", |b| {
             b.env.insert("source".to_string(), "x".to_string());
@@ -158,7 +167,9 @@ fn invalid_derivations_have_no_key() {
         ("env", |b| {
             b.env.insert("1X".to_string(), "x".to_string());
         }),
-        ("deps[1]", |b| b.deps.push(b.deps[0].clone())),
+        ("dependencies[1]", |b| {
+            b.dependencies.push(b.dependencies[0].clone())
+        }),
     ];
 
     for (field, mutate) in cases {
@@ -175,11 +186,11 @@ fn invalid_derivations_have_no_key() {
 }
 
 #[test]
-fn same_dep_may_be_build_and_host() {
+fn same_dependency_may_be_build_and_linked() {
     let mut both = build();
-    both.deps.push(Dep {
-        kind: DepKind::Host,
-        ..both.deps[0].clone()
+    both.dependencies.push(Dependency {
+        kind: DependencyKind::Linked,
+        ..both.dependencies[0].clone()
     });
 
     Derivation::Build(both).key().unwrap();
@@ -197,6 +208,7 @@ fn keys_and_hashes_reject_malformed_strings() {
     for key in keys {
         assert_eq!(key.parse::<Key>().unwrap_err().field, "key");
     }
+
     for hash in hashes {
         assert_eq!(Sha256::try_from(hash).unwrap_err().field, "sha256");
     }
@@ -204,14 +216,14 @@ fn keys_and_hashes_reject_malformed_strings() {
 
 #[test]
 fn output_paths_suffix_non_default_outputs() {
-    let key: Key = DEP_KEY.parse().unwrap();
+    let key: Key = DEPENDENCY_KEY.parse().unwrap();
 
     assert_eq!(
         output_path(&key, "zlib", "1.3.2", "out"),
-        PathBuf::from(format!("/opt/rb/store/{DEP_KEY}-zlib-1.3.2"))
+        PathBuf::from(format!("/opt/rb/store/{DEPENDENCY_KEY}-zlib-1.3.2"))
     );
     assert_eq!(
         output_path(&key, "zlib", "1.3.2", "dev"),
-        PathBuf::from(format!("/opt/rb/store/{DEP_KEY}-zlib-1.3.2-dev"))
+        PathBuf::from(format!("/opt/rb/store/{DEPENDENCY_KEY}-zlib-1.3.2-dev"))
     );
 }

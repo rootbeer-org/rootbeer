@@ -1,20 +1,18 @@
-use std::fmt;
-use std::str::FromStr;
-
+use crate::Error;
 use data_encoding::BASE32_NOPAD;
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
-
-use crate::Error;
+use std::fmt;
+use std::str::FromStr;
 
 const DOMAIN: &[u8] = b"rootbeer-drv-v1\0";
 
-/// Identifies a derivation: 32 lowercase base32 characters.
+/// Represents a 32 character derivation key
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String")]
 pub struct Key(String);
 
-/// A lowercase hex sha256 digest of content.
+/// Represents a SHA-256 digest of some content
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String")]
 pub struct Sha256(String);
@@ -49,6 +47,7 @@ impl TryFrom<String> for Key {
             && value
                 .bytes()
                 .all(|c| matches!(c, b'a'..=b'z' | b'2'..=b'7'));
+
         if !is_valid {
             return Err(Error::invalid(
                 "key",
@@ -69,6 +68,7 @@ impl TryFrom<String> for Sha256 {
             && value
                 .bytes()
                 .all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f'));
+
         if !is_valid {
             return Err(Error::invalid(
                 "sha256",

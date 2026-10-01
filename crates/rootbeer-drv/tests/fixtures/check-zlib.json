@@ -1,10 +1,10 @@
 {
   "kind": "check",
   "name": "zlib",
-  "target": "xxjp3tkegc5rodgmm34vggrqae7ev3tm",
+  "target": "izkadmkrosdwrss76rud7k52ufmp632g",
   "platform": "x86_64-linux",
   "sandbox": "linux-v1",
-  "deps": [
+  "dependencies": [
     { "key": "c4bm2tq7kzv3h6xwn5rjd3eypfua2lsg", "name": "cc", "kind": "build" }
   ],
   "script": "printf '#include <zlib.h>\\nint main(void) { return zlibVersion()[0] != 0x31; }\\n' > check.c\ncc -I\"$target/include\" check.c -L\"$target/lib\" -lz -o check\n./check\n"

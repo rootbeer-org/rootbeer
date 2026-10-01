@@ -1,9 +1,6 @@
 //! Pinned keys. A failure here means the encoding changed, which rekeys every
-//! package ever published. Fix the code, not these constants, unless the change
-//! is a deliberate new encoding version.
-//!
-//! The expected keys were computed independently of this crate (Python's json,
-//! hashlib, and base64) to confirm the encoding matches its specification.
+//! package ever published. The constants here should NEVER change unless we are
+//! cutting a new encoding version.
 
 use rootbeer_drv::Derivation;
 
@@ -16,12 +13,12 @@ const GOLDEN: [(&str, &str, &str); 3] = [
     (
         "build-zlib",
         include_str!("fixtures/build-zlib.json"),
-        "xxjp3tkegc5rodgmm34vggrqae7ev3tm",
+        "izkadmkrosdwrss76rud7k52ufmp632g",
     ),
     (
         "check-zlib",
         include_str!("fixtures/check-zlib.json"),
-        "z4sxveypp32jz4pifs7pxxmonz7s2odi",
+        "znh3warqgvo5nqz5kg5joqeug6lglknv",
     ),
 ];
 

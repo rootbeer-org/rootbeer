@@ -12,6 +12,8 @@ it akin to a dotfile manager like home-manager or chezmoi.
 - `crates/rootbeer-drv`: Derivations and their keys. Pure: values in, values out,
   no IO, no side effects, no global state.
 
+New crates use Rust edition 2024.
+
 Configuration must not depend on the build or packaging crates. Backends produce
 phases for the shared build executor. Coordinate recipe schema changes with the index repository and its engine pin.
 

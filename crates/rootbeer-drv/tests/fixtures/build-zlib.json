@@ -7,9 +7,11 @@
   "inputs": {
     "source": "7gp4ws33c64skpue226mhhk3irsahogn"
   },
-  "deps": [
+  "dependencies": [
     { "key": "c4bm2tq7kzv3h6xwn5rjd3eypfua2lsg", "name": "cc", "kind": "build" },
-    { "key": "m5x2rkd7wq3nvbt6yhc4zjpfe2lsoa7u", "name": "make", "kind": "build" }
+    { "key": "m5x2rkd7wq3nvbt6yhc4zjpfe2lsoa7u", "name": "make", "kind": "build" },
+    { "key": "h3pq6wz2ktv4rn7xb5ycm2djf6ase4lu", "name": "musl", "kind": "linked" },
+    { "key": "r2tn5vk7wqx3pz6hb4yjc2mdf7ela5su", "name": "ca-certificates", "kind": "runtime" }
   ],
   "env": {
     "CFLAGS": "-O2"
