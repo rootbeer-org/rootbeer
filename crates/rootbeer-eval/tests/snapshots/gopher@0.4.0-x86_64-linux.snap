@@ -1,0 +1,78 @@
+---
+source: crates/rootbeer-eval/tests/eval.rs
+---
+
+# oxwds6bv5rm75pxp65ffbezfkvw2swoo
+kind: fetch
+sha256: 5555555555555555555555555555555555555555555555555555555555555555
+urls:
+  - https://example.com/gopher/archive/v0.4.0.tar.gz
+
+# zcov5gjuslmn3q4kaqffzjk6lhsjjdx5
+dependencies:
+  - zny7lluton2szdexdko53y5iqjnd4xup build go
+env:
+  GO111MODULE: on
+  GOENV: off
+  GOFLAGS: -modcacherw
+  GOPROXY: https://proxy.golang.org
+  GOSUMDB: sum.golang.org
+  GOTOOLCHAIN: local
+  GOWORK: off
+inputs:
+  source: oxwds6bv5rm75pxp65ffbezfkvw2swoo
+kind: build
+name: gopher-vendor
+outputs:
+  - out
+platform: x86_64-linux
+sandbox: linux-v1-net
+script: |
+  set -eu
+  tar -xzf "${source}" -C .
+  cd gopher-0.4.0
+  export GOPATH="${TMPDIR}/go" GOMODCACHE="${TMPDIR}/go-modules"
+  cp go.mod go.sum "${TMPDIR}"
+  mkdir -p vendor
+  go mod vendor
+  cmp go.mod "${TMPDIR}/go.mod"
+  cmp go.sum "${TMPDIR}/go.sum"
+  go mod verify
+  cp -R vendor "${out}"
+version: 0.4.0
+
+# tdbdvfgi7w4nezd2ffndjrea2leoghry
+dependencies:
+  - zny7lluton2szdexdko53y5iqjnd4xup build go
+env:
+  CGO_ENABLED: 0
+  GO111MODULE: on
+  GOENV: off
+  GOEXPERIMENT: greenteagc
+  GOFLAGS: -mod=vendor
+  GOPROXY: off
+  GOSUMDB: off
+  GOTOOLCHAIN: local
+  GOVCS: *:off
+  GOWORK: off
+  RB_SYSTEM: builder-sha256:0000
+inputs:
+  source: oxwds6bv5rm75pxp65ffbezfkvw2swoo
+  vendor: zcov5gjuslmn3q4kaqffzjk6lhsjjdx5
+kind: build
+name: gopher
+outputs:
+  - out
+platform: x86_64-linux
+sandbox: linux-v1
+script: |
+  set -eu
+  tar -xzf "${source}" -C .
+  cd gopher-0.4.0
+  rm -rf vendor
+  cp -R "${vendor}" vendor
+  export GOPATH="${TMPDIR}/go" GOCACHE="${TMPDIR}/go-cache"
+  go generate -tags netgo,osusergo ./internal/gen
+  mkdir -p "${out}/bin"
+  go build -trimpath -buildvcs=false -p "${jobs}" -tags netgo,osusergo -ldflags "-X 'main.version=0.4.0'" -o "${out}/bin/gopher" ./cmd/gopher
+version: 0.4.0

@@ -1,0 +1,54 @@
+---
+source: crates/rootbeer-eval/tests/eval.rs
+---
+
+# sveyo4w2yfdhkddym2vqexv7zu6qbq5w
+kind: fetch
+sha256: 2222222222222222222222222222222222222222222222222222222222222222
+urls:
+  - https://example.com/crab-1.0.0.zip
+
+# jt7l2n3wzzwt4edwbgkc57wi6cesb4ng
+env:
+  RB_RUST: 1.98.1
+inputs:
+  source: sveyo4w2yfdhkddym2vqexv7zu6qbq5w
+kind: build
+name: crab-vendor
+outputs:
+  - out
+platform: aarch64-macos
+sandbox: darwin-v1-net
+script: |
+  set -eu
+  unzip -q "${source}" -d .
+  export CARGO_HOME="${TMPDIR}/cargo-home"
+  test -f Cargo.lock
+  mkdir -p "${out}"
+  cargo vendor --locked --versioned-dirs "${out}/vendor" > "${out}/config.toml"
+version: 1.0.0
+
+# p3mmfmnidphv2plniyj6tpxlvj33njkr
+env:
+  CARGO_INCREMENTAL: 0
+  CRAB_VERSION: 1.0.0
+  RB_RUST: 1.98.1
+  RB_SYSTEM: builder-sha256:0000
+inputs:
+  source: sveyo4w2yfdhkddym2vqexv7zu6qbq5w
+  vendor: jt7l2n3wzzwt4edwbgkc57wi6cesb4ng
+kind: build
+name: crab
+outputs:
+  - out
+platform: aarch64-macos
+sandbox: darwin-v1
+script: |
+  set -eu
+  unzip -q "${source}" -d .
+  export CARGO_HOME="${TMPDIR}/cargo-home" CARGO_TARGET_DIR="${TMPDIR}/cargo-target"
+  cargo build --frozen --release --jobs "${jobs}" --config "${vendor}/config.toml" --package crab-cli --features fast,pretty --no-default-features --bin crab --bin crabd
+  mkdir -p "${out}/bin"
+  cp "${CARGO_TARGET_DIR}/release/crab" "${out}/bin/crab"
+  cp "${CARGO_TARGET_DIR}/release/crabd" "${out}/bin/crabd"
+version: 1.0.0

@@ -1,0 +1,27 @@
+[package]
+name = "rootbeer-eval"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+
+[dependencies]
+mlua = { version = "0.11.5", features = ["luau", "serialize"] }
+percent-encoding = "2"
+rootbeer-drv = { path = "../rootbeer-drv" }
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+insta = "1"
+serde_json = "1"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+unreachable = "deny"
+todo = "deny"
+unimplemented = "deny"
+indexing_slicing = "deny"
+arithmetic_side_effects = "deny"
+cast_possible_truncation = "deny"
+cast_sign_loss = "deny"

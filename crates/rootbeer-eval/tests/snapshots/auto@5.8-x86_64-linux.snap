@@ -1,0 +1,32 @@
+---
+source: crates/rootbeer-eval/tests/eval.rs
+---
+
+# gskd7oqlctnsyj5ziiallfivhtzbfp27
+kind: fetch
+sha256: 1111111111111111111111111111111111111111111111111111111111111111
+urls:
+  - https://example.com/auto-5.8.tar.gz
+
+# bipfmhbihkeqclkp3ux5mniqc5bn2gdc
+dependencies:
+  - f5bo4mtpggcspiokfi2mbylipiq5viqa linked libz
+env:
+  RB_SYSTEM: builder-sha256:0000
+inputs:
+  source: gskd7oqlctnsyj5ziiallfivhtzbfp27
+kind: build
+name: auto
+outputs:
+  - out
+platform: x86_64-linux
+sandbox: linux-v1
+script: |
+  set -eu
+  tar -xzf "${source}" -C .
+  cd auto-5.8
+  sh ./configure --prefix=/ --disable-nls "--with-z=${deps}"
+  make "-j${jobs}"
+  make check
+  make "DESTDIR=${out}" install
+version: 5.8

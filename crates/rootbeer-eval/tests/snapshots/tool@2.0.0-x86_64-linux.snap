@@ -1,0 +1,25 @@
+---
+source: crates/rootbeer-eval/tests/eval.rs
+---
+
+# mm2lybbw4zyxm6sjlu4gfdwwpeniflyo
+kind: fetch
+sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+urls:
+  - https://example.com/tool-2.0.0-linux-amd64
+
+# ydbvnsmjxthg5pnlcpdou7oy2xyqh6p3
+inputs:
+  source: mm2lybbw4zyxm6sjlu4gfdwwpeniflyo
+kind: build
+name: tool
+outputs:
+  - out
+platform: x86_64-linux
+sandbox: linux-v1
+script: |
+  set -eu
+  mkdir -p "${out}/bin"
+  cp "${source}" "${out}/bin/tool"
+  chmod 755 "${out}/bin/tool"
+version: 2.0.0

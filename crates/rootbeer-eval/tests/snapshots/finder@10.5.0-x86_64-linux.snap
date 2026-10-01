@@ -1,0 +1,43 @@
+---
+source: crates/rootbeer-eval/tests/eval.rs
+---
+
+# lct3jqakjuifas4jpa5kd76jj23fblhv
+kind: fetch
+sha256: 3333333333333333333333333333333333333333333333333333333333333333
+urls:
+  - https://github.com/example/finder/releases/download/v10.5.0/finder-v10.5.0-x86_64-unknown-linux-musl.tar.gz
+
+# yq6sp3zrthemeem6javcnqwdkxrbuc3g
+inputs:
+  source: lct3jqakjuifas4jpa5kd76jj23fblhv
+kind: build
+name: finder
+outputs:
+  - out
+platform: x86_64-linux
+sandbox: linux-v1
+script: |
+  set -eu
+  mkdir -p "${out}"
+  tar -xzf "${source}" -C "${out}"
+  mkdir -p "${out}/bin"
+  for name in finder; do
+    [ -e "${out}/bin/$name" ] && continue
+    set -- $(cd "${out}" && find . -type f -name "$name" -perm -u+x)
+    [ $# -eq 1 ] || { echo "expected one executable named $name, found $#" >&2; exit 1; }
+    ln -s "../${1#./}" "${out}/bin/$name"
+  done
+version: 10.5.0
+
+# rcfjh6ykeqpvtqbbjieulf3qji352xpm
+env:
+  RB_SYSTEM: builder-sha256:0000
+kind: check
+name: finder
+platform: x86_64-linux
+sandbox: linux-v1
+script: |
+  set -eu
+  finder --version
+target: yq6sp3zrthemeem6javcnqwdkxrbuc3g

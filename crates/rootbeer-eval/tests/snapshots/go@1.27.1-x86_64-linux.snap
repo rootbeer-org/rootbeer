@@ -1,0 +1,25 @@
+---
+source: crates/rootbeer-eval/tests/eval.rs
+---
+
+# 7xt34lopezfofwfbqvnejlo5b37ff4tl
+kind: fetch
+sha256: 4444444444444444444444444444444444444444444444444444444444444444
+urls:
+  - https://example.com/go1.27.1.linux-amd64.tar.gz
+
+# zny7lluton2szdexdko53y5iqjnd4xup
+inputs:
+  source: 7xt34lopezfofwfbqvnejlo5b37ff4tl
+kind: build
+name: go
+outputs:
+  - out
+platform: x86_64-linux
+sandbox: linux-v1
+script: |
+  set -eu
+  mkdir "${TMPDIR}/unpack"
+  tar -xzf "${source}" -C "${TMPDIR}/unpack"
+  mv "${TMPDIR}/unpack/go" "${out}"
+version: 1.27.1

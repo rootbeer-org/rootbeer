@@ -1,0 +1,28 @@
+---
+source: crates/rootbeer-eval/tests/eval.rs
+---
+
+# zt4dc4nb6fbhwnjghszk4f5kyhcpikzh
+kind: fetch
+sha256: 8888888888888888888888888888888888888888888888888888888888888888
+urls:
+  - https://example.com/Viewer-4.1.dmg
+
+# vtgqivxvgevk72ix4po4zpxo7ekykttc
+inputs:
+  source: zt4dc4nb6fbhwnjghszk4f5kyhcpikzh
+kind: build
+name: viewer
+outputs:
+  - out
+platform: aarch64-macos
+sandbox: darwin-v1
+script: |
+  set -eu
+  mkdir -p "${out}"
+  hdiutil attach -nobrowse -readonly -noautoopen -mountpoint "${TMPDIR}/dmg" "${source}"
+  ditto "${TMPDIR}/dmg/Viewer.app" "${out}/Viewer.app"
+  hdiutil detach "${TMPDIR}/dmg"
+  mkdir -p "${out}/bin"
+  ln -s ../Viewer.app/Contents/MacOS/viewer "${out}/bin/viewer"
+version: 4.1

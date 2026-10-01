@@ -1,0 +1,54 @@
+---
+source: crates/rootbeer-eval/tests/eval.rs
+---
+
+# 46ju3wvob5d7a26rjdk7mbpceliybsev
+kind: fetch
+sha256: 6666666666666666666666666666666666666666666666666666666666666666
+urls:
+  - https://example.com/libz-1.3.2.tar.xz
+
+# f5bo4mtpggcspiokfi2mbylipiq5viqa
+dependencies:
+  - ydbvnsmjxthg5pnlcpdou7oy2xyqh6p3 build tool
+  - ydbvnsmjxthg5pnlcpdou7oy2xyqh6p3 linked tool
+env:
+  RB_SYSTEM: builder-sha256:0000
+inputs:
+  source: 46ju3wvob5d7a26rjdk7mbpceliybsev
+kind: build
+name: libz
+outputs:
+  - out
+platform: x86_64-linux
+sandbox: linux-v1
+script: |
+  set -eu
+  tar -xJf "${source}" -C .
+  cd libz-1.3.2
+  patch --batch -p1 <<'RB_PATCH'
+  --- a/Makefile
+  +++ b/Makefile
+  @@ -1 +1 @@
+  -CFLAGS = -O3
+  +CFLAGS = -O2
+  RB_PATCH
+  ./configure --prefix=/ "--with-tool=${deps}"
+  make "-j${jobs}" VERSION=1.3
+  make "DESTDIR=${out}" install
+  sh -c "echo \"\$1\" > ${out}/note" note "it's \`done\`"
+version: 1.3.2
+
+# wlsaa34ywve6br2ngthcvkedhxuelqk3
+env:
+  RB_SYSTEM: builder-sha256:0000
+kind: check
+name: libz
+platform: x86_64-linux
+sandbox: linux-v1
+script: |
+  set -eu
+  find . -exec true "{}" ";"
+  test -e "${target}/lib/libz.a"
+  test -e "${target}/lib/libz.so"
+target: f5bo4mtpggcspiokfi2mbylipiq5viqa
