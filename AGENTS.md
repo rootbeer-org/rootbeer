@@ -15,6 +15,9 @@ it akin to a dotfile manager like home-manager or chezmoi.
 Configuration must not depend on the build or packaging crates. Backends produce
 phases for the shared build executor. Coordinate recipe schema changes with the index repository and its engine pin.
 
+Agent skills live in `.agents/skills/` and are model-agnostic. Use
+`.agents/skills/adversarial-review` after writing a new crate or module.
+
 Production package recipes belong exclusively in `rootbeer-index/packages/`.
 Rootbeer contains generic package tooling and regression tests; never embed or
 duplicate production recipes in this repository.
