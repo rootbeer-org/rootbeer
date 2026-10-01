@@ -1585,6 +1585,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "rootbeer-bootstrap"
+version = "0.1.0"
+dependencies = [
+ "data-encoding",
+ "flate2",
+ "ring",
+ "serde",
+ "serde_json",
+ "tar",
+ "tempfile",
+ "ureq",
+]
+
+[[package]]
 name = "rootbeer-build"
 version = "0.1.0"
 dependencies = [

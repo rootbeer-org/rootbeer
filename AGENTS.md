@@ -11,6 +11,10 @@ it akin to a dotfile manager like home-manager or chezmoi.
 - `crates/rootbeer-forge`: The package-maintainer CLI (`rootbeer-forge`)
 - `crates/rootbeer-drv`: Derivations and their keys. Pure: values in, values out,
   no IO, no side effects, no global state.
+- `crates/rootbeer-bootstrap`: The frozen protocol for fetching a verified rb new
+  enough to run a command (first installs, and state written by a newer rb). Changes
+  are additive only, and it must never depend on catalog, repository, build, or
+  store crates.
 
 New crates use Rust edition 2024.
 
