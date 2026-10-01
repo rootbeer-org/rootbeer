@@ -1,0 +1,217 @@
+use serde_json::json;
+
+use super::*;
+
+const DEP_KEY: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const SOURCE_KEY: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+const SHA256: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+
+type Mutation = (&'static str, fn(&mut Build));
+
+fn build() -> Build {
+    Build {
+        name: "zlib".to_string(),
+        version: "1.3.2".to_string(),
+        platform: Platform::X86_64Linux,
+        sandbox: "linux-v1".to_string(),
+        inputs: BTreeMap::from([("source".to_string(), SOURCE_KEY.parse().unwrap())]),
+        deps: vec![Dep {
+            key: DEP_KEY.parse().unwrap(),
+            name: "cmake".to_string(),
+            kind: DepKind::Build,
+        }],
+        env: BTreeMap::from([("CFLAGS".to_string(), "-O2".to_string())]),
+        script: "make install".to_string(),
+        outputs: BTreeSet::from(["out".to_string()]),
+    }
+}
+
+fn fetch() -> Fetch {
+    Fetch {
+        sha256: SHA256.to_string().try_into().unwrap(),
+        urls: vec!["https://example.com/zlib.tar.gz".to_string()],
+    }
+}
+
+fn key(build: Build) -> Key {
+    Derivation::Build(build).key().unwrap()
+}
+
+#[test]
+fn canonical_bytes_omit_empty_fields_and_escape_like_jcs() {
+    let minimal = Build {
+        inputs: BTreeMap::new(),
+        deps: Vec::new(),
+        env: BTreeMap::new(),
+        script: "q\"b\\\u{08}\t\n\u{0c}\r\u{01}\u{1f}\u{7f}é😀".to_string(),
+        ..build()
+    };
+
+    let bytes = Derivation::Build(minimal).canonical_bytes();
+
+    let expected = concat!(
+        r#"{"kind":"build","name":"zlib","outputs":["out"],"platform":"x86_64-linux","#,
+        r#""sandbox":"linux-v1","script":"q\"b\\\b\t\n\f\r\u0001\u001f"#,
+        "\u{7f}é😀",
+        r#"","version":"1.3.2"}"#,
+    );
+    assert_eq!(String::from_utf8(bytes).unwrap(), expected);
+}
+
+#[test]
+fn every_build_field_changes_the_key() {
+    let base = key(build());
+    let mutations: Vec<Mutation> = vec![
+        ("name", |b| b.name = "zlib-ng".to_string()),
+        ("version", |b| b.version = "1.3.1".to_string()),
+        ("platform", |b| b.platform = Platform::Aarch64Linux),
+        ("sandbox", |b| b.sandbox = "linux-v2".to_string()),
+        ("inputs", |b| {
+            b.inputs
+                .insert("data".to_string(), DEP_KEY.parse().unwrap());
+        }),
+        ("deps key", |b| b.deps[0].key = SOURCE_KEY.parse().unwrap()),
+        ("deps name", |b| b.deps[0].name = "cmake3".to_string()),
+        ("deps kind", |b| b.deps[0].kind = DepKind::Host),
+        ("env", |b| {
+            b.env.insert("CFLAGS".to_string(), "-O3".to_string());
+        }),
+        ("script", |b| b.script.push_str("\nmake check")),
+        ("outputs", |b| {
+            b.outputs.insert("dev".to_string());
+        }),
+    ];
+
+    for (field, mutate) in mutations {
+        let mut changed = build();
+        mutate(&mut changed);
+        assert_ne!(key(changed), base, "changing {field} must change the key");
+    }
+}
+
+#[test]
+fn dep_order_changes_the_key() {
+    let mut first = build();
+    first.deps.push(Dep {
+        key: SOURCE_KEY.parse().unwrap(),
+        name: "pkgconf".to_string(),
+        kind: DepKind::Build,
+    });
+    let mut second = first.clone();
+    second.deps.reverse();
+
+    assert_ne!(key(first), key(second));
+}
+
+#[test]
+fn fetch_key_covers_hash_not_urls() {
+    let base = Derivation::Fetch(fetch()).key().unwrap();
+
+    let mut mirrored = fetch();
+    mirrored.urls = vec!["https://mirror.example.org/zlib.tar.gz".to_string()];
+    assert_eq!(Derivation::Fetch(mirrored).key().unwrap(), base);
+
+    let mut changed = fetch();
+    changed.sha256 = SHA256.replace('0', "1").try_into().unwrap();
+    assert_ne!(Derivation::Fetch(changed).key().unwrap(), base);
+}
+
+#[test]
+fn unknown_fields_are_rejected() {
+    let top_level = serde_json::from_value::<Derivation>(json!({
+        "kind": "fetch",
+        "sha256": SHA256,
+        "urls": ["https://example.com/a"],
+        "mode": "tree",
+    }));
+    let mut nested = serde_json::to_value(Derivation::Build(build())).unwrap();
+    nested["deps"][0]["optional"] = json!(true);
+    let nested = serde_json::from_value::<Derivation>(nested);
+
+    assert!(top_level
+        .unwrap_err()
+        .to_string()
+        .contains("unknown field `mode`"));
+    assert!(nested
+        .unwrap_err()
+        .to_string()
+        .contains("unknown field `optional`"));
+}
+
+#[test]
+fn invalid_derivations_have_no_key() {
+    let cases: Vec<Mutation> = vec![
+        ("name", |b| b.name = "Zlib".to_string()),
+        ("version", |b| b.version = "1.3/2".to_string()),
+        ("sandbox", |b| b.sandbox = String::new()),
+        ("script", |b| b.script = "  ".to_string()),
+        ("outputs", |b| {
+            b.outputs = BTreeSet::from(["dev".to_string()])
+        }),
+        ("inputs", |b| {
+            b.inputs
+                .insert("Data".to_string(), DEP_KEY.parse().unwrap());
+        }),
+        ("env", |b| {
+            b.env.insert("source".to_string(), "x".to_string());
+        }),
+        ("env", |b| {
+            b.env.insert("1X".to_string(), "x".to_string());
+        }),
+        ("deps[1]", |b| b.deps.push(b.deps[0].clone())),
+    ];
+
+    for (field, mutate) in cases {
+        let mut invalid = build();
+        mutate(&mut invalid);
+        let error = Derivation::Build(invalid).key().unwrap_err();
+        assert_eq!(error.field, field, "{error}");
+    }
+
+    let mut unfetchable = fetch();
+    unfetchable.urls.clear();
+    let error = Derivation::Fetch(unfetchable).key().unwrap_err();
+    assert_eq!(error.field, "urls");
+}
+
+#[test]
+fn same_dep_may_be_build_and_host() {
+    let mut both = build();
+    both.deps.push(Dep {
+        kind: DepKind::Host,
+        ..both.deps[0].clone()
+    });
+
+    Derivation::Build(both).key().unwrap();
+}
+
+#[test]
+fn keys_and_hashes_reject_malformed_strings() {
+    let keys = [
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567",
+        "abcdefghijklmnopqrstuvwxyz23456",
+        "abcdefghijklmnopqrstuvwxyz234561",
+    ];
+    let hashes = [SHA256.replace('0', "A"), SHA256[1..].to_string()];
+
+    for key in keys {
+        assert_eq!(key.parse::<Key>().unwrap_err().field, "key");
+    }
+    for hash in hashes {
+        assert_eq!(Sha256::try_from(hash).unwrap_err().field, "sha256");
+    }
+}
+
+#[test]
+fn output_paths_suffix_non_default_outputs() {
+    let key: Key = DEP_KEY.parse().unwrap();
+
+    assert_eq!(
+        output_path(&key, "zlib", "1.3.2", "out"),
+        PathBuf::from(format!("/opt/rb/store/{DEP_KEY}-zlib-1.3.2"))
+    );
+    assert_eq!(
+        output_path(&key, "zlib", "1.3.2", "dev"),
+        PathBuf::from(format!("/opt/rb/store/{DEP_KEY}-zlib-1.3.2-dev"))
+    );
+}

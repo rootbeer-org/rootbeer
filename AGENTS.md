@@ -9,6 +9,8 @@ it akin to a dotfile manager like home-manager or chezmoi.
 - `crates/rootbeer-build`: Build plans, backend phases, execution, and build caching
 - `crates/rootbeer-packaging`: Discovery, qualification, signing, and publication
 - `crates/rootbeer-forge`: The package-maintainer CLI (`rootbeer-forge`)
+- `crates/rootbeer-drv`: Derivations and their keys. Pure: values in, values out,
+  no IO, no side effects, no global state.
 
 Configuration must not depend on the build or packaging crates. Backends produce
 phases for the shared build executor. Coordinate recipe schema changes with the index repository and its engine pin.

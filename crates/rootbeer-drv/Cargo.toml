@@ -1,0 +1,14 @@
+[package]
+name = "rootbeer-drv"
+version = "0.1.0"
+edition = "2021"
+rust-version.workspace = true
+
+[dependencies]
+data-encoding = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json_canonicalizer = "0.3"
+sha2 = "0.10"
+
+[dev-dependencies]
+serde_json = "1"
