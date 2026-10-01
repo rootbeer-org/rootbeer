@@ -18,6 +18,7 @@ type Key = (String, String, String);
 #[derive(Debug, Clone, PartialEq)]
 struct Published {
     recipe: CatalogRecipe,
+    revision: u32,
     record: String,
     published: u64,
 }
@@ -25,9 +26,10 @@ struct Published {
 /// Publishes the signed root and package documents for every approved record, adding new
 /// records to those the previous root already carried.
 ///
-/// Nothing is downloaded or rebuilt. A previous record survives only while the catalog still
-/// approves exactly its recipe and revision, so a recipe change unpublishes that platform until
-/// a new record for it arrives.
+/// Nothing is downloaded or rebuilt. A previous record stays published while the catalog still
+/// declares its version and platform, even once its recipe, revision or dependencies change, so
+/// a failed rebuild never takes a working package away; a new record for it replaces it.
+/// [`coverage`] reports the ones still waiting for that replacement.
 pub fn publish_records(
     catalog: &PackageCatalog,
     references: &[String],
@@ -56,9 +58,7 @@ pub fn publish_records(
         None
     };
     let mut published = match &previous {
-        Some(previous) => retained(catalog, &previous_documents(previous, site)?, |digest| {
-            record_closure(site, digest)
-        })?,
+        Some(previous) => retained(catalog, &previous_documents(previous, site)?),
         None => BTreeMap::new(),
     };
     for entry in published.values() {
@@ -177,6 +177,7 @@ fn approve(
         ),
         Published {
             recipe: record.recipe.clone(),
+            revision: record.revision,
             record: hash_bytes(bytes),
             published: record.published,
         },
@@ -214,55 +215,31 @@ fn previous_documents(
 /// Revision and recipe digest of each package a build was compiled with.
 type Closure = BTreeMap<String, (u32, String)>;
 
-/// Previous records the catalog still approves exactly, including everything they were built
-/// with. `built_with` reads a record's closure by its digest.
-///
-/// Builder identity is deliberately not compared: an engine change alone keeps a package's own
-/// record, so it keeps its dependents' too.
+/// Previous records whose version and platform the catalog still declares. Each record pins its
+/// exact runtime dependencies, so it stays installable after the catalog moves on.
 fn retained(
     catalog: &PackageCatalog,
     documents: &BTreeMap<String, PackageDocument>,
-    built_with: impl Fn(&str) -> Result<Closure, String>,
-) -> Result<BTreeMap<Key, Published>, String> {
+) -> BTreeMap<Key, Published> {
     let mut retained = BTreeMap::new();
     for (name, document) in documents {
         for (version, entry) in &document.versions {
-            let approved = catalog
+            let Some(approved) = catalog
                 .packages
                 .get(name)
-                .and_then(|package| package.versions.get(version));
+                .and_then(|package| package.versions.get(version))
+            else {
+                continue;
+            };
             for (system, platform) in &entry.platforms {
-                let is_unchanged = approved.is_some_and(|approved| {
-                    approved.revision == entry.revision
-                        && approved.platforms.get(system) == Some(&platform.recipe)
-                });
-                if !is_unchanged {
+                if !approved.platforms.contains_key(system) {
                     continue;
-                }
-                let has_dependencies = platform
-                    .recipe
-                    .build
-                    .as_ref()
-                    .is_some_and(|build| !build.dependencies.is_empty());
-                if has_dependencies {
-                    let id = format!("{name}@{version}");
-                    let current: Closure = crate::package_plan::dependency_inputs(
-                        catalog,
-                        &id,
-                        system,
-                        &Default::default(),
-                    )?
-                    .into_iter()
-                    .map(|(id, inputs)| (id, (inputs.revision, inputs.recipe_sha256)))
-                    .collect();
-                    if built_with(&platform.record)? != current {
-                        continue;
-                    }
                 }
                 retained.insert(
                     (name.clone(), version.clone(), system.clone()),
                     Published {
                         recipe: platform.recipe.clone(),
+                        revision: entry.revision,
                         record: platform.record.clone(),
                         published: platform.published,
                     },
@@ -270,7 +247,104 @@ fn retained(
             }
         }
     }
-    Ok(retained)
+    retained
+}
+
+/// Whether a published record is what the catalog approves now: the same recipe and revision,
+/// built with the same dependencies. `built_with` reads a record's closure by its digest.
+///
+/// Builder identity is deliberately not compared: an engine change alone keeps a package's own
+/// record current, so it keeps its dependents' too.
+fn is_current(
+    catalog: &PackageCatalog,
+    key: &Key,
+    entry: &Published,
+    built_with: impl Fn(&str) -> Result<Closure, String>,
+) -> Result<bool, String> {
+    let (name, version, system) = key;
+    let Some(approved) = catalog
+        .packages
+        .get(name)
+        .and_then(|package| package.versions.get(version))
+    else {
+        return Ok(false);
+    };
+    if approved.revision != entry.revision || approved.platforms.get(system) != Some(&entry.recipe)
+    {
+        return Ok(false);
+    }
+    let has_dependencies = entry
+        .recipe
+        .build
+        .as_ref()
+        .is_some_and(|build| !build.dependencies.is_empty());
+    if !has_dependencies {
+        return Ok(true);
+    }
+
+    let current: Closure = crate::package_plan::dependency_inputs(
+        catalog,
+        &format!("{name}@{version}"),
+        system,
+        &Default::default(),
+    )?
+    .into_iter()
+    .map(|(id, inputs)| (id, (inputs.revision, inputs.recipe_sha256)))
+    .collect();
+    Ok(built_with(&entry.record)? == current)
+}
+
+/// Platforms the catalog declares that the published PDR lacks or serves from an outdated record.
+#[derive(Debug, Default, PartialEq)]
+pub struct Coverage {
+    /// `name@version system` with no published record.
+    pub missing: Vec<String>,
+    /// `name@version system` still served from a record built before a recipe, revision or
+    /// dependency change.
+    pub stale: Vec<String>,
+}
+
+impl Coverage {
+    pub fn is_complete(&self) -> bool {
+        self.missing.is_empty() && self.stale.is_empty()
+    }
+}
+
+/// Compares the PDR at `site` against every version and platform the catalog declares.
+pub fn coverage(
+    catalog: &PackageCatalog,
+    site: &Path,
+    public_key: &str,
+) -> Result<Coverage, String> {
+    catalog.validate()?;
+    let bytes = fs::read(site.join("current.json")).map_err(|error| error.to_string())?;
+    let root = Root::from_bytes(&bytes, public_key)?;
+    if let Some(name) = root.unreadable.keys().next() {
+        return Err(format!(
+            "{name}: the root was published by a newer engine than this one"
+        ));
+    }
+    let published = retained(catalog, &previous_documents(&root, site)?);
+
+    let mut coverage = Coverage::default();
+    for (name, package) in &catalog.packages {
+        for (version, approved) in &package.versions {
+            for system in approved.platforms.keys() {
+                let key = (name.clone(), version.clone(), system.clone());
+                let label = format!("{name}@{version} {system}");
+                match published.get(&key) {
+                    None => coverage.missing.push(label),
+                    Some(entry) => {
+                        if !is_current(catalog, &key, entry, |digest| record_closure(site, digest))?
+                        {
+                            coverage.stale.push(label);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(coverage)
 }
 
 /// The closure a published record was built with, read from the site that already holds it.
@@ -414,33 +488,50 @@ fn min_engine_level(
     Ok(level)
 }
 
+/// A version carries one revision, and clients refuse records of any other. Once a record of
+/// the approved revision exists, platforms still on an older one drop out; until then the
+/// version keeps the revision its retained records share.
 fn document(package: &CatalogPackage, published: &BTreeMap<Key, Published>) -> PackageDocument {
     let mut versions = BTreeMap::new();
     for (version, approved) in &package.versions {
-        let platforms: BTreeMap<_, _> = approved
+        let entries: Vec<(&String, &Published)> = approved
             .platforms
             .keys()
             .filter_map(|system| {
                 let key = (package.name.clone(), version.clone(), system.clone());
-                let entry = published.get(&key)?;
-                Some((
+                published.get(&key).map(|entry| (system, entry))
+            })
+            .collect();
+        let revision = if entries
+            .iter()
+            .any(|(_, entry)| entry.revision == approved.revision)
+        {
+            approved.revision
+        } else {
+            let Some(newest) = entries.iter().map(|(_, entry)| entry.revision).max() else {
+                continue;
+            };
+            newest
+        };
+        let platforms: BTreeMap<_, _> = entries
+            .into_iter()
+            .filter(|(_, entry)| entry.revision == revision)
+            .map(|(system, entry)| {
+                (
                     system.clone(),
                     DocumentPlatform {
                         recipe: entry.recipe.clone(),
                         record: entry.record.clone(),
                         published: entry.published,
                     },
-                ))
+                )
             })
             .collect();
-        if platforms.is_empty() {
-            continue;
-        }
         versions.insert(
             version.clone(),
             DocumentVersion {
                 license: approved.license.clone(),
-                revision: approved.revision,
+                revision,
                 platforms,
             },
         );
@@ -522,6 +613,7 @@ mod tests {
                     key(version, system),
                     Published {
                         recipe: approved.platforms[*system].clone(),
+                        revision: approved.revision,
                         record: hash_bytes(format!("{version} {system}").as_bytes()),
                         published: time,
                     },
@@ -601,34 +693,14 @@ mod tests {
     }
 
     #[test]
-    fn a_changed_recipe_or_revision_unpublishes_only_that_platform() {
+    fn a_changed_recipe_keeps_its_previous_record_until_a_new_one_replaces_it() {
         let catalog = catalog();
         let published = release(&catalog, "2", &[MAC, LINUX], 100);
         let (root, documents) = assemble(&catalog, None, &published, 1).unwrap();
         let documents = documents_of(&root, &documents);
-        assert_eq!(
-            retained(&catalog, &documents, no_closure).unwrap(),
-            published
-        );
+        assert_eq!(retained(&catalog, &documents), published);
 
         let mut changed = catalog.clone();
-        let version = changed
-            .packages
-            .get_mut("tool")
-            .unwrap()
-            .versions
-            .get_mut("2")
-            .unwrap();
-        version
-            .platforms
-            .get_mut(MAC)
-            .unwrap()
-            .checks
-            .push(vec!["tool".into(), "--help".into()]);
-        let kept = retained(&changed, &documents, no_closure).unwrap();
-        assert!(!kept.contains_key(&key("2", MAC)));
-        assert!(kept.contains_key(&key("2", LINUX)));
-
         changed
             .packages
             .get_mut("tool")
@@ -636,10 +708,124 @@ mod tests {
             .versions
             .get_mut("2")
             .unwrap()
-            .revision = 2;
-        assert!(retained(&changed, &documents, no_closure)
+            .platforms
+            .get_mut(MAC)
             .unwrap()
-            .is_empty());
+            .checks
+            .push(vec!["tool".into(), "--help".into()]);
+        let kept = retained(&changed, &documents);
+        assert_eq!(kept, published, "a pending rebuild takes nothing away");
+        let mac = key("2", MAC);
+        let linux = key("2", LINUX);
+        assert!(!is_current(&changed, &mac, &kept[&mac], no_closure).unwrap());
+        assert!(is_current(&changed, &linux, &kept[&linux], no_closure).unwrap());
+
+        let (root, documents) = assemble(&changed, None, &kept, 2).unwrap();
+        let document = &documents_of(&root, &documents)["tool"];
+        assert_eq!(
+            document.versions["2"].platforms[MAC].recipe,
+            catalog.packages["tool"].versions["2"].platforms[MAC],
+            "the previous record keeps the recipe it was built from"
+        );
+    }
+
+    #[test]
+    fn a_revision_bump_keeps_the_previous_revision_until_any_platform_reaches_the_new_one() {
+        let catalog = catalog();
+        let published = release(&catalog, "2", &[MAC, LINUX], 100);
+        let (root, documents) = assemble(&catalog, None, &published, 1).unwrap();
+        let documents = documents_of(&root, &documents);
+
+        let mut bumped = catalog.clone();
+        bumped
+            .packages
+            .get_mut("tool")
+            .unwrap()
+            .versions
+            .get_mut("2")
+            .unwrap()
+            .revision = 2;
+        let mut kept = retained(&bumped, &documents);
+        let (root, documents) = assemble(&bumped, None, &kept, 2).unwrap();
+        let version = &documents_of(&root, &documents)["tool"].versions["2"];
+        assert_eq!(version.revision, 1);
+        assert_eq!(version.platforms.len(), 2);
+        assert!(!is_current(&bumped, &key("2", MAC), &kept[&key("2", MAC)], no_closure).unwrap());
+
+        kept.extend(release(&bumped, "2", &[MAC], 200));
+        let (root, documents) = assemble(&bumped, None, &kept, 3).unwrap();
+        let version = &documents_of(&root, &documents)["tool"].versions["2"];
+        assert_eq!(version.revision, 2);
+        assert_eq!(
+            version.platforms.keys().collect::<Vec<_>>(),
+            [MAC],
+            "clients refuse a record of another revision than its version's"
+        );
+    }
+
+    #[test]
+    fn coverage_reports_missing_and_stale_platforms() {
+        use ring::signature::{Ed25519KeyPair, KeyPair};
+
+        let site = tempfile::tempdir().unwrap();
+        let pkcs8 = Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new()).unwrap();
+        let key_pair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+        let public_key: String = key_pair
+            .public_key()
+            .as_ref()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        let catalog = catalog();
+        let (mut root, documents) = assemble(
+            &catalog,
+            None,
+            &release(&catalog, "2", &[MAC, LINUX], 100),
+            1,
+        )
+        .unwrap();
+        root.signature = key_pair
+            .sign(&root.signing_message().unwrap())
+            .as_ref()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        fs::create_dir_all(site.path().join("packages")).unwrap();
+        for (digest, document) in &documents {
+            fs::write(
+                site.path().join("packages").join(format!("{digest}.json")),
+                document,
+            )
+            .unwrap();
+        }
+        fs::write(
+            site.path().join("current.json"),
+            serde_json::to_vec(&root).unwrap(),
+        )
+        .unwrap();
+
+        let mut changed = catalog.clone();
+        changed
+            .packages
+            .get_mut("tool")
+            .unwrap()
+            .versions
+            .get_mut("2")
+            .unwrap()
+            .platforms
+            .get_mut(LINUX)
+            .unwrap()
+            .checks
+            .push(vec!["tool".into(), "--help".into()]);
+        let coverage = coverage(&changed, site.path(), &public_key).unwrap();
+        assert_eq!(
+            coverage,
+            Coverage {
+                missing: vec![format!("tool@1 {MAC}"), format!("tool@1 {LINUX}")],
+                stale: vec![format!("tool@2 {LINUX}")],
+            }
+        );
+        assert!(!coverage.is_complete());
     }
 
     #[test]
@@ -745,7 +931,7 @@ mod tests {
     }
 
     #[test]
-    fn a_dependency_change_unpublishes_what_was_built_with_it() {
+    fn a_dependency_change_makes_what_was_built_with_it_stale_but_keeps_it_published() {
         let catalog = dependent_catalog("--static");
         let published: BTreeMap<Key, Published> = ["lib", "app"]
             .into_iter()
@@ -754,6 +940,7 @@ mod tests {
                 let key = (name.to_string(), "1".to_string(), LINUX.to_string());
                 let entry = Published {
                     recipe: approved.platforms[LINUX].clone(),
+                    revision: approved.revision,
                     record: hash_bytes(name.as_bytes()),
                     published: 100,
                 };
@@ -776,17 +963,21 @@ mod tests {
             .collect();
             move |_: &str| Ok(closure.clone())
         };
-        assert_eq!(
-            retained(&catalog, &documents, built_with(&catalog)).unwrap(),
-            published
-        );
+        let app = ("app".to_string(), "1".to_string(), LINUX.to_string());
+        assert_eq!(retained(&catalog, &documents), published);
+        assert!(is_current(&catalog, &app, &published[&app], built_with(&catalog)).unwrap());
 
         let changed = dependent_catalog("--shared");
-        let kept = retained(&changed, &documents, built_with(&catalog)).unwrap();
-        assert!(
-            kept.is_empty(),
-            "lib changed, and app was built with the old lib: {kept:?}"
+        let kept = retained(&changed, &documents);
+        assert_eq!(
+            kept, published,
+            "app's record pins the lib it was built with"
         );
+        assert!(
+            !is_current(&changed, &app, &kept[&app], built_with(&catalog)).unwrap(),
+            "lib changed, and app was built with the old lib"
+        );
+        assert!(is_current(&changed, &app, &kept[&app], built_with(&changed)).unwrap());
     }
 
     fn published_all(catalog: &PackageCatalog) -> BTreeMap<Key, Published> {
@@ -798,6 +989,7 @@ mod tests {
                 let key = (name.to_string(), "1".to_string(), LINUX.to_string());
                 let entry = Published {
                     recipe: approved.platforms[LINUX].clone(),
+                    revision: approved.revision,
                     record: hash_bytes(name.as_bytes()),
                     published: 100,
                 };

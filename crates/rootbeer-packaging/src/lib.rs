@@ -18,7 +18,7 @@ mod receipt;
 mod release;
 pub mod selection;
 pub use package_plan::{plan_packages, PackageTask};
-pub use publish_records::publish_records;
+pub use publish_records::{coverage, publish_records, Coverage};
 pub use release::{push_package, release_package, Signer};
 
 mod sign;
