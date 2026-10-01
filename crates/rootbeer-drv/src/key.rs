@@ -2,6 +2,8 @@ use crate::Error;
 use data_encoding::BASE32_NOPAD;
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
+use sha2::digest::generic_array::sequence::Split;
+use sha2::digest::typenum::U20;
 use std::fmt;
 use std::str::FromStr;
 
@@ -25,7 +27,8 @@ impl Key {
             .finalize();
 
         // 160 bits is exactly 32 characters, so there is never padding.
-        Key(BASE32_NOPAD.encode(&hash[..20]).to_ascii_lowercase())
+        let (prefix, _) = Split::<u8, U20>::split(hash);
+        Key(BASE32_NOPAD.encode(&prefix).to_ascii_lowercase())
     }
 
     pub fn as_str(&self) -> &str {

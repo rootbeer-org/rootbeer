@@ -55,7 +55,7 @@ impl Pattern {
 }
 
 impl Derivation {
-    pub fn validate(&self) -> Result<(), Error> {
+    pub(crate) fn validate(&self) -> Result<(), Error> {
         match self {
             Derivation::Build(build) => build.validate(),
             Derivation::Fetch(fetch) => fetch.validate(),

@@ -111,11 +111,11 @@ impl Derivation {
     pub fn key(&self) -> Result<Key, Error> {
         self.validate()?;
 
-        Ok(Key::digest(&self.canonical_bytes()))
+        Ok(Key::digest(&self.canonical_bytes()?))
     }
 
     // RFC 8785 JSON of the keyed fields (minus the fetched URLs)
-    fn canonical_bytes(&self) -> Vec<u8> {
+    fn canonical_bytes(&self) -> Result<Vec<u8>, Error> {
         let keyed = match self {
             Derivation::Fetch(fetch) => &Derivation::Fetch(Fetch {
                 urls: Vec::new(),
@@ -124,7 +124,9 @@ impl Derivation {
             _ => self,
         };
 
-        serde_json_canonicalizer::to_vec(keyed).expect("derivations have string map keys")
+        serde_json_canonicalizer::to_vec(keyed).map_err(|error| {
+            Error::invalid("derivation", &error.to_string(), "cannot be canonicalized")
+        })
     }
 }
 

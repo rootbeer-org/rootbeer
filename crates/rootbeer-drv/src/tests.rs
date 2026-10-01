@@ -46,7 +46,7 @@ fn canonical_bytes_omit_empty_fields_and_escape_like_jcs() {
         ..build()
     };
 
-    let bytes = Derivation::Build(minimal).canonical_bytes();
+    let bytes = Derivation::Build(minimal).canonical_bytes().unwrap();
     let expected = concat!(
         r#"{"kind":"build","name":"zlib","outputs":["out"],"platform":"x86_64-linux","#,
         r#""sandbox":"linux-v1","script":"q\"b\\\b\t\n\f\r\u0001\u001f"#,
