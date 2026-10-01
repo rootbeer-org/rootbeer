@@ -317,13 +317,21 @@ fn plan(
         reuse_run = Some(github::env("GITHUB_RUN_ID")?);
     }
     let github = reuse_run.as_ref().map(|_| GitHub::from_env()).transpose()?;
+    // A refused producer only costs a rebuild: nothing it retained is trusted, so this run
+    // builds and verifies the selected packages itself.
     let retained = match (&github, &reuse_run) {
-        (Some(github), Some(run)) => Some(github::admit(
-            github,
-            run,
-            config.workflow()?,
-            &config.ci.trusted,
-        )?),
+        (Some(github), Some(run)) => {
+            match github::admit(github, run, config.workflow()?, &config.ci.trusted) {
+                Ok(retained) => Some(retained),
+                Err(error) => {
+                    eprintln!("::warning::Not reusing run {run}: {error}; building instead");
+                    summary(&format!(
+                        "Run {run} was not reused ({error}), so this run builds its packages.\n\n"
+                    ))?;
+                    None
+                }
+            }
+        }
         _ => None,
     };
     let mut recover = |task: &rootbeer_packaging::PackageTask| match (&github, &retained) {
