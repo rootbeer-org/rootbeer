@@ -8,7 +8,7 @@ sha256: 1111111111111111111111111111111111111111111111111111111111111111
 urls:
   - https://example.com/auto-5.8.tar.gz
 
-# pqwizqi5zdl5qjftnchmpugmmlhsk3vh
+# bcnq2eude2zckj7pe3hwvtnpvhkj4xvb
 kind: build
 name: auto
 version: 5.8
@@ -19,7 +19,7 @@ allow:
 inputs:
   source: gskd7oqlctnsyj5ziiallfivhtzbfp27
 dependencies:
-  - libz (linked) aojljajc7kksnif4xihryhn35ov6kxr4
+  - libz (linked) 6i67rywx65sdqz2xklja5ghagt2unkmq
 env:
   RB_SYSTEM: builder-sha256:0000
 outputs:
@@ -28,8 +28,8 @@ script: |
   set -eu
   tar -xzf "${source}" -C .
   cd auto-5.8
-  export LDFLAGS="-Wl,-rpath,/opt/rb/store/aojljajc7kksnif4xihryhn35ov6kxr4-libz-1.3.2/lib"
-  sh ./configure "--prefix=${out}" --disable-nls --with-z=/opt/rb/store/aojljajc7kksnif4xihryhn35ov6kxr4-libz-1.3.2
+  export LDFLAGS="-Wl,-S -Wl,-rpath,/opt/rb/store/6i67rywx65sdqz2xklja5ghagt2unkmq-libz-1.3.2/lib"
+  sh ./configure "--prefix=${out}" --disable-nls --with-z=/opt/rb/store/6i67rywx65sdqz2xklja5ghagt2unkmq-libz-1.3.2
   make "-j${jobs}"
   make check
   make install

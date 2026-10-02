@@ -95,7 +95,7 @@ impl Package<'_> {
 
         let mut lines = self.prepare(source)?;
         if matches!(build.backend, Backend::Autotools | Backend::Custom) {
-            lines.extend(rpath(&self.rpaths));
+            lines.push(link_flags(&self.rpaths));
         }
 
         lines.extend(script.lines);
@@ -262,18 +262,20 @@ fn link(bins: Option<&Bins>) -> Vec<String> {
     [vec![r#"mkdir -p "${out}/bin""#.into()], links].concat()
 }
 
-// Store paths are fixed, so outputs find shared libraries without relocation.
-fn rpath(directories: &[String]) -> Option<String> {
-    if directories.is_empty() {
-        return None;
-    }
-
-    let flags = directories
-        .iter()
-        .map(|directory| format!("-Wl,-rpath,{directory}"))
+// Store paths are fixed, so outputs find shared libraries through rpaths rather
+// than relocation. -S removes debug information which can persist as false
+// references since they show paths to deleted build directories.
+fn link_flags(rpaths: &[String]) -> String {
+    let flags = ["-Wl,-S".to_string()]
+        .into_iter()
+        .chain(
+            rpaths
+                .iter()
+                .map(|directory| format!("-Wl,-rpath,{directory}")),
+        )
         .collect::<Vec<_>>();
 
-    Some(format!(r#"export LDFLAGS="{}""#, flags.join(" ")))
+    format!(r#"export LDFLAGS="{}""#, flags.join(" "))
 }
 
 fn env(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
