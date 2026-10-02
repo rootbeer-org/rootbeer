@@ -130,10 +130,14 @@ Remove from non-test code:
 Replace with, in order of preference:
 
 1. **Types that rule the state out**: newtypes validated at construction,
-   fixed-size arrays (`[u8; 32]` instead of `&[u8]` plus a length check),
-   `first_chunk`/`split_first_chunk` instead of slicing.
+   fixed-size arrays (`[u8; 32]` instead of `&[u8]` plus a length check). When a
+   length is fixed by a type, split or destructure it by type (generic-array's
+   `Split`, array patterns) rather than reaching for `first_chunk`, whose `Option`
+   would need an error branch that can never run.
 2. **Propagation**: `?` with a real error variant, `ok_or`/`ok_or_else`, and
-   `let ... else { return Err(...) }`.
+   `let ... else { return Err(...) }`. If the crate's error type has no fitting
+   variant, carry the underlying message in an existing one rather than adding a
+   variant for a failure that can't realistically happen.
 3. **Non-panicking accessors**: `get`, `get_mut`, `checked_*`, `try_from`,
    `char_indices`, `split_once`.
 4. **A default**, via `unwrap_or`, `unwrap_or_else` or `unwrap_or_default`, *only*
