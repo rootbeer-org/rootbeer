@@ -1,6 +1,6 @@
 use rootbeer_drv::Allow;
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 pub(crate) const PROFILE: &str = "darwin-v1";
@@ -18,11 +18,22 @@ const HOST: [&str; 9] = [
     "/Applications/Xcode.app",
 ];
 
+const EXECUTABLES: [&str; 7] = [
+    "/bin",
+    "/sbin",
+    "/usr/bin",
+    "/usr/sbin",
+    "/usr/libexec",
+    "/Library/Developer/CommandLineTools",
+    "/Applications/Xcode.app",
+];
+
 // Test suites resolve hosts, users, and time zones.
-const SYSTEM: [&str; 10] = [
+const SYSTEM: [&str; 11] = [
     "/System",
     "/private/var/db/dyld",
     "/private/var/db/xcode_select_link",
+    "/private/var/select",
     "/private/var/db/timezone",
     "/private/etc/localtime",
     "/private/etc/hosts",
@@ -34,6 +45,7 @@ const SYSTEM: [&str; 10] = [
 
 const DEVICES: [&str; 4] = ["/dev/null", "/dev/zero", "/dev/random", "/dev/urandom"];
 const ANCESTORS: [&str; 5] = ["/", "/opt", "/opt/rb", "/opt/rb/var", "/opt/rb/var/build"];
+const LINKS: [&str; 3] = ["/etc", "/tmp", "/var"];
 
 /// Where a build runs. Fixed per key, so the path a build embeds is too, and
 /// outside `/tmp` so a build allowed `/tmp` can't reach another's.
@@ -44,7 +56,23 @@ pub(crate) fn directory(key: &str) -> PathBuf {
 /// `sandbox-exec` with a profile that reads only the host toolchain and
 /// `reads`, writes only `writes`, and has no network unless allowed loopback.
 pub(crate) fn command(reads: &[String], writes: &[String], allow: &BTreeSet<Allow>) -> Command {
+    let parents = HOST
+        .into_iter()
+        .chain(SYSTEM)
+        .chain(DEVICES)
+        .chain(reads.iter().map(String::as_str))
+        .chain(writes.iter().map(String::as_str))
+        .flat_map(|path| Path::new(path).ancestors().skip(1))
+        .map(|path| path.display().to_string())
+        .chain(LINKS.map(String::from))
+        .collect::<BTreeSet<_>>()
+        .iter()
+        .map(|path| format!("(literal {path:?})"))
+        .collect::<Vec<_>>()
+        .join(" ");
+
     let host = rules(HOST);
+    let executables = rules(EXECUTABLES);
     let system = rules(SYSTEM);
     let devices = rules(DEVICES);
     let reads = rules(reads.iter().map(String::as_str));
@@ -70,10 +98,10 @@ pub(crate) fn command(reads: &[String], writes: &[String], allow: &BTreeSet<Allo
 (allow process-fork)
 (allow signal (target same-sandbox))
 (allow sysctl-read)
-(allow file-read-metadata)
+(allow file-read-metadata {parents})
 (allow file-read* {host} {system} {devices} {reads} {writes} {ancestors} (subpath \"/dev/fd\"))
 (allow file-ioctl {host} {devices} {reads} {writes})
-(allow process-exec {host} {reads} {writes})
+(allow process-exec {executables} {reads} {writes})
 (allow file-write* {writes} (literal \"/dev/null\") (literal \"/dev/zero\") (subpath \"/dev/fd\"))
 "
     );
