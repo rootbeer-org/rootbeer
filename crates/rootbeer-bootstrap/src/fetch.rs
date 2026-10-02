@@ -57,7 +57,7 @@ fn get(url: &str, limit: u64, timeout: Duration) -> Result<Vec<u8>, Error> {
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .https_only(true)
         .timeout_connect(Some(Duration::from_secs(30)))
-        .timeout_recv_response(Some(Duration::from_secs(30)))
+        .timeout_recv_body(Some(Duration::from_secs(30)))
         .timeout_global(Some(timeout))
         .build()
         .into();
