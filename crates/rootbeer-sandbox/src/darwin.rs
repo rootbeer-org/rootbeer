@@ -1,6 +1,6 @@
 use rootbeer_drv::Allow;
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 pub(crate) const PROFILE: &str = "darwin-v1";
@@ -46,12 +46,6 @@ const SYSTEM: [&str; 11] = [
 const DEVICES: [&str; 4] = ["/dev/null", "/dev/zero", "/dev/random", "/dev/urandom"];
 const ANCESTORS: [&str; 5] = ["/", "/opt", "/opt/rb", "/opt/rb/var", "/opt/rb/var/build"];
 const LINKS: [&str; 3] = ["/etc", "/tmp", "/var"];
-
-/// Where a build runs. Fixed per key, so the path a build embeds is too, and
-/// outside `/tmp` so a build allowed `/tmp` can't reach another's.
-pub(crate) fn directory(key: &str) -> PathBuf {
-    format!("/opt/rb/var/build/{key}").into()
-}
 
 /// `sandbox-exec` with a profile that reads only the host toolchain and
 /// `reads`, writes only `writes`, and has no network unless allowed loopback.

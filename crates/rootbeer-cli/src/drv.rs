@@ -1,4 +1,4 @@
-use rootbeer_drv::{output_path, Build, DependencyKind, Derivation, Key, Platform};
+use rootbeer_drv::{output_path, Build, DependencyKind, Derivation, Key, Platform, STORE_ROOT};
 use rootbeer_eval::{Catalog, Graph, Host, Target};
 use rootbeer_sandbox::Request;
 use serde::{Deserialize, Serialize};
@@ -120,7 +120,7 @@ fn build(sources: &Sources, package: &str, is_verbose: bool) -> Result<(), Strin
 
     let realized = Path::new(VAR).join("realized");
     let logs = Path::new(VAR).join("log");
-    for directory in [&realized, &logs] {
+    for directory in [Path::new(STORE_ROOT), &realized, &logs] {
         fs::create_dir_all(directory)
             .map_err(|error| format!("{}: {error}", directory.display()))?;
     }

@@ -4,6 +4,7 @@
 mod build;
 mod darwin;
 mod fetch;
+mod linux;
 mod scan;
 
 use rootbeer_drv::{Derivation, Key};

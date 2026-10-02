@@ -1,4 +1,5 @@
 use crate::{Error, io_at};
+use goblin::elf::Elf;
 use goblin::mach::{Mach, MachO, SingleArch};
 use memchr::memmem;
 use rootbeer_drv::{Key, STORE_ROOT};
@@ -15,11 +16,28 @@ const FORBIDDEN: [&str; 5] = [
     "/opt/homebrew/",
     "/home/runner/",
     "/Users/runner/",
-    "/opt/rb/var/build/",
+    "/build/",
 ];
 
 const INTERPRETERS: [&str; 2] = ["/bin/sh", "/usr/bin/env"];
 const SYSTEM_LIBRARIES: [&str; 2] = ["/usr/lib", "/System/Library/Frameworks"];
+const MACH_ORIGINS: [&str; 2] = ["@loader_path", "@executable_path"];
+const ELF_ORIGINS: [&str; 2] = ["$ORIGIN", "${ORIGIN}"];
+
+const RUNTIME: [&str; 12] = [
+    "ld-linux-aarch64.so.1",
+    "ld-linux-x86-64.so.2",
+    "libc.so.6",
+    "libm.so.6",
+    "libpthread.so.0",
+    "libdl.so.2",
+    "librt.so.1",
+    "libutil.so.1",
+    "libresolv.so.2",
+    "libanl.so.1",
+    "libstdc++.so.6",
+    "libgcc_s.so.1",
+];
 
 const METADATA: [&str; 2] = [".pc", ".la"];
 const PACKAGE_CONFIGS: [&str; 3] = ["lib/cmake/", "lib64/cmake/", "share/cmake/"];
@@ -77,7 +95,7 @@ pub(crate) fn scan(
             if is_strict {
                 problems.push(problem);
             } else {
-                writeln!(log, "warning: {problem}").map_err(io_at(path))?;
+                writeln!(log, "scan warning: {problem}").map_err(io_at(path))?;
             }
         }
 
@@ -95,6 +113,10 @@ pub(crate) fn scan(
                 }
             }
             Err(_) => {}
+        }
+
+        if let Ok(elf) = Elf::parse(&bytes) {
+            problems.extend(elf_linkage(&name, path, &elf));
         }
     }
 
@@ -161,21 +183,66 @@ fn is_loadable(library: &str, rpaths: &[&str], loader: &Path) -> bool {
     }
 
     let Some(rest) = library.strip_prefix("@rpath/") else {
-        return is_stored(&expand(library, loader));
+        return is_stored(&expand(library, loader, &MACH_ORIGINS));
     };
 
-    for rpath in rpaths {
-        let directory = expand(rpath, loader);
-        if is_stored(&directory.join(rest)) {
-            return true;
-        }
+    let directories = rpaths
+        .iter()
+        .map(|rpath| expand(rpath, loader, &MACH_ORIGINS));
+    search(rest, directories, is_system).unwrap_or(false)
+}
 
-        if !directory.starts_with(STORE_ROOT) && !is_system(&directory) {
-            return false;
-        }
+fn elf_linkage(name: &str, path: &Path, elf: &Elf) -> Vec<String> {
+    let loader = path.parent().unwrap_or(path);
+
+    // RUNPATH replaces RPATH when both are set.
+    let search_path = match elf.runpaths.is_empty() {
+        true => &elf.rpaths,
+        false => &elf.runpaths,
+    };
+
+    let directories = search_path
+        .iter()
+        .flat_map(|entry| entry.split(':'))
+        .map(|directory| expand(directory, loader, &ELF_ORIGINS))
+        .collect::<Vec<_>>();
+
+    elf.libraries
+        .iter()
+        .filter(|library| !is_resolvable(library, &directories))
+        .map(|library| format!("{name} needs {library}, which is outside the store"))
+        .collect()
+}
+
+fn is_resolvable(library: &str, directories: &[PathBuf]) -> bool {
+    if library.contains('/') {
+        return is_stored(Path::new(library));
     }
 
-    false
+    let is_runtime = RUNTIME.contains(&library);
+    search(library, directories, |directory| {
+        is_runtime && is_system(directory)
+    })
+    .unwrap_or(is_runtime)
+}
+
+/// Whether the loader finds `name` in the store, searching `directories` in
+/// its order. Any other directory ahead of the store fails unless `is_allowed`.
+/// None means no directory has it.
+fn search(
+    name: &str,
+    directories: impl IntoIterator<Item = impl AsRef<Path>>,
+    is_allowed: impl Fn(&Path) -> bool,
+) -> Option<bool> {
+    directories.into_iter().find_map(|directory| {
+        let directory = directory.as_ref();
+        if is_stored(&directory.join(name)) {
+            return Some(true);
+        }
+
+        let is_host = !directory.starts_with(STORE_ROOT) && !is_allowed(directory);
+        is_host.then_some(false)
+    })
 }
 
 fn is_system(path: &Path) -> bool {
@@ -191,10 +258,11 @@ fn is_stored(path: &Path) -> bool {
         && fs::canonicalize(path).is_ok_and(|resolved| resolved.starts_with(STORE_ROOT))
 }
 
-fn expand(path: &str, loader: &Path) -> PathBuf {
-    let relative = path
-        .strip_prefix("@loader_path")
-        .or_else(|| path.strip_prefix("@executable_path"));
+fn expand(path: &str, loader: &Path, origins: &[&str]) -> PathBuf {
+    let relative = origins
+        .iter()
+        .filter_map(|origin| path.strip_prefix(origin))
+        .find(|rest| rest.is_empty() || rest.starts_with('/'));
 
     match relative {
         Some(rest) => loader.join(rest.trim_start_matches('/')),
@@ -255,7 +323,7 @@ mod tests {
         assert_eq!(
             problems,
             [
-                "lib/cmake/x/x-config.cmake mentions /opt/rb/var/build/",
+                "lib/cmake/x/x-config.cmake mentions /build/",
                 "link mentions /usr/local/",
                 "script runs \"/usr/bin/python3\", which is outside the store",
                 "zlib.pc mentions /opt/homebrew/",
@@ -264,8 +332,39 @@ mod tests {
         );
         assert_eq!(
             String::from_utf8(log).unwrap(),
-            "warning: FindY.cmake mentions /usr/local/\nwarning: README mentions /usr/local/\n\
-             warning: env-script mentions /usr/local/\n"
+            "scan warning: FindY.cmake mentions /usr/local/\nscan warning: README mentions /usr/local/\n\
+             scan warning: env-script mentions /usr/local/\n"
         );
+    }
+
+    #[test]
+    fn elf_libraries_resolve_in_loader_order() {
+        let cases: [(&str, &[&str], bool); 6] = [
+            ("libc.so.6", &[], true),
+            ("libc.so.6", &["/usr/lib/x86_64-linux-gnu"], true),
+            ("libc.so.6", &["/usr/local/lib"], false),
+            ("libc.so.6", &[""], false),
+            ("libz.so.1", &[], false),
+            ("/usr/lib/libc.so.6", &[], false),
+        ];
+
+        for (library, directories, expected) in cases {
+            let directories = directories.iter().map(PathBuf::from).collect::<Vec<_>>();
+            assert_eq!(is_resolvable(library, &directories), expected, "{library}");
+        }
+    }
+
+    #[test]
+    fn origins_expand_only_as_whole_tokens() {
+        let loader = Path::new("/opt/rb/store/k/bin");
+        let cases = [
+            ("$ORIGIN/../lib", "/opt/rb/store/k/bin/../lib"),
+            ("${ORIGIN}", "/opt/rb/store/k/bin"),
+            ("$ORIGINAL/lib", "$ORIGINAL/lib"),
+        ];
+
+        for (path, expected) in cases {
+            assert_eq!(expand(path, loader, &ELF_ORIGINS), Path::new(expected));
+        }
     }
 }

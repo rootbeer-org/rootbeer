@@ -1,15 +1,16 @@
-use crate::{Error, Request, darwin, derivation, io_at, scan};
+use crate::{Error, Request, darwin, derivation, io_at, linux, scan};
 use rootbeer_drv::{Allow, Build, Check};
 use rootbeer_drv::{
-    Dependency, DependencyKind, Derivation, Key, Platform, fetch_path, output_path,
+    Dependency, DependencyKind, Derivation, Key, Platform, STORE_ROOT, fetch_path, output_path,
 };
 use rustix::process::{Pid, Signal, WaitId, WaitIdOptions};
 use std::collections::{BTreeMap, BTreeSet};
+use std::env::consts::{ARCH, OS};
 use std::fs;
 use std::io::{self, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
 use walkdir::WalkDir;
@@ -27,13 +28,20 @@ const FIXED: [(&str, &str); 8] = [
 
 const HOST_PATH: [&str; 4] = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"];
 
+#[derive(Clone, Copy)]
+enum Profile {
+    Darwin,
+    Linux,
+}
+
 struct Sandbox {
+    profile: Profile,
     allow: BTreeSet<Allow>,
     closure: BTreeSet<Key>,
     variables: BTreeMap<String, String>,
     bins: Vec<String>,
     reads: Vec<String>,
-    writes: Vec<String>,
+    out: Option<String>,
 }
 
 pub(crate) fn build(request: &mut Request, build: &Build) -> Result<BTreeSet<Key>, Error> {
@@ -57,7 +65,7 @@ pub(crate) fn build(request: &mut Request, build: &Build) -> Result<BTreeSet<Key
 
     let out_path = out.display().to_string();
     sandbox.variables.insert("out".into(), out_path.clone());
-    sandbox.writes.push(out_path);
+    sandbox.out = Some(out_path);
 
     // Outputs might reference runtime dependencies
     let mut allowed = sandbox.closure.clone();
@@ -104,28 +112,35 @@ impl Sandbox {
         platform: Platform,
         env: &BTreeMap<String, String>,
     ) -> Result<Sandbox, Error> {
-        let is_runnable = profile == darwin::PROFILE
-            && platform == Platform::Aarch64Macos
-            && cfg!(all(target_os = "macos", target_arch = "aarch64"));
+        let is_host = platform.to_string() == format!("{ARCH}-{OS}");
+        let runnable = match (profile, platform) {
+            _ if !is_host => None,
+            (darwin::PROFILE, Platform::Aarch64Macos) => Some(Profile::Darwin),
+            (linux::PROFILE, Platform::Aarch64Linux | Platform::X86_64Linux) => {
+                Some(Profile::Linux)
+            }
+            _ => None,
+        };
 
-        if !is_runnable {
+        let Some(runnable) = runnable else {
             return Err(failure(
                 request.key,
                 &format!("needs {profile} on {platform}, which this machine can't run"),
             ));
-        }
+        };
 
         let mut variables = env.clone();
         variables.extend(FIXED.map(|(name, value)| (name.to_string(), value.to_string())));
         variables.insert("jobs".into(), request.jobs.to_string());
 
         Ok(Sandbox {
+            profile: runnable,
             allow: BTreeSet::new(),
             closure: BTreeSet::new(),
             variables,
             bins: Vec::new(),
             reads: Vec::new(),
-            writes: Vec::new(),
+            out: None,
         })
     }
 
@@ -223,7 +238,7 @@ impl Sandbox {
 
     // Runs in a fresh directory that is kept when the script fails.
     fn run(&mut self, request: &mut Request, script: &str) -> Result<(), Error> {
-        let directory = darwin::directory(request.key.as_str());
+        let directory = directory(request.key);
         let source = directory.join("src");
         let tmp = directory.join("tmp");
         let file = directory.join("script");
@@ -233,19 +248,38 @@ impl Sandbox {
         fs::create_dir(&tmp).map_err(io_at(&tmp))?;
         fs::write(&file, script).map_err(io_at(&file))?;
 
+        // The workspace is what the script sees as the build directory
+        let (workspace, mut command) = match self.profile {
+            Profile::Darwin => {
+                let writes = self
+                    .out
+                    .iter()
+                    .cloned()
+                    .chain([directory.display().to_string()]);
+                let mut command =
+                    darwin::command(&self.reads, &writes.collect::<Vec<_>>(), &self.allow);
+
+                command.current_dir(&source);
+                (directory.clone(), command)
+            }
+            Profile::Linux => {
+                let staging = linux::staging(&directory);
+                fs::create_dir(&staging).map_err(io_at(&staging))?;
+                let command = linux::command(&self.reads, &directory);
+                (PathBuf::from(linux::WORKSPACE), command)
+            }
+        };
+
         let path = self.bins.iter().map(String::as_str).chain(HOST_PATH);
         self.variables
             .insert("PATH".into(), path.collect::<Vec<_>>().join(":"));
 
         self.variables
-            .insert("TMPDIR".into(), tmp.display().to_string());
+            .insert("TMPDIR".into(), workspace.join("tmp").display().to_string());
 
-        self.writes.push(directory.display().to_string());
-        let mut command = darwin::command(&self.reads, &self.writes, &self.allow);
         command
             .arg("/bin/sh")
-            .arg(&file)
-            .current_dir(&source)
+            .arg(workspace.join("script"))
             .env_clear()
             .envs(&self.variables);
 
@@ -253,6 +287,18 @@ impl Sandbox {
         if !status.success() {
             let reason = format!("script {status}; kept {}", directory.display());
             return Err(failure(request.key, &reason));
+        }
+
+        if let (Profile::Linux, Some(out)) = (self.profile, &self.out) {
+            let out = Path::new(out);
+            let staged = out
+                .strip_prefix(STORE_ROOT)
+                .map(|name| linux::staging(&directory).join(name))
+                .map_err(|_| failure(request.key, "has an output outside the store"))?;
+
+            if staged.symlink_metadata().is_ok() {
+                fs::rename(&staged, out).map_err(io_at(out))?;
+            }
         }
 
         remove(&directory)
@@ -300,6 +346,11 @@ fn wait(child: &mut Child, group: Pid) -> io::Result<ExitStatus> {
 fn kill(group: Pid) {
     // This can't fail unless nothing is left to kill, we don't care.
     let _ = rustix::process::kill_process_group(group, Signal::KILL);
+}
+
+/// Where a build runs on the host.
+fn directory(key: &Key) -> PathBuf {
+    format!("/opt/rb/var/build/{key}").into()
 }
 
 /// Outputs are immutable once scanned.
