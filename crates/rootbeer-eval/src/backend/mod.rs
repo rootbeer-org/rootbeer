@@ -108,6 +108,7 @@ impl Package<'_> {
     pub(crate) fn check(&self, target: &Key) -> Result<Option<Check>, String> {
         let values = &self.resolved.values;
         let commands = self.resolved.spec.outputs.checks.as_deref();
+        // TODO: Key libraries on the build once $deps stages them; they shape dependents' builds
         let libraries = self
             .resolved
             .spec
