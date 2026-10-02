@@ -114,8 +114,9 @@ fn build(sources: &Sources, package: &str, is_verbose: bool) -> Result<(), Strin
         .ok_or_else(|| format!("{target} did not evaluate"))?;
 
     let mut order = Vec::new();
-    dependencies_first(&graph.derivations, &package.build, &mut order);
-    order.extend(package.check.clone());
+    for key in std::iter::once(&package.build).chain(&package.check) {
+        dependencies_first(&graph.derivations, key, &mut order);
+    }
 
     let realized = Path::new(VAR).join("realized");
     let logs = Path::new(VAR).join("log");
@@ -185,16 +186,23 @@ fn dependencies_first(derivations: &BTreeMap<Key, Derivation>, key: &Key, order:
         return;
     }
 
-    if let Some(Derivation::Build(build)) = derivations.get(key) {
-        let dependencies = build
-            .dependencies
-            .iter()
-            .filter(|dependency| dependency.kind != DependencyKind::Runtime)
-            .map(|dependency| &dependency.key);
+    let (named, dependencies) = match derivations.get(key) {
+        Some(Derivation::Build(build)) => (
+            build.inputs.values().collect(),
+            build.dependencies.as_slice(),
+        ),
+        Some(Derivation::Check(check)) => (vec![&check.target], check.dependencies.as_slice()),
+        Some(Derivation::Fetch(_)) | None => (Vec::new(), [].as_slice()),
+    };
 
-        for named in build.inputs.values().chain(dependencies) {
-            dependencies_first(derivations, named, order);
-        }
+    // Runtime dependencies aren't visible to the build.
+    let dependencies = dependencies
+        .iter()
+        .filter(|dependency| dependency.kind != DependencyKind::Runtime)
+        .map(|dependency| &dependency.key);
+
+    for named in named.into_iter().chain(dependencies) {
+        dependencies_first(derivations, named, order);
     }
 
     order.push(key.clone());

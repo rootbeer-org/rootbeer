@@ -58,6 +58,21 @@ fn canonical_bytes_omit_empty_fields_and_escape_like_jcs() {
 }
 
 #[test]
+fn allow_encodes_in_declaration_order() {
+    let build = Build {
+        allow: BTreeSet::from(Allow::ALL),
+        ..build()
+    };
+
+    let bytes = Derivation::Build(build).canonical_bytes().unwrap();
+    let text = String::from_utf8(bytes).unwrap();
+    assert!(
+        text.contains(r#""allow":["local-network","ipc","tmp"]"#),
+        "{text}"
+    );
+}
+
+#[test]
 fn every_build_field_changes_the_key() {
     let base = key(build());
     let mutations: Vec<Mutation> = vec![

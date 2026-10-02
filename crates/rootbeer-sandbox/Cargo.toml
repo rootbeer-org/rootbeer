@@ -7,6 +7,7 @@ rust-version.workspace = true
 [dependencies]
 data-encoding = "2"
 rootbeer-drv = { path = "../rootbeer-drv" }
+rustix = { version = "1", features = ["process"] }
 sha2 = "0.10"
 tempfile = "3"
 ureq = "3"

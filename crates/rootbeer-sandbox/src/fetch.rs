@@ -5,7 +5,7 @@ use sha2::Digest;
 use std::fs::{File, Permissions};
 use std::io::{self, Seek};
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 
 // Covers the entire transfer so it needs to account for the slowest fetch
@@ -16,12 +16,12 @@ type Failure = Box<dyn std::error::Error>;
 
 /// Downloads a fetch into the store, trying each URL in order until one matches
 /// the hash. The file appears at its store path after verification.
-pub(crate) fn fetch(key: &Key, fetch: &Fetch) -> Result<PathBuf, Error> {
+pub(crate) fn fetch(key: &Key, fetch: &Fetch) -> Result<(), Error> {
     let path = fetch_path(key);
     let mut failures = Vec::new();
     for url in &fetch.urls {
         match download(url, &fetch.sha256, &path) {
-            Ok(()) => return Ok(path),
+            Ok(()) => return Ok(()),
             Err(failure) => failures.push(format!("{url}: {failure}")),
         }
     }

@@ -30,15 +30,33 @@ pub enum Error {
 /// Fetches, builds, or checks a derivation, replacing any partial output an
 /// interrupted attempt left at its store path.
 pub fn realize(request: &mut Request) -> Result<(), Error> {
-    match request.graph.get(request.key) {
-        Some(Derivation::Fetch(fetch)) => fetch::fetch(request.key, fetch).map(drop),
-        Some(Derivation::Build(build)) => build::build(request, build),
-        Some(Derivation::Check(check)) => build::check(request, check),
-        None => Err(Error::Build {
-            key: request.key.clone(),
-            reason: "is not in the graph".into(),
-        }),
+    match derivation(request, request.key)? {
+        Derivation::Fetch(fetch) => fetch::fetch(request.key, fetch),
+        Derivation::Build(build) => build::build(request, build),
+        Derivation::Check(check) => build::check(request, check),
     }
+}
+
+fn derivation<'a>(request: &Request<'a>, key: &Key) -> Result<&'a Derivation, Error> {
+    let graph: &'a BTreeMap<Key, Derivation> = request.graph;
+    let failure = |reason: String| Error::Build {
+        key: key.clone(),
+        reason,
+    };
+
+    let derivation = graph
+        .get(key)
+        .ok_or_else(|| failure("is not in the graph".into()))?;
+
+    let actual = derivation
+        .key()
+        .map_err(|error| failure(error.to_string()))?;
+
+    if actual != *key {
+        return Err(failure(format!("names a derivation whose key is {actual}")));
+    }
+
+    Ok(derivation)
 }
 
 impl fmt::Display for Error {

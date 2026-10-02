@@ -1,13 +1,16 @@
-use crate::{Error, Request, darwin};
+use crate::{Error, Request, darwin, derivation};
 use rootbeer_drv::{Allow, Build, Check};
 use rootbeer_drv::{
     Dependency, DependencyKind, Derivation, Key, Platform, fetch_path, output_path,
 };
+use rustix::process::{Pid, Signal, WaitId, WaitIdOptions};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io;
+use std::io::{self, Write};
+use std::os::unix::process::CommandExt;
 use std::path::Path;
-use std::process::Stdio;
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::thread;
 
 const FIXED: [(&str, &str); 8] = [
     ("HOME", "/nonexistent"),
@@ -31,6 +34,13 @@ struct Sandbox {
 }
 
 pub(crate) fn build(request: &mut Request, build: &Build) -> Result<(), Error> {
+    if build.outputs.len() != 1 {
+        return Err(failure(
+            request.key,
+            "declares outputs besides out, which aren't supported yet",
+        ));
+    }
+
     let out = output_path(request.key, &build.name, &build.version, "out");
     remove(&out)?;
 
@@ -38,8 +48,7 @@ pub(crate) fn build(request: &mut Request, build: &Build) -> Result<(), Error> {
     sandbox.allow.clone_from(&build.allow);
     sandbox.dependencies(request, &build.dependencies)?;
     for (name, key) in &build.inputs {
-        let path = realized(request, key)?;
-        sandbox.reads.push(path.clone());
+        let path = sandbox.read(request, key)?;
         sandbox.variables.insert(name.clone(), path);
     }
 
@@ -47,25 +56,28 @@ pub(crate) fn build(request: &mut Request, build: &Build) -> Result<(), Error> {
     sandbox.variables.insert("out".into(), out_path.clone());
     sandbox.writes.push(out_path);
 
-    if let Err(error) = sandbox.run(request, &build.script) {
-        remove(&out)?;
-        return Err(error);
+    let result = sandbox.run(request, &build.script).and_then(|()| {
+        if !out.exists() {
+            return Err(failure(request.key, "script did not create $out"));
+        }
+
+        Ok(())
+    });
+
+    if result.is_err() {
+        // Best effort: the next attempt removes it before building anyway.
+        let _ = remove(&out);
     }
 
-    if !out.exists() {
-        return Err(failure(request.key, "script did not create $out"));
-    }
-
-    Ok(())
+    result
 }
 
 pub(crate) fn check(request: &mut Request, check: &Check) -> Result<(), Error> {
-    let target = realized(request, &check.target)?;
     let mut sandbox = Sandbox::new(request, &check.sandbox, check.platform, &check.env)?;
-
     sandbox.dependencies(request, &check.dependencies)?;
+
+    let target = sandbox.read(request, &check.target)?;
     sandbox.bins.insert(0, format!("{target}/bin"));
-    sandbox.reads.push(target.clone());
     sandbox.variables.insert("target".into(), target);
     sandbox.run(request, &check.script)
 }
@@ -77,13 +89,11 @@ impl Sandbox {
         platform: Platform,
         env: &BTreeMap<String, String>,
     ) -> Result<Sandbox, Error> {
-        let host = Platform::try_from(format!(
-            "{}-{}",
-            std::env::consts::ARCH,
-            std::env::consts::OS
-        ));
+        let is_runnable = profile == darwin::PROFILE
+            && platform == Platform::Aarch64Macos
+            && cfg!(all(target_os = "macos", target_arch = "aarch64"));
 
-        if profile != darwin::PROFILE || host.ok() != Some(platform) {
+        if !is_runnable {
             return Err(failure(
                 request.key,
                 &format!("needs {profile} on {platform}, which this machine can't run"),
@@ -111,15 +121,13 @@ impl Sandbox {
     ) -> Result<(), Error> {
         let mut linked = Vec::new();
         for dependency in dependencies {
-            if dependency.kind == DependencyKind::Runtime {
-                continue;
-            }
-
-            let path = realized(request, &dependency.key)?;
-            self.reads.push(path.clone());
             match dependency.kind {
-                DependencyKind::Build => self.bins.push(format!("{path}/bin")),
-                DependencyKind::Linked | DependencyKind::Runtime => linked.push(path),
+                DependencyKind::Build => {
+                    let path = self.read(request, &dependency.key)?;
+                    self.bins.push(format!("{path}/bin"));
+                }
+                DependencyKind::Linked => linked.push(self.read(request, &dependency.key)?),
+                DependencyKind::Runtime => {}
             }
         }
 
@@ -148,6 +156,31 @@ impl Sandbox {
         Ok(())
     }
 
+    /// Store path of a derivation the sandbox may read, which must be realized.
+    fn read(&mut self, request: &Request, key: &Key) -> Result<String, Error> {
+        let path = match derivation(request, key)? {
+            Derivation::Fetch(_) => fetch_path(key),
+            Derivation::Build(build) => output_path(key, &build.name, &build.version, "out"),
+            Derivation::Check(_) => {
+                return Err(failure(
+                    request.key,
+                    &format!("names {key}, which has no output"),
+                ));
+            }
+        };
+
+        if !path.exists() {
+            return Err(failure(
+                request.key,
+                &format!("needs {key}, which is not realized"),
+            ));
+        }
+
+        let path = path.display().to_string();
+        self.reads.push(path.clone());
+        Ok(path)
+    }
+
     // Runs in a fresh directory that is kept when the script fails, for debugging.
     fn run(mut self, request: &mut Request, script: &str) -> Result<(), Error> {
         let directory = darwin::directory(request.key.as_str());
@@ -168,27 +201,15 @@ impl Sandbox {
             .insert("TMPDIR".into(), tmp.display().to_string());
 
         self.writes.push(directory.display().to_string());
-        let (mut reader, writer) = io::pipe().map_err(io(&directory))?;
-        let stderr = writer.try_clone().map_err(io(&directory))?;
-        let mut child = darwin::command(&self.reads, &self.writes, &self.allow)
+        let mut command = darwin::command(&self.reads, &self.writes, &self.allow);
+        command
             .arg("/bin/sh")
             .arg(&file)
             .current_dir(&source)
             .env_clear()
-            .envs(&self.variables)
-            .stdin(Stdio::null())
-            .stdout(writer)
-            .stderr(stderr)
-            .spawn()
-            .map_err(io(&directory))?;
+            .envs(&self.variables);
 
-        if let Err(error) = io::copy(&mut reader, &mut *request.log) {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(io(&directory)(error));
-        }
-
-        let status = child.wait().map_err(io(&directory))?;
+        let status = logged(command, &mut *request.log).map_err(io(&directory))?;
         if !status.success() {
             let reason = format!("script {status}; kept {}", directory.display());
             return Err(failure(request.key, &reason));
@@ -198,27 +219,47 @@ impl Sandbox {
     }
 }
 
-/// Store path of a derivation the request depends on, which must be realized.
-fn realized(request: &Request, key: &Key) -> Result<String, Error> {
-    let path = match request.graph.get(key) {
-        Some(Derivation::Fetch(_)) => fetch_path(key),
-        Some(Derivation::Build(build)) => output_path(key, &build.name, &build.version, "out"),
-        _ => {
-            return Err(failure(
-                request.key,
-                &format!("names {key}, which has no output"),
-            ));
+/// Runs `command` with its output in `log`. It runs in its own process group,
+/// killed once it exits to prevent lingering processes/hanging in the pipe.
+fn logged(mut command: Command, log: &mut dyn Write) -> io::Result<ExitStatus> {
+    let (mut reader, writer) = io::pipe()?;
+    command
+        .stdin(Stdio::null())
+        .stderr(writer.try_clone()?)
+        .stdout(writer)
+        .process_group(0);
+
+    let mut child = command.spawn()?;
+    drop(command);
+
+    let group = Pid::from_child(&child);
+    thread::scope(|scope| {
+        let waiter = scope.spawn(|| wait(&mut child, group));
+        let copied = io::copy(&mut reader, log);
+        if copied.is_err() {
+            kill(group);
         }
-    };
 
-    if !path.exists() {
-        return Err(failure(
-            request.key,
-            &format!("needs {key}, which is not realized"),
-        ));
-    }
+        let status = waiter
+            .join()
+            .map_err(|_| io::Error::other("waiting for the build panicked"))?;
 
-    Ok(path.display().to_string())
+        copied?;
+        status
+    })
+}
+
+fn wait(child: &mut Child, group: Pid) -> io::Result<ExitStatus> {
+    let options = WaitIdOptions::EXITED | WaitIdOptions::NOWAIT;
+    rustix::io::retry_on_intr(|| rustix::process::waitid(WaitId::Pid(group), options))?;
+
+    kill(group);
+    child.wait()
+}
+
+fn kill(group: Pid) {
+    // This can't fail unless nothing is left to kill, we don't care.
+    let _ = rustix::process::kill_process_group(group, Signal::KILL);
 }
 
 fn remove(path: &Path) -> Result<(), Error> {
@@ -244,5 +285,25 @@ fn io(path: &Path) -> impl Fn(io::Error) -> Error {
     move |source| Error::Io {
         path: path.clone(),
         source,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn logged_returns_when_a_background_process_holds_the_pipe() {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "sleep 60 & echo ok"]);
+
+        let started = Instant::now();
+        let mut log = Vec::new();
+        let status = logged(command, &mut log).unwrap();
+
+        assert!(status.success());
+        assert_eq!(log, b"ok\n");
+        assert!(started.elapsed() < Duration::from_secs(30));
     }
 }
