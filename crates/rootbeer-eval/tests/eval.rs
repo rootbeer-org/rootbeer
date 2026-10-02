@@ -1,7 +1,7 @@
 #![cfg(test)]
 
-use rootbeer_drv::{Derivation, Key, Platform};
-use rootbeer_eval::{Catalog, Error, Graph, Host, Target};
+use rootbeer_drv::Platform;
+use rootbeer_eval::{Catalog, Error, Host, Target};
 use std::collections::BTreeMap;
 
 const FIXTURES: [(&str, &str); 9] = [
@@ -64,14 +64,11 @@ fn fixtures_evaluate_to_the_pinned_derivations() {
         .unwrap();
 
     for (target, package) in &graph.packages {
-        let mut keys = Vec::new();
-        inputs_first(&graph, &package.build, &mut keys);
-        keys.extend(package.check.iter());
-
-        let mut snapshot = String::new();
-        for key in keys {
-            snapshot.push_str(&format!("\n# {key}\n{}", graph.derivations[key]));
-        }
+        let snapshot = graph
+            .derivations_of(package)
+            .into_iter()
+            .map(|(key, derivation)| format!("\n# {key}\n{derivation}"))
+            .collect::<String>();
 
         let name = label(target);
         insta::with_settings!({
@@ -81,20 +78,6 @@ fn fixtures_evaluate_to_the_pinned_derivations() {
             insta::assert_snapshot!(name, snapshot);
         });
     }
-}
-
-fn inputs_first<'a>(graph: &'a Graph, key: &'a Key, keys: &mut Vec<&'a Key>) {
-    if keys.contains(&key) {
-        return;
-    }
-
-    if let Derivation::Build(build) = &graph.derivations[key] {
-        for input in build.inputs.values() {
-            inputs_first(graph, input, keys);
-        }
-    }
-
-    keys.push(key);
 }
 
 #[test]

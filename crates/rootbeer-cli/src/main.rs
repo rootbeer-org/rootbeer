@@ -1,6 +1,7 @@
 mod apply;
 mod bootstrap;
 mod cd;
+mod drv;
 mod edit;
 mod gc;
 mod init;
@@ -82,6 +83,10 @@ enum Commands {
     /// Update Rootbeer through its installation owner
     #[command(visible_alias = "update")]
     SelfUpdate,
+
+    /// Inspect package derivations and keys (catalog maintainers)
+    #[command(hide = true)]
+    Drv(drv::Args),
 }
 
 impl Commands {
@@ -141,6 +146,7 @@ fn main() {
         Commands::Env => print!("{}", rootbeer_core::package::profile::env_contents()),
         Commands::Remote(args) => remote::run(args),
         Commands::SelfUpdate => update::run(),
+        Commands::Drv(args) => drv::run(args),
     }
 }
 

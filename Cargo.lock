@@ -1667,6 +1667,9 @@ dependencies = [
  "owo-colors",
  "rootbeer-build",
  "rootbeer-core",
+ "rootbeer-drv",
+ "rootbeer-eval",
+ "serde",
  "serde_json",
  "tempfile",
 ]

@@ -11,6 +11,7 @@ mod template;
 
 use recipe::{DependencyKind as RecipeKind, Recipe};
 use rootbeer_drv::{Dependency, DependencyKind, Derivation, Key, Platform};
+use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
@@ -29,7 +30,8 @@ pub struct Target {
 
 /// The pinned host toolchain stand-in for one platform, until toolchains are
 /// catalog packages. A change rekeys every source build on that platform.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Host {
     /// The Linux builder image or the macOS Xcode and SDK versions.
     /// This isn't ideal, but we'll be getting rid of this soon.
@@ -72,6 +74,42 @@ pub enum Error {
     Cycle(Vec<Target>),
 }
 
+impl Host {
+    /// Parses a Lua file returning a table of hosts keyed by platform.
+    pub fn parse(file: &str, source: &str) -> Result<BTreeMap<Platform, Host>, Error> {
+        recipe::load(file, source).map_err(|error| Error::Parse {
+            file: file.to_string(),
+            message: error.to_string(),
+        })
+    }
+}
+
+impl Graph {
+    pub fn derivations_of<'a>(&'a self, package: &'a Package) -> Vec<(&'a Key, &'a Derivation)> {
+        let mut keys = Vec::new();
+        self.inputs_first(&package.build, &mut keys);
+        keys.extend(package.check.iter());
+
+        keys.into_iter()
+            .filter_map(|key| Some((key, self.derivations.get(key)?)))
+            .collect()
+    }
+
+    fn inputs_first<'a>(&'a self, key: &'a Key, keys: &mut Vec<&'a Key>) {
+        if keys.contains(&key) {
+            return;
+        }
+
+        if let Some(Derivation::Build(build)) = self.derivations.get(key) {
+            for input in build.inputs.values() {
+                self.inputs_first(input, keys);
+            }
+        }
+
+        keys.push(key);
+    }
+}
+
 impl Catalog {
     /// Parses `(file name, recipe source)` pairs.
     pub fn parse<'a>(
@@ -84,8 +122,8 @@ impl Catalog {
                 message,
             };
 
-            let recipe =
-                Recipe::parse(file, source).map_err(|error| parse_error(error.to_string()))?;
+            let recipe = recipe::load::<Recipe>(file, source)
+                .map_err(|error| parse_error(error.to_string()))?;
             if recipes.contains_key(&recipe.name) {
                 return Err(parse_error(format!("{} is declared twice", recipe.name)));
             }

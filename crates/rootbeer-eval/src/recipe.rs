@@ -2,6 +2,7 @@ use crate::template::Values;
 use mlua::{Lua, LuaOptions, LuaSerdeExt, StdLib, VmState};
 use rootbeer_drv::{Platform, Sha256};
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 use serde::de::IgnoredAny;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -224,27 +225,25 @@ pub(crate) struct Resolved<'a> {
     pub license: &'a str,
 }
 
+pub(crate) fn load<T: DeserializeOwned>(file: &str, source: &str) -> mlua::Result<T> {
+    let lua = Lua::new_with(StdLib::NONE, LuaOptions::default())?;
+    lua.sandbox(true)?;
+    lua.set_memory_limit(MEMORY_LIMIT)?;
+
+    let interrupts = AtomicU32::new(0);
+    lua.set_interrupt(move |_| {
+        if interrupts.fetch_add(1, Ordering::Relaxed) >= INTERRUPT_BUDGET {
+            return Err(mlua::Error::runtime("evaluation budget exceeded"));
+        }
+
+        Ok(VmState::Continue)
+    });
+
+    let value = lua.load(source).set_name(file).eval::<mlua::Value>()?;
+    lua.from_value(value)
+}
+
 impl Recipe {
-    pub(crate) fn parse(file: &str, source: &str) -> mlua::Result<Self> {
-        let lua = Lua::new_with(StdLib::NONE, LuaOptions::default())?;
-        lua.sandbox(true)?;
-        lua.set_memory_limit(MEMORY_LIMIT)?;
-
-        let interrupts = AtomicU32::new(0);
-        lua.set_interrupt(move |_| {
-            if interrupts.fetch_add(1, Ordering::Relaxed) >= INTERRUPT_BUDGET {
-                return Err(mlua::Error::runtime(
-                    "recipe exceeded its evaluation budget",
-                ));
-            }
-
-            Ok(VmState::Continue)
-        });
-
-        let value = lua.load(source).set_name(file).eval::<mlua::Value>()?;
-        lua.from_value(value)
-    }
-
     pub(crate) fn resolve(
         &self,
         version: &str,
