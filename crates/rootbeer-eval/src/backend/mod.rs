@@ -101,13 +101,18 @@ impl Package<'_> {
         lines.extend(script.lines);
         lines.extend(link(bins));
 
-        Ok(self.build(
+        let compiled = self.build(
             self.name.to_string(),
             inputs,
             dependencies,
             variables,
             lines,
-        ))
+        );
+
+        Ok(Build {
+            allow: build.allow.clone(),
+            ..compiled
+        })
     }
 
     pub(crate) fn is_shared(&self) -> Result<bool, String> {
@@ -215,6 +220,7 @@ impl Package<'_> {
             version: self.resolved.values.version.to_string(),
             platform,
             sandbox: sandbox(platform).into(),
+            allow: BTreeSet::new(),
             inputs,
             dependencies,
             env,

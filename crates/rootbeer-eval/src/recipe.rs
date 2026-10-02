@@ -1,10 +1,10 @@
 use crate::template::Values;
 use mlua::{Lua, LuaOptions, LuaSerdeExt, StdLib, VmState};
-use rootbeer_drv::{Platform, Sha256};
+use rootbeer_drv::{Allow, Platform, Sha256};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde::de::IgnoredAny;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 const MEMORY_LIMIT: usize = 64 << 20;
@@ -130,6 +130,8 @@ pub(crate) struct Build {
     pub dependencies: Vec<Dependency>,
     #[serde(default)]
     pub libraries: Vec<String>,
+    #[serde(default)]
+    pub allow: BTreeSet<Allow>,
     pub steps: Option<Steps>,
 }
 

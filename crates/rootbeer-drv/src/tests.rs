@@ -13,6 +13,7 @@ fn build() -> Build {
         version: "1.3.2".to_string(),
         platform: Platform::X86_64Linux,
         sandbox: "linux-v1".to_string(),
+        allow: BTreeSet::new(),
         inputs: BTreeMap::from([("source".to_string(), SOURCE_KEY.parse().unwrap())]),
         dependencies: vec![Dependency {
             key: DEPENDENCY_KEY.parse().unwrap(),
@@ -64,6 +65,9 @@ fn every_build_field_changes_the_key() {
         ("version", |b| b.version = "1.3.1".to_string()),
         ("platform", |b| b.platform = Platform::Aarch64Linux),
         ("sandbox", |b| b.sandbox = "linux-v2".to_string()),
+        ("allow", |b| {
+            b.allow.insert(Allow::Ipc);
+        }),
         ("inputs", |b| {
             b.inputs
                 .insert("data".to_string(), DEPENDENCY_KEY.parse().unwrap());

@@ -20,6 +20,7 @@ impl Display for Build {
         writeln!(f, "version: {}", self.version)?;
         writeln!(f, "platform: {}", self.platform)?;
         writeln!(f, "sandbox: {}", self.sandbox)?;
+        list(f, "allow", self.allow.iter().map(|allow| allow.as_str()))?;
         map(
             f,
             "inputs",
@@ -27,7 +28,7 @@ impl Display for Build {
         )?;
         dependencies(f, &self.dependencies)?;
         map(f, "env", self.env.iter().map(|(n, v)| (n, v.as_str())))?;
-        list(f, "outputs", &self.outputs)?;
+        list(f, "outputs", self.outputs.iter().map(String::as_str))?;
         script(f, &self.script)
     }
 }
@@ -36,7 +37,7 @@ impl Display for Fetch {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         writeln!(f, "kind: fetch")?;
         writeln!(f, "sha256: {}", self.sha256.as_str())?;
-        list(f, "urls", &self.urls)
+        list(f, "urls", self.urls.iter().map(String::as_str))
     }
 }
 
@@ -100,7 +101,7 @@ fn map<'a>(
 fn list<'a>(
     f: &mut Formatter<'_>,
     name: &str,
-    items: impl IntoIterator<Item = &'a String>,
+    items: impl IntoIterator<Item = &'a str>,
 ) -> fmt::Result {
     let mut items = items.into_iter().peekable();
     if items.peek().is_none() {

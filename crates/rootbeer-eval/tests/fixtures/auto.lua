@@ -9,6 +9,7 @@ return {
 	},
 	build = {
 		backend = "autotools",
+		allow = { "local-network" },
 		configure = { "--disable-nls", "--with-z={dependencies.libz}" },
 		dependencies = {
 			{ package = "libz", version = "1.3.2", kind = "link_runtime" },

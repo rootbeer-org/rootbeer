@@ -38,6 +38,9 @@ pub struct Build {
     pub platform: Platform,
     pub sandbox: String,
 
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub allow: BTreeSet<Allow>,
+
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub inputs: BTreeMap<String, Key>,
 
@@ -98,6 +101,19 @@ pub enum DependencyKind {
     Runtime,
 }
 
+/// What a build needs beyond its sandbox profile's defaults. A profile that
+/// already isolates it, like a private network namespace, may grant it anyway.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(into = "&'static str", try_from = "String")]
+pub enum Allow {
+    /// Loopback, and Unix sockets inside the build's own directories
+    LocalNetwork,
+    /// System V and POSIX IPC
+    Ipc,
+    /// The host's shared `/tmp`, for tools that ignore `TMPDIR`
+    Tmp,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(into = "&'static str", try_from = "String")]
 pub enum Platform {
@@ -119,6 +135,18 @@ impl DependencyKind {
             DependencyKind::Build => "build",
             DependencyKind::Linked => "linked",
             DependencyKind::Runtime => "runtime",
+        }
+    }
+}
+
+impl Allow {
+    const ALL: [Allow; 3] = [Allow::LocalNetwork, Allow::Ipc, Allow::Tmp];
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Allow::LocalNetwork => "local-network",
+            Allow::Ipc => "ipc",
+            Allow::Tmp => "tmp",
         }
     }
 }
@@ -145,6 +173,12 @@ impl From<Platform> for &'static str {
     }
 }
 
+impl From<Allow> for &'static str {
+    fn from(allow: Allow) -> Self {
+        allow.as_str()
+    }
+}
+
 impl From<DependencyKind> for &'static str {
     fn from(kind: DependencyKind) -> Self {
         kind.as_str()
@@ -159,6 +193,17 @@ impl TryFrom<String> for Platform {
             .into_iter()
             .find(|platform| platform.as_str() == value)
             .ok_or_else(|| Error::invalid("platform", &value, "is not a supported platform"))
+    }
+}
+
+impl TryFrom<String> for Allow {
+    type Error = Error;
+
+    fn try_from(value: String) -> Result<Self, Error> {
+        Allow::ALL
+            .into_iter()
+            .find(|allow| allow.as_str() == value)
+            .ok_or_else(|| Error::invalid("allow", &value, "is not a sandbox permission"))
     }
 }
 

@@ -16,7 +16,7 @@ type Failure = Box<dyn std::error::Error>;
 
 /// Downloads a fetch into the store, trying each URL in order until one matches
 /// the hash. The file appears at its store path after verification.
-pub fn fetch(key: &Key, fetch: &Fetch) -> Result<PathBuf, Error> {
+pub(crate) fn fetch(key: &Key, fetch: &Fetch) -> Result<PathBuf, Error> {
     let path = fetch_path(key);
     let mut failures = Vec::new();
     for url in &fetch.urls {

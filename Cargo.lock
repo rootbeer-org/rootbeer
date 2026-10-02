@@ -1669,6 +1669,7 @@ dependencies = [
  "rootbeer-core",
  "rootbeer-drv",
  "rootbeer-eval",
+ "rootbeer-sandbox",
  "serde",
  "serde_json",
  "tempfile",

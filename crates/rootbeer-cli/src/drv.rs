@@ -1,10 +1,11 @@
-use rootbeer_drv::{Build, Derivation, Key, Platform};
-use rootbeer_eval::{Catalog, Host, Target};
+use rootbeer_drv::{output_path, Build, DependencyKind, Derivation, Key, Platform};
+use rootbeer_eval::{Catalog, Graph, Host, Target};
+use rootbeer_sandbox::Request;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
-use std::io::Write;
+use std::fs::{self, File};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 #[derive(clap::Args, Debug)]
@@ -32,6 +33,16 @@ enum Command {
     },
     /// Compare two `keys` outputs: added, removed, and changed packages, and why
     Diff { base: PathBuf, head: PathBuf },
+    /// Fetch, build, and check a package and its dependencies on this machine
+    Build {
+        /// `name` or `name@version`; defaults to the platform's default version
+        package: String,
+        /// Show build output as it happens, as well as logging it
+        #[arg(long = "verbose")]
+        is_verbose: bool,
+        #[command(flatten)]
+        sources: Sources,
+    },
 }
 
 #[derive(clap::Args, Debug)]
@@ -65,6 +76,11 @@ pub fn run(args: Args) {
         } => show(&sources, &package, platform),
         Command::Keys { sources } => keys(&sources),
         Command::Diff { base, head } => diff(&base, &head),
+        Command::Build {
+            package,
+            is_verbose,
+            sources,
+        } => build(&sources, &package, is_verbose),
     };
 
     if let Err(error) = result {
@@ -74,6 +90,129 @@ pub fn run(args: Args) {
 }
 
 fn show(sources: &Sources, package: &str, platform: Option<Platform>) -> Result<(), String> {
+    let (graph, target) = evaluate(sources, package, platform)?;
+    let package = graph
+        .packages
+        .get(&target)
+        .ok_or_else(|| format!("{target} did not evaluate"))?;
+
+    for (key, derivation) in graph.derivations_of(package) {
+        println!("# {key}\n{derivation}");
+    }
+
+    Ok(())
+}
+
+// Stand-in for rootbeer-store until phase 3: a marker per realized key, and logs.
+const VAR: &str = "/opt/rb/var";
+
+fn build(sources: &Sources, package: &str, is_verbose: bool) -> Result<(), String> {
+    let (graph, target) = evaluate(sources, package, None)?;
+    let package = graph
+        .packages
+        .get(&target)
+        .ok_or_else(|| format!("{target} did not evaluate"))?;
+
+    let mut order = Vec::new();
+    dependencies_first(&graph.derivations, &package.build, &mut order);
+    order.extend(package.check.clone());
+
+    let realized = Path::new(VAR).join("realized");
+    let logs = Path::new(VAR).join("log");
+    for directory in [&realized, &logs] {
+        fs::create_dir_all(directory)
+            .map_err(|error| format!("{}: {error}", directory.display()))?;
+    }
+
+    let jobs = std::thread::available_parallelism().map_err(|error| error.to_string())?;
+    for key in &order {
+        let marker = realized.join(key.as_str());
+        if marker.exists() {
+            continue;
+        }
+
+        let log = logs.join(key.as_str());
+        let mut output = Output {
+            log: File::create(&log).map_err(|error| format!("{}: {error}", log.display()))?,
+            terminal: is_verbose.then(io::stderr),
+        };
+
+        let mut request = Request {
+            key,
+            graph: &graph.derivations,
+            jobs,
+            log: &mut output,
+        };
+
+        eprintln!("realizing {key} {}", label(graph.derivations.get(key)));
+        rootbeer_sandbox::realize(&mut request)
+            .map_err(|error| format!("{error}\nlog: {}", log.display()))?;
+        File::create(&marker).map_err(|error| format!("{}: {error}", marker.display()))?;
+    }
+
+    let Some(Derivation::Build(build)) = graph.derivations.get(&package.build) else {
+        return Err(format!("{target} has no build derivation"));
+    };
+
+    let out = output_path(&package.build, &build.name, &build.version, "out");
+    println!("{}", out.display());
+    Ok(())
+}
+
+/// Build output, logged and also shown with `--verbose`.
+struct Output {
+    log: File,
+    terminal: Option<io::Stderr>,
+}
+
+impl Write for Output {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.log.write_all(bytes)?;
+        if let Some(terminal) = &mut self.terminal {
+            terminal.write_all(bytes)?;
+        }
+
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.log.flush()
+    }
+}
+
+fn dependencies_first(derivations: &BTreeMap<Key, Derivation>, key: &Key, order: &mut Vec<Key>) {
+    if order.contains(key) {
+        return;
+    }
+
+    if let Some(Derivation::Build(build)) = derivations.get(key) {
+        let dependencies = build
+            .dependencies
+            .iter()
+            .filter(|dependency| dependency.kind != DependencyKind::Runtime)
+            .map(|dependency| &dependency.key);
+
+        for named in build.inputs.values().chain(dependencies) {
+            dependencies_first(derivations, named, order);
+        }
+    }
+
+    order.push(key.clone());
+}
+
+fn label(derivation: Option<&Derivation>) -> String {
+    match derivation {
+        Some(Derivation::Build(build)) => format!("{}@{}", build.name, build.version),
+        Some(Derivation::Check(check)) => format!("check {}", check.name),
+        Some(Derivation::Fetch(_)) | None => "fetch".to_string(),
+    }
+}
+
+fn evaluate(
+    sources: &Sources,
+    package: &str,
+    platform: Option<Platform>,
+) -> Result<(Graph, Target), String> {
     let (catalog, hosts) = load(sources)?;
     let platform = match platform {
         Some(platform) => platform,
@@ -103,16 +242,8 @@ fn show(sources: &Sources, package: &str, platform: Option<Platform>) -> Result<
     let graph = catalog
         .evaluate(&hosts, std::slice::from_ref(&target))
         .map_err(|error| error.to_string())?;
-    let package = graph
-        .packages
-        .get(&target)
-        .ok_or_else(|| format!("{target} did not evaluate"))?;
 
-    for (key, derivation) in graph.derivations_of(package) {
-        println!("# {key}\n{derivation}");
-    }
-
-    Ok(())
+    Ok((graph, target))
 }
 
 fn keys(sources: &Sources) -> Result<(), String> {

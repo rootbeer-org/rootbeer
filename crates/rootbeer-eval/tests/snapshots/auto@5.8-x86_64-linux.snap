@@ -8,12 +8,14 @@ sha256: 1111111111111111111111111111111111111111111111111111111111111111
 urls:
   - https://example.com/auto-5.8.tar.gz
 
-# fa2jcvcjsk2z5sdq2h3cdrx25pwbu67n
+# pqwizqi5zdl5qjftnchmpugmmlhsk3vh
 kind: build
 name: auto
 version: 5.8
 platform: x86_64-linux
 sandbox: linux-v1
+allow:
+  - local-network
 inputs:
   source: gskd7oqlctnsyj5ziiallfivhtzbfp27
 dependencies:
