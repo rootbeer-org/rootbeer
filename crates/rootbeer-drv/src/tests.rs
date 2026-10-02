@@ -226,7 +226,7 @@ fn keys_and_hashes_reject_malformed_strings() {
 }
 
 #[test]
-fn output_paths_suffix_non_default_outputs() {
+fn store_paths_follow_the_schema_layout() {
     let key: Key = DEPENDENCY_KEY.parse().unwrap();
 
     assert_eq!(
@@ -236,6 +236,10 @@ fn output_paths_suffix_non_default_outputs() {
     assert_eq!(
         output_path(&key, "zlib", "1.3.2", "dev"),
         PathBuf::from(format!("/opt/rb/store/{DEPENDENCY_KEY}-zlib-1.3.2-dev"))
+    );
+    assert_eq!(
+        fetch_path(&key),
+        PathBuf::from(format!("/opt/rb/store/{DEPENDENCY_KEY}-fetch"))
     );
 }
 

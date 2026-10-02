@@ -206,5 +206,10 @@ pub fn output_path(key: &Key, name: &str, version: &str, output: &str) -> PathBu
     }
 }
 
+/// Store path of a fetched file. Fetches have no name, and their URLs aren't keyed.
+pub fn fetch_path(key: &Key) -> PathBuf {
+    format!("{STORE_ROOT}/{key}-fetch").into()
+}
+
 #[cfg(test)]
 mod tests;

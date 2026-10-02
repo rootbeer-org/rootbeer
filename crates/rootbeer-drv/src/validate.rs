@@ -44,13 +44,21 @@ const OUTPUT_NAME: Pattern = Pattern {
     rest: |c| c.is_ascii_lowercase() || c.is_ascii_digit(),
 };
 
-const SANDBOX_ENV: [&str; 6] = [
+const SANDBOX_ENV: [&str; 14] = [
     "PATH",
     "HOME",
     "TMPDIR",
     "LC_ALL",
     "TZ",
     "SOURCE_DATE_EPOCH",
+    "CC",
+    "CXX",
+    "CONFIG_SHELL",
+    "ZERO_AR_DATE",
+    "CPATH",
+    "LIBRARY_PATH",
+    "PKG_CONFIG_PATH",
+    "CMAKE_PREFIX_PATH",
 ];
 const SANDBOX_INPUTS: [&str; 3] = ["deps", "jobs", "target"];
 
