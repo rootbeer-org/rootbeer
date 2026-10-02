@@ -239,10 +239,20 @@ impl<'a> Evaluation<'a> {
             rpaths: Vec::new(),
         };
 
+        // Only `link_runtime` needs an rpath
         let is_shared = package.is_shared().map_err(recipe_error)?;
-        let linked = dependencies
+        let linked = package
+            .resolved
+            .spec
+            .build
             .iter()
-            .filter(|dependency| dependency.kind == DependencyKind::Linked)
+            .flat_map(|build| &build.dependencies)
+            .filter(|declared| matches!(declared.kind, RecipeKind::LinkRuntime))
+            .filter_map(|declared| {
+                dependencies
+                    .iter()
+                    .find(|dependency| dependency.name == declared.package)
+            })
             .filter(|dependency| self.shared.contains(&dependency.key))
             .filter_map(|dependency| package.resolved.values.dependencies.get(&dependency.name))
             .map(|path| format!("{path}/lib"));

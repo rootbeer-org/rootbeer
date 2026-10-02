@@ -11,7 +11,7 @@ return {
 		backend = "autotools",
 		configure = { "--disable-nls", "--with-z={dependencies.libz}" },
 		dependencies = {
-			{ package = "libz", version = "1.3.2", kind = "link" },
+			{ package = "libz", version = "1.3.2", kind = "link_runtime" },
 		},
 	},
 	outputs = {
