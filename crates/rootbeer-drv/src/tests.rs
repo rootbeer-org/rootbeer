@@ -172,10 +172,6 @@ fn invalid_derivations_have_no_key() {
         }),
         ("inputs", |b| {
             b.inputs
-                .insert("deps".to_string(), DEPENDENCY_KEY.parse().unwrap());
-        }),
-        ("inputs", |b| {
-            b.inputs
                 .insert("out".to_string(), DEPENDENCY_KEY.parse().unwrap());
         }),
         ("dependencies[1]", |b| {

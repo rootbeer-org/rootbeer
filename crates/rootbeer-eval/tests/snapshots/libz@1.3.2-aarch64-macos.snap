@@ -8,7 +8,7 @@ sha256: 6666666666666666666666666666666666666666666666666666666666666666
 urls:
   - https://example.com/libz-1.3.2.tar.xz
 
-# htp4z4thjxnlw64nt6rj5xlvu4osy7of
+# e46cdqj453chajmpogvdohp3rac4c2t4
 kind: build
 name: libz
 version: 1.3.2
@@ -34,15 +34,15 @@ script: |
   -CFLAGS = -O3
   +CFLAGS = -O2
   RB_PATCH
-  ./configure --prefix=/ "--with-tool=${deps}"
+  ./configure "--prefix=${out}" --with-tool=/opt/rb/store/e3rtcvq5o2vghgq5chw5txhptocnekd2-tool-2.0.0
   make "-j${jobs}" VERSION=1.3
-  make "DESTDIR=${out}" install
+  make install
   sh -c "echo \"\$1\" > ${out}/note" note "it's \`done\`"
 
-# hhabwqau3vnj6otgrxiucmfc4chs2xsn
+# 2mdggg2z4thfwj7f2t6g52ohquxr75ze
 kind: check
 name: libz
-target: htp4z4thjxnlw64nt6rj5xlvu4osy7of
+target: e46cdqj453chajmpogvdohp3rac4c2t4
 platform: aarch64-macos
 sandbox: darwin-v1
 env:

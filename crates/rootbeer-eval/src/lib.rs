@@ -10,7 +10,7 @@ mod recipe;
 mod template;
 
 use recipe::{DependencyKind as RecipeKind, Recipe};
-use rootbeer_drv::{Dependency, DependencyKind, Derivation, Key, Platform};
+use rootbeer_drv::{Dependency, DependencyKind, Derivation, Key, Platform, output_path};
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -219,13 +219,16 @@ impl<'a> Evaluation<'a> {
             .get(&target.platform)
             .ok_or_else(|| recipe_error("no host toolchain for this platform".into()))?;
 
-        let resolved = recipe
+        let mut resolved = recipe
             .resolve(&target.version, target.platform)
             .map_err(recipe_error)?;
 
         self.stack.push(target.clone());
         let dependencies = self.dependencies(&resolved, target.platform);
         self.stack.pop();
+
+        let (dependencies, paths) = dependencies?;
+        resolved.values.dependencies = paths;
 
         let package = backend::Package {
             name: &recipe.name,
@@ -234,7 +237,7 @@ impl<'a> Evaluation<'a> {
         };
 
         let package = self
-            .lower(recipe, &package, dependencies?)
+            .lower(recipe, &package, dependencies)
             .map_err(recipe_error)?;
 
         let key = package.build.clone();
@@ -243,17 +246,19 @@ impl<'a> Evaluation<'a> {
     }
 
     // Sorted by name, then kind, because dependency order is part of the key.
+    // Paths are what `{dependencies.<name>}` renders for a build
     fn dependencies(
         &mut self,
         resolved: &recipe::Resolved<'a>,
         platform: Platform,
-    ) -> Result<Vec<Dependency>, Error> {
+    ) -> Result<(Vec<Dependency>, BTreeMap<String, String>), Error> {
         let declared = match (&resolved.spec.prebuilt, &resolved.spec.build) {
             (None, Some(build)) => build.dependencies.as_slice(),
             _ => &[],
         };
 
         let mut dependencies = Vec::new();
+        let mut paths = BTreeMap::new();
         for declared in declared {
             let key = self.package(&Target {
                 name: declared.package.clone(),
@@ -268,6 +273,11 @@ impl<'a> Evaluation<'a> {
                 RecipeKind::Runtime => &[DependencyKind::Runtime],
             };
 
+            if !matches!(declared.kind, RecipeKind::Runtime) {
+                let path = output_path(&key, &declared.package, &declared.version, "out");
+                paths.insert(declared.package.clone(), path.display().to_string());
+            }
+
             dependencies.extend(kinds.iter().map(|kind| Dependency {
                 key: key.clone(),
                 name: declared.package.clone(),
@@ -276,7 +286,7 @@ impl<'a> Evaluation<'a> {
         }
 
         dependencies.sort_by(|a, b| (&a.name, a.kind).cmp(&(&b.name, b.kind)));
-        Ok(dependencies)
+        Ok((dependencies, paths))
     }
 
     fn lower(

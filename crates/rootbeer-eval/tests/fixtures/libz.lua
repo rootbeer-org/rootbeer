@@ -20,13 +20,17 @@ return {
 		libraries = { "lib/libz.a", "lib/libz.{shared_extension}" },
 		steps = {
 			configure = {
-				{ "./configure", "--prefix=/", "--with-tool={dependencies}" },
+				{
+					"./configure",
+					"--prefix={prefix}",
+					"--with-tool={dependencies.tool}",
+				},
 			},
 			build = {
 				{ "make", "-j{jobs}", "VERSION={major}.{minor}" },
 			},
 			install = {
-				{ "make", "DESTDIR={prefix}", "install" },
+				{ "make", "install" },
 				{
 					"sh",
 					"-c",

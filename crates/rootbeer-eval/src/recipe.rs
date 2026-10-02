@@ -286,6 +286,7 @@ impl Recipe {
                 target: platform_spec.target.as_deref(),
                 commit: entry.commit.as_deref(),
                 platform,
+                dependencies: BTreeMap::new(),
             },
             sha256,
             license,

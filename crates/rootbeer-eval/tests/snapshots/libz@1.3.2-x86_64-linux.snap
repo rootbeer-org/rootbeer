@@ -8,7 +8,7 @@ sha256: 6666666666666666666666666666666666666666666666666666666666666666
 urls:
   - https://example.com/libz-1.3.2.tar.xz
 
-# f5bo4mtpggcspiokfi2mbylipiq5viqa
+# b6c5y4isqpbp3zazamvelgiwgq3eatpj
 kind: build
 name: libz
 version: 1.3.2
@@ -34,15 +34,15 @@ script: |
   -CFLAGS = -O3
   +CFLAGS = -O2
   RB_PATCH
-  ./configure --prefix=/ "--with-tool=${deps}"
+  ./configure "--prefix=${out}" --with-tool=/opt/rb/store/ydbvnsmjxthg5pnlcpdou7oy2xyqh6p3-tool-2.0.0
   make "-j${jobs}" VERSION=1.3
-  make "DESTDIR=${out}" install
+  make install
   sh -c "echo \"\$1\" > ${out}/note" note "it's \`done\`"
 
-# wlsaa34ywve6br2ngthcvkedhxuelqk3
+# qk53pwcdvrzu7ks372mfeibfhqhpoxvg
 kind: check
 name: libz
-target: f5bo4mtpggcspiokfi2mbylipiq5viqa
+target: b6c5y4isqpbp3zazamvelgiwgq3eatpj
 platform: x86_64-linux
 sandbox: linux-v1
 env:

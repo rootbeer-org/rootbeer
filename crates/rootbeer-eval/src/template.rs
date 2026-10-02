@@ -1,11 +1,8 @@
 use rootbeer_drv::Platform;
+use std::collections::BTreeMap;
 
 // These are inherently machine dependent, so we use variables for them
-const VARIABLES: [(&str, &str); 3] = [
-    ("{prefix}", "${out}"),
-    ("{jobs}", "${jobs}"),
-    ("{dependencies}", "${deps}"),
-];
+const VARIABLES: [(&str, &str); 2] = [("{prefix}", "${out}"), ("{jobs}", "${jobs}")];
 
 /// What a recipe's templates may name for one version on one platform.
 #[derive(Clone)]
@@ -15,6 +12,7 @@ pub(crate) struct Values<'a> {
     pub target: Option<&'a str>,
     pub commit: Option<&'a str>,
     pub platform: Platform,
+    pub dependencies: BTreeMap<String, String>,
 }
 
 impl Values<'_> {
@@ -54,6 +52,20 @@ impl Values<'_> {
 
         if let Some(target) = self.target {
             value = value.replace("{target}", target);
+        }
+
+        if value.contains("{dependencies}") {
+            return Err("`{dependencies}` must name one: `{dependencies.<name>}`".into());
+        }
+
+        value = self.dependencies.iter().fold(value, |value, (name, path)| {
+            value.replace(&format!("{{dependencies.{name}}}"), path)
+        });
+
+        if value.contains("{dependencies.") {
+            return Err(format!(
+                "`{text}` names an undeclared build or linked dependency"
+            ));
         }
 
         if value.contains("{runtime:") {
@@ -144,7 +156,6 @@ mod tests {
             "a;b",
             "-j{jobs}",
             "DESTDIR={prefix}",
-            "{dependencies}/include",
             "{prefix}{jobs}",
         ];
 
@@ -158,26 +169,39 @@ mod tests {
         let output = Command::new("/bin/sh")
             .args(["-c", &script])
             .env_clear()
-            .envs([
-                ("out", "/o"),
-                ("jobs", "4"),
-                ("deps", "/d"),
-                ("HOME", "/home"),
-            ])
+            .envs([("out", "/o"), ("jobs", "4"), ("HOME", "/home")])
             .output()
             .unwrap();
 
         let expected = words
             .iter()
-            .map(|word| {
-                word.replace("{prefix}", "/o")
-                    .replace("{jobs}", "4")
-                    .replace("{dependencies}", "/d")
-            })
+            .map(|word| word.replace("{prefix}", "/o").replace("{jobs}", "4"))
             .chain(["/o/a b/$c".to_string()])
             .map(|word| word + "\0")
             .collect::<String>();
 
         assert_eq!(String::from_utf8(output.stdout).unwrap(), expected);
+    }
+
+    #[test]
+    fn dependency_placeholders_name_a_declared_dependency() {
+        let values = Values {
+            version: "1",
+            tag: "1".to_string(),
+            target: None,
+            commit: None,
+            platform: Platform::X86_64Linux,
+            dependencies: BTreeMap::from([("zlib".to_string(), "/z".to_string())]),
+        };
+
+        assert_eq!(values.literal("{dependencies.zlib}/lib").unwrap(), "/z/lib");
+        assert_eq!(
+            values.literal("{dependencies}").unwrap_err(),
+            "`{dependencies}` must name one: `{dependencies.<name>}`"
+        );
+        assert_eq!(
+            values.command(&["{dependencies.xz}"]).unwrap_err(),
+            "`{dependencies.xz}` names an undeclared build or linked dependency"
+        );
     }
 }

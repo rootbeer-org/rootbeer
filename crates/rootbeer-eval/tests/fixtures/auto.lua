@@ -9,7 +9,7 @@ return {
 	},
 	build = {
 		backend = "autotools",
-		configure = { "--disable-nls", "--with-z={dependencies}" },
+		configure = { "--disable-nls", "--with-z={dependencies.libz}" },
 		dependencies = {
 			{ package = "libz", version = "1.3.2", kind = "link" },
 		},

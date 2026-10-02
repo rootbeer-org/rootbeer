@@ -116,8 +116,16 @@ impl Package<'_> {
             .as_ref()
             .map(|build| build.libraries.as_slice());
 
-        // TODO: `{prefix}` renders as `${out}`, but it isn't used in checks
-        let mut lines = values.commands(commands.unwrap_or_default())?;
+        let commands = commands.unwrap_or_default();
+        if commands
+            .iter()
+            .flatten()
+            .any(|word| word.contains("{prefix}"))
+        {
+            return Err("checks have no `{prefix}`; they run against `${target}`".into());
+        }
+
+        let mut lines = values.commands(commands)?;
         for library in libraries.unwrap_or_default() {
             lines.push(format!(
                 "test -e {}",

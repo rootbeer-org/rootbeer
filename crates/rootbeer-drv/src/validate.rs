@@ -44,6 +44,7 @@ const OUTPUT_NAME: Pattern = Pattern {
     rest: |c| c.is_ascii_lowercase() || c.is_ascii_digit(),
 };
 
+const SANDBOX_INPUTS: [&str; 2] = ["jobs", "target"];
 const SANDBOX_ENV: [&str; 14] = [
     "PATH",
     "HOME",
@@ -60,7 +61,6 @@ const SANDBOX_ENV: [&str; 14] = [
     "PKG_CONFIG_PATH",
     "CMAKE_PREFIX_PATH",
 ];
-const SANDBOX_INPUTS: [&str; 3] = ["deps", "jobs", "target"];
 
 impl Pattern {
     fn check(&self, field: &str, value: &str) -> Result<(), Error> {
