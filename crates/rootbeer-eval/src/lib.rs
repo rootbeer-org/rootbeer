@@ -169,6 +169,7 @@ impl Catalog {
             hosts,
             graph: Graph::default(),
             stack: Vec::new(),
+            shared: BTreeSet::new(),
         };
 
         targets
@@ -184,6 +185,7 @@ struct Evaluation<'a> {
     hosts: &'a BTreeMap<Platform, Host>,
     graph: Graph,
     stack: Vec<Target>,
+    shared: BTreeSet<Key>,
 }
 
 impl<'a> Evaluation<'a> {
@@ -230,15 +232,34 @@ impl<'a> Evaluation<'a> {
         let (dependencies, paths) = dependencies?;
         resolved.values.dependencies = paths;
 
-        let package = backend::Package {
+        let mut package = backend::Package {
             name: &recipe.name,
             host,
             resolved,
+            rpaths: Vec::new(),
         };
+
+        let is_shared = package.is_shared().map_err(recipe_error)?;
+        let linked = dependencies
+            .iter()
+            .filter(|dependency| dependency.kind == DependencyKind::Linked)
+            .filter(|dependency| self.shared.contains(&dependency.key))
+            .filter_map(|dependency| package.resolved.values.dependencies.get(&dependency.name))
+            .map(|path| format!("{path}/lib"));
+
+        package.rpaths = is_shared
+            .then(|| "${out}/lib".to_string())
+            .into_iter()
+            .chain(linked)
+            .collect();
 
         let package = self
             .lower(recipe, &package, dependencies)
             .map_err(recipe_error)?;
+
+        if is_shared {
+            self.shared.insert(package.build.clone());
+        }
 
         let key = package.build.clone();
         self.graph.packages.insert(target.clone(), package);

@@ -10,6 +10,7 @@ use crate::recipe::{ArchiveFormat, Backend, Bins, Resolved, Source};
 use crate::template::{path, quote};
 use rootbeer_drv::{Build, Check, Dependency, DependencyKind, Fetch, Key, Platform};
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
 const PATCH_END: &str = "RB_PATCH";
 
@@ -18,6 +19,7 @@ pub(crate) struct Package<'a> {
     pub name: &'a str,
     pub host: &'a Host,
     pub resolved: Resolved<'a>,
+    pub rpaths: Vec<String>,
 }
 
 /// What a backend emits to configure and build a package correctly.
@@ -92,6 +94,10 @@ impl Package<'_> {
         variables.extend(script.env);
 
         let mut lines = self.prepare(source)?;
+        if matches!(build.backend, Backend::Autotools | Backend::Custom) {
+            lines.extend(rpath(&self.rpaths));
+        }
+
         lines.extend(script.lines);
         lines.extend(link(bins));
 
@@ -104,11 +110,26 @@ impl Package<'_> {
         ))
     }
 
+    pub(crate) fn is_shared(&self) -> Result<bool, String> {
+        let libraries = self
+            .resolved
+            .spec
+            .build
+            .iter()
+            .flat_map(|build| &build.libraries)
+            .map(|library| self.resolved.values.literal(library))
+            .collect::<Result<Vec<_>, String>>()?;
+
+        Ok(libraries.iter().any(|library| {
+            let extension = Path::new(library).extension();
+            extension.is_some_and(|extension| extension == "so" || extension == "dylib")
+        }))
+    }
+
     /// Checks run the recipe's commands and confirm that outputs exist.
     pub(crate) fn check(&self, target: &Key) -> Result<Option<Check>, String> {
         let values = &self.resolved.values;
         let commands = self.resolved.spec.outputs.checks.as_deref();
-        // TODO: Key libraries on the build once $deps stages them; they shape dependents' builds
         let libraries = self
             .resolved
             .spec
@@ -232,6 +253,20 @@ fn link(bins: Option<&Bins>) -> Vec<String> {
     }
 
     [vec![r#"mkdir -p "${out}/bin""#.into()], links].concat()
+}
+
+// Store paths are fixed, so outputs find shared libraries without relocation.
+fn rpath(directories: &[String]) -> Option<String> {
+    if directories.is_empty() {
+        return None;
+    }
+
+    let flags = directories
+        .iter()
+        .map(|directory| format!("-Wl,-rpath,{directory}"))
+        .collect::<Vec<_>>();
+
+    Some(format!(r#"export LDFLAGS="{}""#, flags.join(" ")))
 }
 
 fn env(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
