@@ -6,11 +6,14 @@ rust-version.workspace = true
 
 [dependencies]
 data-encoding = "2"
+goblin = { version = "0.10.7", default-features = false, features = ["std", "mach32", "mach64"] }
+memchr = "2"
 rootbeer-drv = { path = "../rootbeer-drv" }
 rustix = { version = "1", features = ["process"] }
 sha2 = "0.10"
 tempfile = "3"
 ureq = "3"
+walkdir = "2"
 
 [lints.clippy]
 unwrap_used = "deny"

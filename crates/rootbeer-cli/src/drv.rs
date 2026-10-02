@@ -126,9 +126,21 @@ fn build(sources: &Sources, package: &str, is_verbose: bool) -> Result<(), Strin
     }
 
     let jobs = std::thread::available_parallelism().map_err(|error| error.to_string())?;
+    let mut references = BTreeMap::new();
+
     for key in &order {
         let marker = realized.join(key.as_str());
         if marker.exists() {
+            let text = fs::read_to_string(&marker)
+                .map_err(|error| format!("{}: {error}", marker.display()))?;
+
+            let keys = text
+                .lines()
+                .map(str::parse)
+                .collect::<Result<BTreeSet<Key>, _>>()
+                .map_err(|error| format!("{}: {error}", marker.display()))?;
+
+            references.insert(key.clone(), keys);
             continue;
         }
 
@@ -141,14 +153,30 @@ fn build(sources: &Sources, package: &str, is_verbose: bool) -> Result<(), Strin
         let mut request = Request {
             key,
             graph: &graph.derivations,
+            references: &references,
             jobs,
             log: &mut output,
         };
 
         eprintln!("realizing {key} {}", label(graph.derivations.get(key)));
-        rootbeer_sandbox::realize(&mut request)
+        let found = rootbeer_sandbox::realize(&mut request)
             .map_err(|error| format!("{error}\nlog: {}", log.display()))?;
-        File::create(&marker).map_err(|error| format!("{}: {error}", marker.display()))?;
+
+        let text = found
+            .iter()
+            .map(|key| format!("{key}\n"))
+            .collect::<String>();
+
+        let staged = marker.with_extension("tmp");
+        File::create(&staged)
+            .and_then(|mut file| {
+                file.write_all(text.as_bytes())?;
+                file.sync_all()
+            })
+            .and_then(|()| fs::rename(&staged, &marker))
+            .map_err(|error| format!("{}: {error}", marker.display()))?;
+
+        references.insert(key.clone(), found);
     }
 
     let Some(Derivation::Build(build)) = graph.derivations.get(&package.build) else {
