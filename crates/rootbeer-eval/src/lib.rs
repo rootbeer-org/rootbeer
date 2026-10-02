@@ -226,12 +226,10 @@ impl<'a> Evaluation<'a> {
             .map_err(recipe_error)?;
 
         self.stack.push(target.clone());
-        let dependencies = self.dependencies(&resolved, target.platform);
+        let dependencies = self.dependencies(&mut resolved, target.platform);
         self.stack.pop();
 
-        let (dependencies, paths) = dependencies?;
-        resolved.values.dependencies = paths;
-
+        let (dependencies, linked) = dependencies?;
         let mut package = backend::Package {
             name: &recipe.name,
             host,
@@ -239,24 +237,7 @@ impl<'a> Evaluation<'a> {
             rpaths: Vec::new(),
         };
 
-        // Only `link_runtime` needs an rpath
         let is_shared = package.is_shared().map_err(recipe_error)?;
-        let linked = package
-            .resolved
-            .spec
-            .build
-            .iter()
-            .flat_map(|build| &build.dependencies)
-            .filter(|declared| matches!(declared.kind, RecipeKind::LinkRuntime))
-            .filter_map(|declared| {
-                dependencies
-                    .iter()
-                    .find(|dependency| dependency.name == declared.package)
-            })
-            .filter(|dependency| self.shared.contains(&dependency.key))
-            .filter_map(|dependency| package.resolved.values.dependencies.get(&dependency.name))
-            .map(|path| format!("{path}/lib"));
-
         package.rpaths = is_shared
             .then(|| "${out}/lib".to_string())
             .into_iter()
@@ -277,19 +258,20 @@ impl<'a> Evaluation<'a> {
     }
 
     // Sorted by name, then kind, because dependency order is part of the key.
-    // Paths are what `{dependencies.<name>}` renders for a build
+    // Fills `{dependencies.<name>}` and returns the `lib/` of shared `link_runtime`
+    // dependencies: an unused rpath would be a false runtime reference.
     fn dependencies(
         &mut self,
-        resolved: &recipe::Resolved<'a>,
+        resolved: &mut recipe::Resolved<'a>,
         platform: Platform,
-    ) -> Result<(Vec<Dependency>, BTreeMap<String, String>), Error> {
+    ) -> Result<(Vec<Dependency>, Vec<String>), Error> {
         let declared = match (&resolved.spec.prebuilt, &resolved.spec.build) {
             (None, Some(build)) => build.dependencies.as_slice(),
             _ => &[],
         };
 
         let mut dependencies = Vec::new();
-        let mut paths = BTreeMap::new();
+        let mut linked = Vec::new();
         for declared in declared {
             let key = self.package(&Target {
                 name: declared.package.clone(),
@@ -304,9 +286,18 @@ impl<'a> Evaluation<'a> {
                 RecipeKind::Runtime => &[DependencyKind::Runtime],
             };
 
+            let path = output_path(&key, &declared.package, &declared.version, "out")
+                .display()
+                .to_string();
+            if matches!(declared.kind, RecipeKind::LinkRuntime) && self.shared.contains(&key) {
+                linked.push(format!("{path}/lib"));
+            }
+
             if !matches!(declared.kind, RecipeKind::Runtime) {
-                let path = output_path(&key, &declared.package, &declared.version, "out");
-                paths.insert(declared.package.clone(), path.display().to_string());
+                resolved
+                    .values
+                    .dependencies
+                    .insert(declared.package.clone(), path);
             }
 
             dependencies.extend(kinds.iter().map(|kind| Dependency {
@@ -317,7 +308,7 @@ impl<'a> Evaluation<'a> {
         }
 
         dependencies.sort_by(|a, b| (&a.name, a.kind).cmp(&(&b.name, b.kind)));
-        Ok((dependencies, paths))
+        Ok((dependencies, linked))
     }
 
     fn lower(

@@ -138,12 +138,13 @@ impl Package<'_> {
             .map(|build| build.libraries.as_slice());
 
         let commands = commands.unwrap_or_default();
-        if commands
-            .iter()
-            .flatten()
-            .any(|word| word.contains("{prefix}"))
-        {
-            return Err("checks have no `{prefix}`; they run against `${target}`".into());
+        let is_build_path =
+            |word: &String| word.contains("{prefix}") || word.contains("{dependencies");
+        if commands.iter().flatten().any(is_build_path) {
+            return Err(
+                "checks have no `{prefix}` or `{dependencies.<name>}`; they run against `${target}`"
+                    .into(),
+            );
         }
 
         let mut lines = values.commands(commands)?;

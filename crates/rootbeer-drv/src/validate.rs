@@ -31,7 +31,7 @@ const INPUT_NAME: Pattern = Pattern {
     rest: |c| matches!(c, b'a'..=b'z' | b'0'..=b'9' | b'_'),
 };
 
-// Lowercase names are the sandbox's ($out, $deps, inputs), so env can never shadow one.
+// Lowercase names are the sandbox's ($out, $jobs, inputs), so env can never shadow one.
 const ENV_NAME: Pattern = Pattern {
     reason: "must match [A-Z][A-Za-z0-9_]*",
     first: |c| c.is_ascii_uppercase(),
