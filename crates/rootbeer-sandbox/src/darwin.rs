@@ -126,3 +126,31 @@ fn rules<'a>(paths: impl IntoIterator<Item = &'a str>) -> String {
         .collect::<Vec<_>>()
         .join(" ")
 }
+
+pub(crate) fn system() -> Result<String, String> {
+    let sdk = output("/usr/bin/xcrun", &["--show-sdk-version"])?;
+    let clang = output("/usr/bin/cc", &["--version"])?;
+
+    // The first line reads "Apple clang version 21.0.0 (clang-2100.3.34.2)".
+    let build = clang
+        .split_once("(clang-")
+        .and_then(|(_, rest)| rest.split_once(')'))
+        .map(|(build, _)| build)
+        .ok_or_else(|| format!("cc --version printed {clang:?}"))?;
+
+    Ok(format!("macos-sdk-{}-clang-{build}", sdk.trim()))
+}
+
+fn output(program: &str, args: &[&str]) -> Result<String, String> {
+    let output = Command::new(program)
+        .args(args)
+        .env_clear()
+        .output()
+        .map_err(|error| format!("{program}: {error}"))?;
+
+    if !output.status.success() {
+        return Err(format!("{program} {}", output.status));
+    }
+
+    String::from_utf8(output.stdout).map_err(|error| format!("{program}: {error}"))
+}

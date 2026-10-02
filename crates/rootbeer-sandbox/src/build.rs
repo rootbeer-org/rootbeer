@@ -129,6 +129,32 @@ impl Sandbox {
             ));
         };
 
+        // Keys name the toolchain, so building with another one would publish
+        // different output under the same key.
+        if let Some(expected) = env.get("RB_SYSTEM") {
+            let system = match runnable {
+                Profile::Darwin => darwin::system(),
+                Profile::Linux => linux::system(),
+            };
+
+            let actual = system.map_err(|reason| {
+                failure(
+                    request.key,
+                    &format!("can't identify the toolchain, {reason}"),
+                )
+            })?;
+
+            if *expected != actual {
+                return Err(failure(
+                    request.key,
+                    &format!(
+                        "was evaluated for the toolchain {expected}, but this machine has \
+                         {actual}. Pass a --host file naming it to build here."
+                    ),
+                ));
+            }
+        }
+
         let mut variables = env.clone();
         variables.extend(FIXED.map(|(name, value)| (name.to_string(), value.to_string())));
         variables.insert("jobs".into(), request.jobs.to_string());

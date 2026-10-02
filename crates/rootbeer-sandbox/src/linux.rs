@@ -74,3 +74,8 @@ pub(crate) fn command(reads: &[String], directory: &Path) -> Command {
     command.args(["--chdir", &format!("{WORKSPACE}/src"), "--"]);
     command
 }
+
+pub(crate) fn system() -> Result<String, String> {
+    std::env::var("RB_HOST_SYSTEM")
+        .map_err(|_| "RB_HOST_SYSTEM is unset outside the builder image".to_string())
+}
