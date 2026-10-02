@@ -1,0 +1,24 @@
+[package]
+name = "rootbeer-sandbox"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+
+[dependencies]
+data-encoding = "2"
+rootbeer-drv = { path = "../rootbeer-drv" }
+sha2 = "0.10"
+tempfile = "3"
+ureq = "3"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+unreachable = "deny"
+todo = "deny"
+unimplemented = "deny"
+indexing_slicing = "deny"
+arithmetic_side_effects = "deny"
+cast_possible_truncation = "deny"
+cast_sign_loss = "deny"

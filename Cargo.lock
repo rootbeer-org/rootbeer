@@ -1776,6 +1776,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rootbeer-sandbox"
+version = "0.1.0"
+dependencies = [
+ "data-encoding",
+ "rootbeer-drv",
+ "sha2 0.10.9",
+ "tempfile",
+ "ureq",
+]
+
+[[package]]
 name = "rootbeer-store"
 version = "0.1.0"
 dependencies = [
