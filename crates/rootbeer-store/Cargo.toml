@@ -1,0 +1,25 @@
+[package]
+name = "rootbeer-store"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+
+[dependencies]
+rootbeer-drv = { path = "../rootbeer-drv" }
+rusqlite = { version = "0.40", features = ["bundled"] }
+tar = "0.4"
+tempfile = "3"
+walkdir = "2"
+zstd = { version = "0.14", default-features = false }
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+unreachable = "deny"
+todo = "deny"
+unimplemented = "deny"
+indexing_slicing = "deny"
+arithmetic_side_effects = "deny"
+cast_possible_truncation = "deny"
+cast_sign_loss = "deny"
