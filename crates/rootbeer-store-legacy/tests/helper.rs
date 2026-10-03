@@ -4,7 +4,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-use rootbeer_store::{hash_tree, stream, Store};
+use rootbeer_store_legacy::{hash_tree, stream, Store};
 
 fn sample(root: &Path) {
     fs::create_dir_all(root.join("bin")).unwrap();
@@ -104,8 +104,9 @@ fn helper_reports_its_release_and_protocols() {
         .unwrap();
 
     assert!(output.status.success());
-    let reported: rootbeer_store::layout::Helper = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(reported, rootbeer_store::helper::current());
+    let reported: rootbeer_store_legacy::layout::Helper =
+        serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(reported, rootbeer_store_legacy::helper::current());
 }
 
 #[test]

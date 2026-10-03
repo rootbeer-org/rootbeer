@@ -340,7 +340,7 @@ mod tests {
             let directory = self
                 .downloads
                 .get_or_insert_with(|| tempfile::tempdir().unwrap());
-            let sha256 = rootbeer_store::hash_bytes(bytes);
+            let sha256 = rootbeer_store_legacy::hash_bytes(bytes);
             let path = directory.path().join(&sha256);
             fs::write(&path, bytes).unwrap();
             Ok(DownloadedFile { path, sha256 })
@@ -589,7 +589,10 @@ mod tests {
             pinned.source.as_deref(),
             Some("https://example.com/App_1.1.dmg")
         );
-        assert_eq!(pinned.sha256, Some(rootbeer_store::hash_bytes(b"one")));
+        assert_eq!(
+            pinned.sha256,
+            Some(rootbeer_store_legacy::hash_bytes(b"one"))
+        );
 
         remote.text.insert(
             "https://example.com/appcast.xml".into(),

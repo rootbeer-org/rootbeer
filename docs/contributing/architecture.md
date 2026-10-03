@@ -8,7 +8,7 @@ declarative interface.
 
 | Crate | Owns |
 |---|---|
-| `rootbeer-store` | Content hashing, normalized trees, and storage |
+| `rootbeer-store-legacy` | Content hashing, normalized trees, and storage (the current `/opt/rootbeer` store, deleted at cutover) |
 | `rootbeer-package` | Package/recipe models, Lua recipe parsing, dependency graphs, resolution, verified downloads and installation |
 | `rootbeer-build` | Resolved build plans, backend phases, process execution, and persistent build results |
 | `rootbeer-packaging` | Release discovery, qualification, bundling, signing, and publication |
@@ -47,7 +47,7 @@ records the layout version so a newer `rb` migrates an older one.
 `/opt/rootbeer` is owned by root and shared by every user without a daemon. Users
 insert through `rb-store`, a small setuid-root helper installed at
 `/opt/rootbeer/bin/rb-store` by the one-time sudo setup. `rb` streams the tree to it on
-stdin (`rootbeer_store::stream`); the helper never opens a path the caller names,
+stdin (`rootbeer_store_legacy::stream`); the helper never opens a path the caller names,
 rejects entries that escape the tree, and files what it wrote under its own hash, so it
 needs no trust in the caller. An overridden root, or `rb` running as root, writes
 directly. Root-owned entries are trusted without rehashing on use, since only the

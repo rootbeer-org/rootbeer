@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use rootbeer_package::download::{http_post, http_request};
-use rootbeer_store::hash_bytes;
+use rootbeer_store_legacy::hash_bytes;
 
 const MAX_BYTES: usize = 16 * 1024 * 1024;
 const MAX_ATTEMPTS: usize = 3;

@@ -10,7 +10,7 @@ libc = "0.2.182"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value", "preserve_order"] }
 tempfile = "3"
-rootbeer-store = { path = "../rootbeer-store" }
+rootbeer-store-legacy = { path = "../rootbeer-store-legacy" }
 rootbeer-catalog = { path = "../rootbeer-catalog" }
 flate2 = "1"
 lzma-rust2 = { version = "0.20", default-features = false, features = ["std", "xz"] }

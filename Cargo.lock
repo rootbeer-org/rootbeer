@@ -1638,7 +1638,7 @@ dependencies = [
  "ring",
  "rootbeer-catalog",
  "rootbeer-package",
- "rootbeer-store",
+ "rootbeer-store-legacy",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -1685,7 +1685,7 @@ dependencies = [
  "mlua",
  "plist",
  "rootbeer-package",
- "rootbeer-store",
+ "rootbeer-store-legacy",
  "serde",
  "serde_json",
  "serde_yml",
@@ -1743,7 +1743,7 @@ dependencies = [
  "mlua",
  "ring",
  "rootbeer-catalog",
- "rootbeer-store",
+ "rootbeer-store-legacy",
  "serde",
  "serde_json",
  "serde_yml",
@@ -1766,7 +1766,7 @@ dependencies = [
  "rootbeer-build",
  "rootbeer-catalog",
  "rootbeer-package",
- "rootbeer-store",
+ "rootbeer-store-legacy",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -1792,7 +1792,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "rootbeer-store"
+name = "rootbeer-store-legacy"
 version = "0.1.0"
 dependencies = [
  "libc",

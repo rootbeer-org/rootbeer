@@ -281,7 +281,7 @@ impl RootbeerLock {
     /// Store entries retained by these roots, including their complete runtime closure.
     pub fn store_paths(
         &self,
-        store: &rootbeer_store::Store,
+        store: &rootbeer_store_legacy::Store,
     ) -> Result<std::collections::BTreeSet<std::path::PathBuf>, String> {
         let mut paths = std::collections::BTreeSet::new();
         for package in self.packages.values() {

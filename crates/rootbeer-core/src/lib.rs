@@ -1,4 +1,4 @@
-pub use rootbeer_store::deterministic;
+pub use rootbeer_store_legacy::deterministic;
 mod age;
 mod executor;
 mod lua;
@@ -8,7 +8,7 @@ mod pipeline;
 mod plan;
 pub mod profile;
 mod tools;
-pub use rootbeer_store as store;
+pub use rootbeer_store_legacy as store;
 
 pub use executor::{ExecutionHandler, ExecutionReport, OpResult};
 pub use pipeline::{Mode, Options, PackageLockOptions, Pipeline, PlannedPipeline};
@@ -58,7 +58,7 @@ pub fn config_dir() -> PathBuf {
 /// State directory (`~/.local/state/rootbeer`).
 /// Revisions, operation history, and other persistent runtime state.
 pub fn state_dir() -> PathBuf {
-    rootbeer_store::state_dir()
+    rootbeer_store_legacy::state_dir()
 }
 
 /// Data directory (`~/.local/share/rootbeer`).

@@ -182,7 +182,7 @@ pub fn audit_installed(
     for dependency in rootbeer_package::runtime::closure(package)? {
         let directory = rootbeer_package::runtime::store_directory(dependency)?;
         let path = parent.join(&directory);
-        if rootbeer_store::hash_tree(&path).map_err(|e| e.to_string())?
+        if rootbeer_store_legacy::hash_tree(&path).map_err(|e| e.to_string())?
             != dependency.output_sha256.as_deref().unwrap()
         {
             return Err(format!("{}: runtime output hash mismatch", dependency.id()));
@@ -190,7 +190,7 @@ pub fn audit_installed(
         runtime.insert(directory, path);
     }
     if package.output_sha256.as_deref()
-        != Some(&rootbeer_store::hash_tree(&root).map_err(|e| e.to_string())?)
+        != Some(&rootbeer_store_legacy::hash_tree(&root).map_err(|e| e.to_string())?)
     {
         return Err("installed package output hash mismatch".into());
     }

@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use crate::LockedPackage;
-use rootbeer_store::Store;
+use rootbeer_store_legacy::Store;
 
 /// Returns the verified transitive runtime inputs in dependency-first order.
 pub fn closure(package: &LockedPackage) -> Result<Vec<&LockedPackage>, String> {

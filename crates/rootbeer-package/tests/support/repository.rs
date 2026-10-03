@@ -8,7 +8,7 @@ use rootbeer_package::pdr::{
     RootPlatform, ROOT_SCHEMA,
 };
 use rootbeer_package::{PackageCatalog, RepositoryPin};
-use rootbeer_store::hash_bytes;
+use rootbeer_store_legacy::hash_bytes;
 
 /// Publishes every recipe in `catalog` as a signed repository site in `directory`.
 ///

@@ -11,7 +11,7 @@ use crate::receipt::ReleasedDependency;
 use rootbeer_package::{
     BuildArtifact, CatalogRecipe, LockedSource, PackageCatalog, PackageRealizer, PublishedArtifact,
 };
-use rootbeer_store::{hash_bytes, Store};
+use rootbeer_store_legacy::{hash_bytes, Store};
 
 /// Who approves a release, and when it counts as published.
 pub struct Signer<'a> {
@@ -252,7 +252,7 @@ fn prepare_binary(
         &copy,
     )
     .map_err(|error| error.to_string())?;
-    if rootbeer_store::hash_file(&copy).map_err(|error| error.to_string())? != sha256 {
+    if rootbeer_store_legacy::hash_file(&copy).map_err(|error| error.to_string())? != sha256 {
         return Err("upstream file hash mismatch".into());
     }
     let mut package = receipt.package;
@@ -315,13 +315,15 @@ pub fn push_package(release: &Path, registry: &str, public_key: &str) -> Result<
         false => None,
     };
     if let Some((file, _)) = hosted {
-        if rootbeer_store::hash_file(release.join(file)).map_err(|error| error.to_string())?
+        if rootbeer_store_legacy::hash_file(release.join(file))
+            .map_err(|error| error.to_string())?
             != *sha256
         {
             return Err("package release contents changed".into());
         }
     }
-    if rootbeer_store::hash_file(release.join("receipt.json")).map_err(|error| error.to_string())?
+    if rootbeer_store_legacy::hash_file(release.join("receipt.json"))
+        .map_err(|error| error.to_string())?
         != record.artifact.receipt_sha256
     {
         return Err("package release contents changed".into());

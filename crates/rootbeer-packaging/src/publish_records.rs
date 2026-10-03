@@ -9,7 +9,7 @@ use rootbeer_package::pdr::{
     RootPlatform, ROOT_SCHEMA,
 };
 use rootbeer_package::{CatalogPackage, CatalogRecipe, PackageCatalog};
-use rootbeer_store::hash_bytes;
+use rootbeer_store_legacy::hash_bytes;
 
 /// Package, version and system.
 type Key = (String, String, String);

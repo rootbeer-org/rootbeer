@@ -4,7 +4,7 @@ use std::process::Command;
 
 use rootbeer_package::download::DownloadCache;
 use rootbeer_package::*;
-use rootbeer_store::hash_file;
+use rootbeer_store_legacy::hash_file;
 
 /// Resolves Rootbeer itself and nothing else; see [`rootbeer_package::self_update`].
 pub fn self_update_resolver_stack(inputs: &PackageResolverInputs) -> ResolverStack {
@@ -12,7 +12,7 @@ pub fn self_update_resolver_stack(inputs: &PackageResolverInputs) -> ResolverSta
     if let Some(pin) = inputs.repository() {
         stack.push(rootbeer_package::self_update::Resolver::new(
             pin,
-            rootbeer_store::state_dir().join("downloads"),
+            rootbeer_store_legacy::state_dir().join("downloads"),
         ));
     }
     stack
@@ -24,7 +24,7 @@ pub fn resolver_stack_for_inputs(inputs: &PackageResolverInputs) -> ResolverStac
     if inputs.repository().is_some() || inputs.local_catalog().is_some() {
         stack.push(SourceResolver::with_inputs(
             inputs,
-            rootbeer_store::state_dir(),
+            rootbeer_store_legacy::state_dir(),
         ));
     }
     stack

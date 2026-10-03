@@ -593,7 +593,7 @@ mod tests {
             package: package.into(),
             name: package.split('@').next().unwrap().into(),
             system: "aarch64-macos".into(),
-            key: rootbeer_store::hash_bytes(package.as_bytes()),
+            key: rootbeer_store_legacy::hash_bytes(package.as_bytes()),
             pdr_root: None,
             compatible_keys: Vec::new(),
             builds: builds.iter().map(|build| build.to_string()).collect(),

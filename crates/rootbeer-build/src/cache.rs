@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use rootbeer_package::{BuildArtifact, CatalogRecipe, LockedPackage, LockedSource};
-use rootbeer_store::hash_file;
+use rootbeer_store_legacy::hash_file;
 use serde::{Deserialize, Serialize};
 
 /// Persistent build results scoped to an explicitly identified host image and toolchain.
@@ -56,7 +56,7 @@ impl BuildCache {
         let directory = self
             .directory
             .join("compiler/go")
-            .join(rootbeer_store::hash_bytes(&inputs));
+            .join(rootbeer_store_legacy::hash_bytes(&inputs));
         fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
         directory.canonicalize().map_err(|error| error.to_string())
     }
@@ -135,7 +135,7 @@ pub(crate) fn key(
         context,
     ))
     .map_err(|error| error.to_string())?;
-    Ok(rootbeer_store::hash_bytes(&bytes))
+    Ok(rootbeer_store_legacy::hash_bytes(&bytes))
 }
 
 impl Entry {

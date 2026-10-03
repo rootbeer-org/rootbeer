@@ -54,7 +54,7 @@ impl Sandbox {
     /// Identifies the isolation implementation and launcher bytes for build cache keys.
     pub fn identity() -> Result<String, String> {
         let launcher = launcher()?;
-        let hash = rootbeer_store::hash_file(launcher).map_err(|error| {
+        let hash = rootbeer_store_legacy::hash_file(launcher).map_err(|error| {
             format!(
                 "cannot use sandbox launcher {}: {error}",
                 launcher.display()
@@ -67,7 +67,7 @@ impl Sandbox {
             if loader.is_file() {
                 format!(
                     "{identity}:{}",
-                    rootbeer_store::hash_file(loader).map_err(|error| error.to_string())?
+                    rootbeer_store_legacy::hash_file(loader).map_err(|error| error.to_string())?
                 )
             } else {
                 identity
@@ -122,7 +122,7 @@ mod tests {
                 "sh".into(),
                 rootbeer_package::BuildEnvironmentInput {
                     path: "/bin/sh".into(),
-                    sha256: rootbeer_store::hash_file("/bin/sh").unwrap(),
+                    sha256: rootbeer_store_legacy::hash_file("/bin/sh").unwrap(),
                 },
             )]),
             inputs: BTreeMap::new(),

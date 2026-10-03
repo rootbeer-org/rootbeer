@@ -6,7 +6,7 @@ use rootbeer_package::graph::DependencyGraph;
 use rootbeer_package::{
     BuildArtifact, LockedPackage, LockedSource, PackageCatalog, ResolveContext,
 };
-use rootbeer_store::hash_file;
+use rootbeer_store_legacy::hash_file;
 
 use crate::{BuildOptions, BuildPlan};
 

@@ -30,7 +30,7 @@ use std::time::Duration;
 use rootbeer_package::download::DownloadCache;
 use rootbeer_package::*;
 
-use rootbeer_store::{hash_file, hash_tree, Store};
+use rootbeer_store_legacy::{hash_file, hash_tree, Store};
 
 pub mod dependencies;
 #[cfg(test)]
@@ -69,7 +69,7 @@ impl Generation {
             Some(BuildBackend::Zig) => &self.zig,
             None => "",
         };
-        rootbeer_store::hash_bytes(
+        rootbeer_store_legacy::hash_bytes(
             format!("rootbeer-engine-v2\0{}\0{implementation}", self.shared).as_bytes(),
         )
     }
@@ -136,7 +136,7 @@ impl Default for BuildOptions {
             environment: None,
             is_isolated: false,
             jobs: 2,
-            downloads: rootbeer_store::state_dir().join("downloads"),
+            downloads: rootbeer_store_legacy::state_dir().join("downloads"),
             cache: None,
             session: None,
             phase_timeout: Duration::from_secs(1200),
@@ -170,7 +170,7 @@ impl BuildOptions {
             }
             let bytes = serde_json::to_vec(&(context, self.isolation()?, &self.environment))
                 .map_err(|error| error.to_string())?;
-            return Ok(rootbeer_store::hash_bytes(&bytes));
+            return Ok(rootbeer_store_legacy::hash_bytes(&bytes));
         }
         self.resolve_environment(recipes.iter())?
             .identity(&format!("{context}\0{}", self.isolation()?))
@@ -867,7 +867,7 @@ fn audit_output(
     let bytes = serde_json::to_vec_pretty(&report).map_err(|error| error.to_string())?;
     fs::write(output.join("runtime-audit.json"), &bytes).map_err(|error| error.to_string())?;
     report.validate()?;
-    Ok(rootbeer_store::hash_bytes(&bytes))
+    Ok(rootbeer_store_legacy::hash_bytes(&bytes))
 }
 
 fn install_spec(package: &LockedPackage, output: &Path) -> Result<serde_json::Value, String> {

@@ -8,7 +8,7 @@ rust-version.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"
-rootbeer-store = { path = "../rootbeer-store" }
+rootbeer-store-legacy = { path = "../rootbeer-store-legacy" }
 rootbeer-package = { path = "../rootbeer-package" }
 flate2 = "1"
 tar = "0.4"

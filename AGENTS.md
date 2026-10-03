@@ -4,7 +4,8 @@ it akin to a dotfile manager like home-manager or chezmoi.
 
 - `crates/rootbeer-cli`: The command line tool the user interacts with
 - `crates/rootbeer-core`: The core library that runs the lua script
-- `crates/rootbeer-store`: Shared content hashing and normalized storage
+- `crates/rootbeer-store-legacy`: Today's `/opt/rootbeer` store and its `rb-store`
+  helper, kept for the current pipeline and deleted at cutover
 - `crates/rootbeer-package`: Package models, recipe parsing, graph, resolution, and installation
 - `crates/rootbeer-build`: Build plans, backend phases, execution, and build caching
 - `crates/rootbeer-packaging`: Discovery, qualification, signing, and publication

@@ -4,7 +4,7 @@ use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use rootbeer_package::{BuildEnvironmentInput, BuildEnvironmentLock, ResolveContext};
-use rootbeer_store::{hash_bytes, hash_file};
+use rootbeer_store_legacy::{hash_bytes, hash_file};
 use serde::{Deserialize, Serialize};
 
 /// Explicit tools, SDK/toolchain directories, and variables to pin before building.

@@ -64,7 +64,7 @@ impl PackageResolver for LocalBinaries {
                 version: "1".into(),
                 source: LockedSource::File {
                     path: self.0.clone(),
-                    sha256: rootbeer_store::hash_file(&self.0).unwrap(),
+                    sha256: rootbeer_store_legacy::hash_file(&self.0).unwrap(),
                 },
                 install: LockedInstall::Binary { path: name.into() },
                 provides: Provides {

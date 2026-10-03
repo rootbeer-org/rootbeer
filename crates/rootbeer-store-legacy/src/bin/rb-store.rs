@@ -1,12 +1,12 @@
 //! Setuid-root helper that inserts trees into the shared store. It reads a
-//! [`rootbeer_store::stream`] on stdin, never a path, and hashes what it wrote,
+//! [`rootbeer_store_legacy::stream`] on stdin, never a path, and hashes what it wrote,
 //! so it needs no trust in the caller. It also creates each user's roots
 //! directory and runs garbage collection, which only ever reads roots.
 
 use std::io;
 use std::path::PathBuf;
 
-use rootbeer_store::Store;
+use rootbeer_store_legacy::Store;
 
 fn main() {
     if let Err(error) = run() {
@@ -19,7 +19,7 @@ fn run() -> Result<(), String> {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     let (name, version) = match arguments.as_slice() {
         [command] if command == "version" => {
-            let helper = rootbeer_store::helper::current();
+            let helper = rootbeer_store_legacy::helper::current();
             println!(
                 "{}",
                 serde_json::to_string(&helper).map_err(|e| e.to_string())?
@@ -34,7 +34,7 @@ fn run() -> Result<(), String> {
         }
         [command] if command == "gc" => {
             let report = store()
-                .collect_garbage(rootbeer_store::gc::GRACE)
+                .collect_garbage(rootbeer_store_legacy::gc::GRACE)
                 .map_err(|e| e.to_string())?;
             for name in report.removed {
                 println!("{name}");
@@ -64,7 +64,7 @@ fn store() -> Store {
 fn root() -> PathBuf {
     let is_elevated = unsafe { libc::geteuid() != libc::getuid() };
     if is_elevated {
-        return PathBuf::from(rootbeer_store::DEFAULT_ROOT);
+        return PathBuf::from(rootbeer_store_legacy::DEFAULT_ROOT);
     }
-    rootbeer_store::root_dir()
+    rootbeer_store_legacy::root_dir()
 }

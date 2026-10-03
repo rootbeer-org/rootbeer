@@ -8,7 +8,7 @@ use rootbeer_package::{
     PackageRequestResolver, PackageResolution, PackageResolverInputs, ResolveContext,
     ResolverInput,
 };
-use rootbeer_store::Store;
+use rootbeer_store_legacy::Store;
 use serde::{Deserialize, Serialize};
 
 use crate::BuildOptions;

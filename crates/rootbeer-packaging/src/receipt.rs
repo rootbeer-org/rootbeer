@@ -9,7 +9,7 @@ use super::{
     PublishedArtifact,
 };
 use rootbeer_catalog::is_sha256;
-use rootbeer_store::{hash_bytes, hash_file};
+use rootbeer_store_legacy::{hash_bytes, hash_file};
 
 /// A runtime dependency as its own record publishes it, and a local copy of its archive, if any.
 #[derive(Debug, Clone)]
@@ -263,7 +263,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::{LockedPackage, PackageResolverInputs, Provides};
     use flate2::{write::GzEncoder, Compression};
-    use rootbeer_store::hash_tree;
+    use rootbeer_store_legacy::hash_tree;
     use std::os::unix::fs::PermissionsExt;
 
     pub(crate) fn fixture(root: &Path) -> (PackageCatalog, PathBuf) {

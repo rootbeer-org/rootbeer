@@ -1,7 +1,7 @@
 //! Package definitions, resolution, and verified installation.
 
-pub use rootbeer_store as store;
-pub use rootbeer_store::{deterministic, state_dir};
+pub use rootbeer_store_legacy as store;
+pub use rootbeer_store_legacy::{deterministic, state_dir};
 mod artifact;
 mod build_spec;
 pub mod catalog;

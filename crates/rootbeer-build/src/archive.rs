@@ -89,8 +89,8 @@ mod tests {
             );
         }
         assert_eq!(
-            rootbeer_store::hash_tree(&source).unwrap(),
-            rootbeer_store::hash_tree(&installed).unwrap()
+            rootbeer_store_legacy::hash_tree(&source).unwrap(),
+            rootbeer_store_legacy::hash_tree(&installed).unwrap()
         );
     }
 }

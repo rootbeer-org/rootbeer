@@ -1,5 +1,5 @@
 [package]
-name = "rootbeer-store"
+name = "rootbeer-store-legacy"
 version = "0.1.0"
 edition = "2021"
 rust-version.workspace = true
