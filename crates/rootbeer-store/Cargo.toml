@@ -5,7 +5,10 @@ edition = "2024"
 rust-version.workspace = true
 
 [dependencies]
+data-encoding = "2"
 rootbeer-drv = { path = "../rootbeer-drv" }
+rustix = { version = "1", features = ["fs", "process"] }
+sha2 = "0.10"
 rusqlite = { version = "0.40", features = ["bundled"] }
 tar = "0.4"
 tempfile = "3"

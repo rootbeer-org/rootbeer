@@ -2,17 +2,19 @@
 //! tracks which outputs are present through a database along with their
 //! references.
 
+mod add;
 mod archive;
 mod db;
 
-pub use archive::{pack, unpack};
+pub use archive::pack;
+use archive::unpack;
 use rootbeer_drv::Key;
 use rusqlite::Connection;
 use std::collections::BTreeSet;
 use std::fmt;
 use std::fs;
 use std::io::{self, Read};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 #[cfg(test)]
 mod tests;
@@ -38,9 +40,17 @@ pub enum Error {
     Io { path: PathBuf, source: io::Error },
     Database(String),
     Archive(String),
+    Refused(String),
 }
 
 impl Store {
+    pub fn open_read_only(root: &Path) -> Result<Store, Error> {
+        Ok(Store {
+            root: root.to_path_buf(),
+            connection: db::open_read_only(&root.join("var/db.sqlite"))?,
+        })
+    }
+
     pub fn open(root: &Path) -> Result<Store, Error> {
         let var = root.join("var");
         fs::create_dir_all(&var).map_err(io_at(&var))?;
@@ -60,7 +70,7 @@ impl Store {
         db::references(&self.connection, key)
     }
 
-    pub fn register(
+    pub(crate) fn register(
         &mut self,
         key: &Key,
         entry: &str,
@@ -73,15 +83,8 @@ impl Store {
 
     /// Unpacks an archive into a store entry. It goes through a temporary
     /// directory until validated then renamed in place to be registered.
-    pub fn ingest(&self, entry: &str, archive: impl Read) -> Result<PathBuf, Error> {
-        let mut components = Path::new(entry).components();
-        let is_name = matches!(components.next(), Some(Component::Normal(_)))
-            && components.next().is_none()
-            && !entry.starts_with('.');
-
-        if !is_name {
-            return Err(Error::Archive(format!("{entry:?} is not a store entry")));
-        }
+    pub(crate) fn ingest(&self, entry: &str, archive: impl Read) -> Result<PathBuf, Error> {
+        validate(entry)?;
 
         let store = self.root.join("store");
         let path = store.join(entry);
@@ -131,11 +134,21 @@ impl fmt::Display for Error {
             }
             Error::Database(reason) => write!(f, "store database: {reason}"),
             Error::Archive(reason) => write!(f, "archive: {reason}"),
+            Error::Refused(reason) => f.write_str(reason),
         }
     }
 }
 
 impl std::error::Error for Error {}
+
+fn validate(entry: &str) -> Result<(), Error> {
+    let is_name = !entry.is_empty() && !entry.starts_with('.') && !entry.contains('/');
+    if !is_name {
+        return Err(Error::Refused(format!("{entry:?} is not a store entry")));
+    }
+
+    Ok(())
+}
 
 fn io_at(path: &Path) -> impl Fn(io::Error) -> Error {
     let path = path.to_path_buf();

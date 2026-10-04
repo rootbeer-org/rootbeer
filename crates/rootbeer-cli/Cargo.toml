@@ -21,6 +21,8 @@ rootbeer-build = { path = "../rootbeer-build" }
 rootbeer-drv = { path = "../rootbeer-drv" }
 rootbeer-eval = { path = "../rootbeer-eval" }
 rootbeer-sandbox = { path = "../rootbeer-sandbox" }
+rootbeer-store = { path = "../rootbeer-store" }
+rustix = { version = "1", features = ["process"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"

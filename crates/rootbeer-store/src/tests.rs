@@ -1,10 +1,12 @@
 use crate::{Error, Origin, ROOT, Store, pack, unpack};
 use rootbeer_drv::Key;
+use sha2::Digest;
 use std::collections::BTreeSet;
 use std::fs;
 use std::io::ErrorKind;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::Path;
+use std::process::Command;
 use tar::{EntryType, Header};
 
 const TREE: &[u8] = include_bytes!("../tests/fixtures/tree.tar.zst");
@@ -198,4 +200,143 @@ fn registered_outputs_persist_and_cannot_be_replaced() {
 fn root_holds_the_store_output_paths_embed() {
     let store = Path::new(ROOT).join("store");
     assert_eq!(store, Path::new(rootbeer_drv::STORE_ROOT));
+}
+
+fn store_root() -> tempfile::TempDir {
+    let root = tempfile::tempdir().unwrap();
+    fs::create_dir(root.path().join("store")).unwrap();
+    root
+}
+
+#[test]
+fn sealing_registers_only_a_callers_own_plain_build() {
+    let root = store_root();
+    let store_directory = root.path().join("store");
+    let key: Key = "a".repeat(32).parse().unwrap();
+    let entry = format!("{key}-zlib-1.3.2");
+    let path = store_directory.join(&entry);
+    fs::create_dir(&path).unwrap();
+    tree(&path);
+
+    let link = format!("{key}-link");
+    symlink(&path, store_directory.join(&link)).unwrap();
+
+    let builder = rustix::process::getuid().as_raw();
+    let mut store = Store::open(root.path()).unwrap();
+    let references = BTreeSet::new();
+
+    let other = format!("{}-zlib-1.3.2", "b".repeat(32));
+    let slashed = format!("{link}/");
+    let refused = [
+        (entry.as_str(), builder + 1),
+        (other.as_str(), builder),
+        (link.as_str(), builder),
+        (slashed.as_str(), builder),
+    ];
+    for (name, caller) in refused {
+        let result = store.seal(&key, name, caller, &references);
+        assert!(
+            matches!(result, Err(Error::Refused(_))),
+            "{name} {result:?}"
+        );
+    }
+
+    let fifo = path.join("a/fifo");
+    let status = Command::new("mkfifo").arg(&fifo).status().unwrap();
+    assert!(status.success());
+
+    let error = store.seal(&key, &entry, builder, &references).unwrap_err();
+    let reason = "isn't a file, directory, or symlink";
+    assert!(error.to_string().ends_with(reason), "{error}");
+
+    writable(&path);
+    fs::remove_file(&fifo).unwrap();
+
+    fs::set_permissions(path.join("a/tool"), fs::Permissions::from_mode(0o4755)).unwrap();
+    let error = store.seal(&key, &entry, builder, &references).unwrap_err();
+    let reason = "is setuid, setgid, or sticky";
+    assert!(error.to_string().ends_with(reason), "{error}");
+
+    assert_eq!(store.path(&key).unwrap(), None);
+    fs::set_permissions(path.join("a/tool"), fs::Permissions::from_mode(0o755)).unwrap();
+    #[cfg(target_os = "macos")]
+    {
+        let file = path.join("a/file");
+        let acl = ["+a", "everyone allow write,append"];
+        let status = Command::new("chmod").args(acl).arg(&file).status().unwrap();
+        assert!(status.success());
+    }
+
+    assert_eq!(
+        store.seal(&key, &entry, builder, &references).unwrap(),
+        path
+    );
+
+    assert_eq!(store.path(&key).unwrap(), Some(path.clone()));
+    let mode = |relative: &str| {
+        let metadata = fs::metadata(path.join(relative)).unwrap();
+        metadata.permissions().mode() & 0o7777
+    };
+
+    assert_eq!(
+        (mode("a"), mode("a/file"), mode("a/tool")),
+        (0o555, 0o444, 0o555)
+    );
+
+    #[cfg(target_os = "macos")]
+    {
+        let opened = fs::OpenOptions::new()
+            .append(true)
+            .open(path.join("a/file"));
+        assert_eq!(opened.unwrap_err().kind(), ErrorKind::PermissionDenied);
+    }
+
+    writable(&path);
+}
+
+#[test]
+fn pulling_replaces_leftovers_and_records_the_archive_digest() {
+    let source = tempfile::tempdir().unwrap();
+    tree(source.path());
+    let bytes = packed(source.path());
+
+    let root = store_root();
+    let key: Key = "a".repeat(32).parse().unwrap();
+    let entry = format!("{key}-zlib-1.3.2");
+    fs::create_dir(root.path().join("store").join(&entry)).unwrap();
+
+    let mut store = Store::open(root.path()).unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    fs::write(outside.path().join("kept"), "").unwrap();
+    let link = format!("{key}-link");
+    symlink(outside.path(), root.path().join("store").join(&link)).unwrap();
+    let slashed = format!("{link}/");
+
+    let error = store
+        .pull(&key, &slashed, &BTreeSet::new(), bytes.as_slice())
+        .unwrap_err();
+
+    assert!(matches!(error, Error::Refused(_)), "{error}");
+    assert!(outside.path().join("kept").exists());
+
+    let path = store
+        .pull(&key, &entry, &BTreeSet::new(), bytes.as_slice())
+        .unwrap();
+
+    assert!(path.join("a/file").exists());
+    let digest: String = store
+        .connection
+        .query_row(
+            "SELECT digest FROM outputs WHERE key = ?1",
+            [key.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+
+    let expected = data_encoding::HEXLOWER.encode(&sha2::Sha256::digest(&bytes));
+    assert_eq!(digest, format!("sha256:{expected}"));
+
+    let reader = Store::open_read_only(root.path()).unwrap();
+    assert_eq!(reader.path(&key).unwrap(), Some(path.clone()));
+    writable(&path);
 }

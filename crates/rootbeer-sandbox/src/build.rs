@@ -269,8 +269,15 @@ impl Sandbox {
         let tmp = directory.join("tmp");
         let file = directory.join("script");
 
+        // The parent is shared by EVERY user so we need to create the build
+        // directory from scratch every time.
         remove(&directory)?;
-        fs::create_dir_all(&source).map_err(io_at(&source))?;
+        if let Some(parent) = directory.parent() {
+            fs::create_dir_all(parent).map_err(io_at(parent))?;
+        }
+
+        fs::create_dir(&directory).map_err(io_at(&directory))?;
+        fs::create_dir(&source).map_err(io_at(&source))?;
         fs::create_dir(&tmp).map_err(io_at(&tmp))?;
         fs::write(&file, script).map_err(io_at(&file))?;
 

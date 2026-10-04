@@ -1,6 +1,9 @@
-use rootbeer_drv::{output_path, Build, DependencyKind, Derivation, Key, Platform, STORE_ROOT};
+use rootbeer_drv::{
+    fetch_path, output_path, Build, DependencyKind, Derivation, Key, Platform, STORE_ROOT,
+};
 use rootbeer_eval::{Catalog, Graph, Host, Target};
 use rootbeer_sandbox::Request;
+use rootbeer_store::{Store, ROOT};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -103,8 +106,7 @@ fn show(sources: &Sources, package: &str, platform: Option<Platform>) -> Result<
     Ok(())
 }
 
-// Stand-in for rootbeer-store until phase 3: a marker per realized key, and logs.
-const VAR: &str = "/opt/rb/var";
+const HELPER: &str = "/opt/rb/libexec/rb-helper";
 
 fn build(sources: &Sources, package: &str, is_verbose: bool) -> Result<(), String> {
     let (graph, target) = evaluate(sources, package, None)?;
@@ -118,35 +120,46 @@ fn build(sources: &Sources, package: &str, is_verbose: bool) -> Result<(), Strin
         dependencies_first(&graph.derivations, key, &mut order);
     }
 
-    let realized = Path::new(VAR).join("realized");
-    let logs = Path::new(VAR).join("log");
-    for directory in [Path::new(STORE_ROOT), &realized, &logs] {
-        fs::create_dir_all(directory)
-            .map_err(|error| format!("{}: {error}", directory.display()))?;
+    let root = Path::new(ROOT);
+    let logs = root.join("var/log");
+    let is_root = rustix::process::geteuid().is_root();
+    if is_root {
+        for directory in [Path::new(STORE_ROOT), &logs] {
+            fs::create_dir_all(directory)
+                .map_err(|error| format!("{}: {error}", directory.display()))?;
+        }
     }
+
+    let mut store = match is_root {
+        true => Store::open(root),
+        false => Store::open_read_only(root),
+    }
+    .map_err(|error| format!("{error} (run `sudo rb-helper setup <group>` first)"))?;
 
     let jobs = std::thread::available_parallelism().map_err(|error| error.to_string())?;
     let mut references = BTreeMap::new();
 
     for key in &order {
-        let marker = realized.join(key.as_str());
-        if marker.exists() {
-            let text = fs::read_to_string(&marker)
-                .map_err(|error| format!("{}: {error}", marker.display()))?;
-
-            let keys = text
-                .lines()
-                .map(str::parse)
-                .collect::<Result<BTreeSet<Key>, _>>()
-                .map_err(|error| format!("{}: {error}", marker.display()))?;
-
-            references.insert(key.clone(), keys);
+        // Checks aren't outputs, so they run every time.
+        if store
+            .path(key)
+            .map_err(|error| error.to_string())?
+            .is_some()
+        {
+            let found = store.references(key).map_err(|error| error.to_string())?;
+            references.insert(key.clone(), found);
             continue;
         }
 
+        // var/log is shared, so the name may be another user's link to a file
         let log = logs.join(key.as_str());
+        let file = match fs::remove_file(&log) {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+            _ => File::options().write(true).create_new(true).open(&log),
+        };
+
         let mut output = Output {
-            log: File::create(&log).map_err(|error| format!("{}: {error}", log.display()))?,
+            log: file.map_err(|error| format!("{}: {error}", log.display()))?,
             terminal: is_verbose.then(io::stderr),
         };
 
@@ -158,24 +171,23 @@ fn build(sources: &Sources, package: &str, is_verbose: bool) -> Result<(), Strin
             log: &mut output,
         };
 
-        eprintln!("realizing {key} {}", label(graph.derivations.get(key)));
+        let derivation = graph.derivations.get(key);
+        eprintln!("realizing {key} {}", label(derivation));
         let found = rootbeer_sandbox::realize(&mut request)
             .map_err(|error| format!("{error}\nlog: {}", log.display()))?;
 
-        let text = found
-            .iter()
-            .map(|key| format!("{key}\n"))
-            .collect::<String>();
+        let path = match derivation {
+            Some(Derivation::Fetch(_)) => fetch_path(key),
+            Some(Derivation::Build(build)) => output_path(key, &build.name, &build.version, "out"),
+            Some(Derivation::Check(_)) | None => continue,
+        };
 
-        let staged = marker.with_extension("tmp");
-        File::create(&staged)
-            .and_then(|mut file| {
-                file.write_all(text.as_bytes())?;
-                file.sync_all()
-            })
-            .and_then(|()| fs::rename(&staged, &marker))
-            .map_err(|error| format!("{}: {error}", marker.display()))?;
+        let entry = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| format!("{} has no entry name", path.display()))?;
 
+        seal(&mut store, is_root, key, entry, &found)?;
         references.insert(key.clone(), found);
     }
 
@@ -185,6 +197,36 @@ fn build(sources: &Sources, package: &str, is_verbose: bool) -> Result<(), Strin
 
     let out = output_path(&package.build, &build.name, &build.version, "out");
     println!("{}", out.display());
+    Ok(())
+}
+
+/// Registers a new output either as root or with the setuid helper.
+fn seal(
+    store: &mut Store,
+    is_root: bool,
+    key: &Key,
+    entry: &str,
+    references: &BTreeSet<Key>,
+) -> Result<(), String> {
+    if is_root {
+        let builder = rustix::process::getuid().as_raw();
+        store
+            .seal(key, entry, builder, references)
+            .map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+
+    let status = std::process::Command::new(HELPER)
+        .args(["seal", key.as_str(), entry])
+        .args(references.iter().map(Key::as_str))
+        .stdout(std::process::Stdio::null())
+        .status()
+        .map_err(|error| format!("{HELPER}: {error}"))?;
+
+    if !status.success() {
+        return Err(format!("{HELPER} seal {key} {status}"));
+    }
+
     Ok(())
 }
 
@@ -275,6 +317,7 @@ fn evaluate(
         version: version.to_string(),
         platform,
     };
+
     let graph = catalog
         .evaluate(&hosts, std::slice::from_ref(&target))
         .map_err(|error| error.to_string())?;

@@ -60,7 +60,7 @@ pub fn pack(directory: &Path, writer: impl Write) -> Result<(), Error> {
     Ok(())
 }
 
-pub fn unpack(reader: impl Read, directory: &Path) -> Result<(), Error> {
+pub(crate) fn unpack(reader: impl Read, directory: &Path) -> Result<(), Error> {
     let decoder = zstd::Decoder::new(reader).map_err(io_at(directory))?;
     let mut archive = tar::Archive::new(decoder);
     archive.set_overwrite(false);

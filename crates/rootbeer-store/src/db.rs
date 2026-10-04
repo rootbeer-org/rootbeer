@@ -1,6 +1,6 @@
 use crate::{Error, Origin};
 use rootbeer_drv::Key;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use std::collections::BTreeSet;
 use std::path::Path;
 
@@ -20,10 +20,16 @@ CREATE TABLE IF NOT EXISTS refs (
 
 pub(crate) fn open(path: &Path) -> Result<Connection, Error> {
     let connection = Connection::open(path)?;
-    connection.pragma_update(None, "journal_mode", "WAL")?;
     connection.pragma_update(None, "foreign_keys", true)?;
     connection.execute_batch(SCHEMA)?;
     Ok(connection)
+}
+
+pub(crate) fn open_read_only(path: &Path) -> Result<Connection, Error> {
+    Ok(Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?)
 }
 
 pub(crate) fn register(
