@@ -969,6 +969,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "http-auth"
+version = "0.1.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "150fa4a9462ef926824cf4519c84ed652ca8f4fbae34cb8af045b5cbcaf98822"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
 name = "httparse"
 version = "1.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1705,6 +1714,20 @@ dependencies = [
  "syn 2.0.116",
  "tar",
  "tempfile",
+]
+
+[[package]]
+name = "rootbeer-cache"
+version = "0.1.0"
+dependencies = [
+ "data-encoding",
+ "http-auth",
+ "rootbeer-drv",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "ureq",
 ]
 
 [[package]]

@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 2,
+  "mediaType": "application/vnd.oci.image.manifest.v1+json",
+  "artifactType": "application/vnd.rootbeer.output.v1",
+  "config": {
+    "mediaType": "application/vnd.rootbeer.derivation.v1+json",
+    "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    "size": 10
+  },
+  "layers": [
+    {
+      "mediaType": "application/vnd.rootbeer.output.v1.tar+zstd",
+      "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "size": 20
+    }
+  ],
+  "annotations": {
+    "com.rbpkg.key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "com.rbpkg.name": "zlib",
+    "com.rbpkg.output": "out",
+    "com.rbpkg.references": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb,cccccccccccccccccccccccccccccccc",
+    "com.rbpkg.version": "1.3.2"
+  }
+}
