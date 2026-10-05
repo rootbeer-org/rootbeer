@@ -7,7 +7,7 @@ mod archive;
 mod db;
 
 pub use archive::pack;
-use archive::unpack;
+use archive::{seal, unpack};
 use rootbeer_drv::Key;
 use rusqlite::Connection;
 use std::collections::BTreeSet;
@@ -81,9 +81,14 @@ impl Store {
         db::register(&mut self.connection, key, entry, origin, digest, references)
     }
 
-    /// Unpacks an archive into a store entry. It goes through a temporary
-    /// directory until validated then renamed in place to be registered.
-    pub(crate) fn ingest(&self, entry: &str, archive: impl Read) -> Result<PathBuf, Error> {
+    /// Unpacks `archive` into a staging directory, then seals it and renames it
+    /// into place only once `verify` accepts what was read.
+    pub(crate) fn ingest<R: Read>(
+        &self,
+        entry: &str,
+        archive: &mut R,
+        verify: impl FnOnce(&mut R) -> Result<(), Error>,
+    ) -> Result<PathBuf, Error> {
         validate(entry)?;
 
         let store = self.root.join("store");
@@ -97,7 +102,12 @@ impl Store {
             .tempdir_in(&store)
             .map_err(io_at(&store))?;
 
-        unpack(archive, staging.path())?;
+        // Sealed only after verifying, so a refused staging directory is still
+        // writable and its drop can remove it without root.
+        unpack(&mut *archive, staging.path())?;
+        verify(archive)?;
+        seal(staging.path())?;
+
         fs::rename(staging.path(), &path).map_err(io_at(&path))?;
         fs::File::open(&store)
             .and_then(|directory| directory.sync_all())

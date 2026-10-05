@@ -1,3 +1,5 @@
+mod cache;
+
 use rootbeer_drv::{
     fetch_path, output_path, Build, DependencyKind, Derivation, Key, Platform, STORE_ROOT,
 };
@@ -36,6 +38,23 @@ enum Command {
     },
     /// Compare two `keys` outputs: added, removed, and changed packages, and why
     Diff { base: PathBuf, head: PathBuf },
+    /// Push a package's built output and its runtime references to a registry
+    Push {
+        /// `name` or `name@version`; defaults to the platform's default version
+        package: String,
+        #[command(flatten)]
+        registry: cache::Registry,
+        #[command(flatten)]
+        sources: Sources,
+    },
+    /// Install an output by key from a registry, after what it references
+    Install {
+        /// The package name the output was pushed under
+        name: String,
+        key: Key,
+        #[command(flatten)]
+        registry: cache::Registry,
+    },
     /// Fetch, build, and check a package and its dependencies on this machine
     Build {
         /// `name` or `name@version`; defaults to the platform's default version
@@ -84,6 +103,16 @@ pub fn run(args: Args) {
             is_verbose,
             sources,
         } => build(&sources, &package, is_verbose),
+        Command::Push {
+            package,
+            registry,
+            sources,
+        } => cache::push(&sources, &package, &registry),
+        Command::Install {
+            name,
+            key,
+            registry,
+        } => cache::install(&name, &key, &registry),
     };
 
     if let Err(error) = result {
@@ -107,6 +136,13 @@ fn show(sources: &Sources, package: &str, platform: Option<Platform>) -> Result<
 }
 
 const HELPER: &str = "/opt/rb/libexec/rb-helper";
+
+fn store_error(error: rootbeer_store::Error) -> String {
+    format!(
+        "{error} (set the store up with `sudo rb-helper setup <group>`, or after a \
+         crash let any `rb-helper` command recover it)"
+    )
+}
 
 fn build(sources: &Sources, package: &str, is_verbose: bool) -> Result<(), String> {
     let (graph, target) = evaluate(sources, package, None)?;
@@ -134,7 +170,7 @@ fn build(sources: &Sources, package: &str, is_verbose: bool) -> Result<(), Strin
         true => Store::open(root),
         false => Store::open_read_only(root),
     }
-    .map_err(|error| format!("{error} (run `sudo rb-helper setup <group>` first)"))?;
+    .map_err(store_error)?;
 
     let jobs = std::thread::available_parallelism().map_err(|error| error.to_string())?;
     let mut references = BTreeMap::new();

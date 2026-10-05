@@ -10,7 +10,7 @@ use data_encoding::{BASE64, HEXLOWER};
 use manifest::{Descriptor, Manifest};
 use rootbeer_drv::{Derivation, Key};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::fs::File;
 use std::io::{self, Read};
@@ -29,12 +29,15 @@ pub struct Cache {
     registry: String,
     namespace: String,
     credentials: Option<String>,
+    is_http_allowed: bool,
 }
 
-pub struct Pulled {
+pub struct Pulled<'a> {
     pub derivation: Derivation,
-    pub references: BTreeSet<Key>,
-    pub archive: Box<dyn Read>,
+    pub references: BTreeMap<Key, String>,
+    pub digest: String,
+    session: Session<'a>,
+    layer: Descriptor,
 }
 
 #[derive(Debug)]
@@ -59,6 +62,14 @@ impl Cache {
             registry: registry.trim_end_matches('/').to_string(),
             namespace: namespace.trim_matches('/').to_string(),
             credentials: None,
+            is_http_allowed: false,
+        }
+    }
+
+    pub fn allow_http(self) -> Cache {
+        Cache {
+            is_http_allowed: true,
+            ..self
         }
     }
 
@@ -71,11 +82,18 @@ impl Cache {
     }
 
     pub fn exists(&self, name: &str, key: &Key) -> Result<bool, Error> {
-        let mut session = self.session(name, "pull");
+        let mut session = self.session(name, "pull")?;
         let url = session.url(&format!("manifests/{key}"));
         let response = session.request(&url, |agent| {
             agent.head(&url).header("Accept", manifest::MANIFEST).call()
-        })?;
+        });
+
+        let response = match response {
+            Err(Error::Status { status: 403, .. }) if self.credentials.is_none() => {
+                return Ok(false);
+            }
+            response => response?,
+        };
 
         match response.status().as_u16() {
             200 => Ok(true),
@@ -88,7 +106,7 @@ impl Cache {
         &self,
         key: &Key,
         derivation: &Derivation,
-        references: &BTreeSet<Key>,
+        references: &BTreeMap<Key, String>,
         archive: &Path,
     ) -> Result<(), Error> {
         let Derivation::Build(build) = derivation else {
@@ -102,7 +120,7 @@ impl Cache {
             .and_then(|mut file| io::copy(&mut file, &mut hasher))
             .map_err(io_at(archive))?;
 
-        let mut session = self.session(&build.name, "pull,push");
+        let mut session = self.session(&build.name, "pull,push")?;
         let config = Descriptor {
             media_type: manifest::CONFIG.into(),
             digest: encode(&Sha256::digest(&json)),
@@ -130,8 +148,8 @@ impl Cache {
         expect(response, &url, 201).map(drop)
     }
 
-    pub fn pull(&self, name: &str, key: &Key) -> Result<Pulled, Error> {
-        let mut session = self.session(name, "pull");
+    pub fn pull(&self, name: &str, key: &Key) -> Result<Pulled<'_>, Error> {
+        let mut session = self.session(name, "pull")?;
         let url = session.url(&format!("manifests/{key}"));
         let response = session.request(&url, |agent| {
             agent.get(&url).header("Accept", manifest::MANIFEST).call()
@@ -171,41 +189,33 @@ impl Cache {
             .unwrap_or_default()
             .split(',')
             .filter(|reference| !reference.is_empty())
-            .map(str::parse)
-            .collect::<Result<BTreeSet<Key>, _>>()
-            .map_err(invalid)?;
+            .map(reference)
+            .collect::<Result<BTreeMap<Key, String>, Error>>()?;
 
-        let layer_url = session.url(&format!("blobs/{}", layer.digest));
-        let response = session.request(&layer_url, |agent| {
-            agent
-                .get(&layer_url)
-                .config()
-                .timeout_per_call(Some(transfer(layer.size)))
-                .build()
-                .call()
-        })?;
-
-        let reader = expect(response, &layer_url, 200)?.into_body().into_reader();
         Ok(Pulled {
             derivation,
             references,
-            archive: Box::new(Verified {
-                reader,
-                hasher: Sha256::new(),
-                expected: layer.clone(),
-                read: 0,
-            }),
+            digest: layer.digest.clone(),
+            layer: layer.clone(),
+            session,
         })
     }
 
-    fn session(&self, name: &str, actions: &str) -> Session<'_> {
+    fn session(&self, name: &str, actions: &str) -> Result<Session<'_>, Error> {
+        if !self.registry.starts_with("https://") && !self.is_http_allowed {
+            return Err(Error::Invalid(format!(
+                "refusing plain HTTP to {} unless allowed",
+                self.registry
+            )));
+        }
+
         let repository = format!("{}/{name}", self.namespace);
-        Session {
+        Ok(Session {
             cache: self,
             scope: format!("repository:{repository}:{actions}"),
             repository,
             authorization: None,
-        }
+        })
     }
 
     fn is_registry(&self, url: &str) -> bool {
@@ -269,6 +279,29 @@ impl Cache {
     }
 }
 
+impl Pulled<'_> {
+    pub fn archive(mut self) -> Result<Box<dyn Read>, Error> {
+        let layer = self.layer;
+        let url = self.session.url(&format!("blobs/{}", layer.digest));
+        let response = self.session.request(&url, |agent| {
+            agent
+                .get(&url)
+                .config()
+                .timeout_per_call(Some(transfer(layer.size)))
+                .build()
+                .call()
+        })?;
+
+        let reader = expect(response, &url, 200)?.into_body().into_reader();
+        Ok(Box::new(Verified {
+            reader,
+            hasher: Sha256::new(),
+            expected: layer,
+            read: 0,
+        }))
+    }
+}
+
 struct Session<'a> {
     cache: &'a Cache,
     repository: String,
@@ -296,7 +329,7 @@ impl Session<'_> {
         };
 
         let response = send(self.authorization.as_deref())?;
-        if response.status() != 401 || self.authorization.is_some() || !is_registry {
+        if response.status() != 401 || !is_registry {
             return Ok(response);
         }
 
@@ -437,6 +470,27 @@ fn encode(hash: &[u8]) -> String {
 
 fn transfer(size: u64) -> Duration {
     TIMEOUT.saturating_add(Duration::from_secs(size / SLOWEST))
+}
+
+fn reference(text: &str) -> Result<(Key, String), Error> {
+    let (name, key) = text
+        .split_once(':')
+        .ok_or_else(|| Error::Invalid(format!("reference {text:?} has no name")))?;
+
+    let is_name = name
+        .bytes()
+        .next()
+        .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        && name
+            .bytes()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-');
+    if !is_name {
+        return Err(Error::Invalid(format!(
+            "reference {text:?} has an invalid name"
+        )));
+    }
+
+    Ok((key.parse().map_err(invalid)?, name.to_string()))
 }
 
 fn verify_key(key: &Key, derivation: &Derivation) -> Result<(), Error> {

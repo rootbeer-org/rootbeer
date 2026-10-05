@@ -42,7 +42,7 @@ fn download(url: &str, sha256: &Sha256, path: &Path) -> Result<(), Failure> {
 
     let response = agent.get(url).call()?;
     let mut staged = tempfile::Builder::new()
-        .prefix(".tmp-")
+        .prefix(".fetch-")
         .tempfile_in(STORE_ROOT)?;
 
     io::copy(

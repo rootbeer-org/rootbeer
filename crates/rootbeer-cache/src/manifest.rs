@@ -1,6 +1,6 @@
 use rootbeer_drv::{Build, Key};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 pub(crate) const MANIFEST: &str = "application/vnd.oci.image.manifest.v1+json";
 pub(crate) const ARTIFACT: &str = "application/vnd.rootbeer.output.v1";
@@ -38,11 +38,14 @@ impl Manifest {
     pub(crate) fn output(
         key: &Key,
         build: &Build,
-        references: &BTreeSet<Key>,
+        references: &BTreeMap<Key, String>,
         config: Descriptor,
         layer: Descriptor,
     ) -> Manifest {
-        let references = references.iter().map(Key::as_str).collect::<Vec<_>>();
+        let references = references
+            .iter()
+            .map(|(key, name)| format!("{name}:{key}"))
+            .collect::<Vec<_>>();
         let annotations = BTreeMap::from([
             (KEY.to_string(), key.to_string()),
             (NAME.to_string(), build.name.clone()),

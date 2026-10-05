@@ -1,9 +1,9 @@
-use crate::{Error, Origin, ROOT, Store, pack, unpack};
+use crate::{Error, Origin, ROOT, Store, pack, seal, unpack};
 use rootbeer_drv::Key;
 use sha2::Digest;
 use std::collections::BTreeSet;
 use std::fs;
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Read};
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::Path;
 use std::process::Command;
@@ -74,6 +74,7 @@ fn packing_is_deterministic_and_round_trips() {
 
     let target = tempfile::tempdir().unwrap();
     unpack(bytes.as_slice(), target.path()).unwrap();
+    seal(target.path()).unwrap();
     assert_eq!(packed(target.path()), bytes);
 
     let mode = fs::metadata(target.path()).unwrap().permissions().mode();
@@ -138,11 +139,15 @@ fn ingest_moves_in_a_whole_output_or_nothing() {
     fs::create_dir(&store_directory).unwrap();
     let store = Store::open(root.path()).unwrap();
 
-    let path = store.ingest("entry", bytes.as_slice()).unwrap();
+    let path = store
+        .ingest("entry", &mut bytes.as_slice(), |_| Ok(()))
+        .unwrap();
     assert_eq!(path, store_directory.join("entry"));
     assert_eq!(packed(&path), bytes);
 
-    let error = store.ingest("entry", bytes.as_slice()).unwrap_err();
+    let error = store
+        .ingest("entry", &mut bytes.as_slice(), |_| Ok(()))
+        .unwrap_err();
     let is_taken =
         matches!(&error, Error::Io { source, .. } if source.kind() == ErrorKind::AlreadyExists);
 
@@ -154,7 +159,10 @@ fn ingest_moves_in_a_whole_output_or_nothing() {
     ];
 
     for (entry, archive) in failures {
-        assert!(store.ingest(entry, archive).is_err(), "{entry}");
+        assert!(
+            store.ingest(entry, &mut &archive[..], |_| Ok(())).is_err(),
+            "{entry}"
+        );
     }
 
     let names: Vec<_> = fs::read_dir(&store_directory)
@@ -295,10 +303,14 @@ fn sealing_registers_only_a_callers_own_plain_build() {
 }
 
 #[test]
-fn pulling_replaces_leftovers_and_records_the_archive_digest() {
+fn pulling_replaces_leftovers_and_registers_only_the_expected_archive() {
     let source = tempfile::tempdir().unwrap();
     tree(source.path());
     let bytes = packed(source.path());
+    let digest = format!(
+        "sha256:{}",
+        data_encoding::HEXLOWER.encode(&sha2::Sha256::digest(&bytes))
+    );
 
     let root = store_root();
     let key: Key = "a".repeat(32).parse().unwrap();
@@ -313,18 +325,39 @@ fn pulling_replaces_leftovers_and_records_the_archive_digest() {
     let slashed = format!("{link}/");
 
     let error = store
-        .pull(&key, &slashed, &BTreeSet::new(), bytes.as_slice())
+        .pull(&key, &slashed, &digest, &BTreeSet::new(), bytes.as_slice())
         .unwrap_err();
 
     assert!(matches!(error, Error::Refused(_)), "{error}");
     assert!(outside.path().join("kept").exists());
 
+    // A separate read for the trailing byte, so only draining to EOF sees it.
+    let wrong = format!("sha256:{}", "0".repeat(64));
+    for (expected, trailing) in [(wrong.as_str(), &[][..]), (digest.as_str(), &[0][..])] {
+        let archive = bytes.as_slice().chain(trailing);
+        let error = store
+            .pull(&key, &entry, expected, &BTreeSet::new(), archive)
+            .unwrap_err();
+
+        assert!(
+            error.to_string().starts_with("the archive is sha256:"),
+            "{error}"
+        );
+        let names: Vec<_> = fs::read_dir(root.path().join("store"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+
+        assert_eq!(names, [link.as_str()]);
+        assert_eq!(store.path(&key).unwrap(), None);
+    }
+
     let path = store
-        .pull(&key, &entry, &BTreeSet::new(), bytes.as_slice())
+        .pull(&key, &entry, &digest, &BTreeSet::new(), bytes.as_slice())
         .unwrap();
 
     assert!(path.join("a/file").exists());
-    let digest: String = store
+    let recorded: String = store
         .connection
         .query_row(
             "SELECT digest FROM outputs WHERE key = ?1",
@@ -333,8 +366,7 @@ fn pulling_replaces_leftovers_and_records_the_archive_digest() {
         )
         .unwrap();
 
-    let expected = data_encoding::HEXLOWER.encode(&sha2::Sha256::digest(&bytes));
-    assert_eq!(digest, format!("sha256:{expected}"));
+    assert_eq!(recorded, digest);
 
     let reader = Store::open_read_only(root.path()).unwrap();
     assert_eq!(reader.path(&key).unwrap(), Some(path.clone()));

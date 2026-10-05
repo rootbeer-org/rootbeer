@@ -116,10 +116,10 @@ pub(crate) fn unpack(reader: impl Read, directory: &Path) -> Result<(), Error> {
         }
     }
 
-    seal(directory)
+    Ok(())
 }
 
-fn seal(root: &Path) -> Result<(), Error> {
+pub(crate) fn seal(root: &Path) -> Result<(), Error> {
     for entry in WalkDir::new(root).contents_first(true) {
         let entry = entry.map_err(|error| io_at(root)(error.into()))?;
         let path = entry.path();

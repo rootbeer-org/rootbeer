@@ -1749,6 +1749,7 @@ dependencies = [
  "libc",
  "owo-colors",
  "rootbeer-build",
+ "rootbeer-cache",
  "rootbeer-core",
  "rootbeer-drv",
  "rootbeer-eval",

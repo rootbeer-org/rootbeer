@@ -2,8 +2,8 @@ use crate::{Error, Origin, Store, io_at};
 use data_encoding::HEXLOWER;
 use rootbeer_drv::Key;
 use rustix::fs::{
-    AtFlags, Dir, FileType, Gid, Mode, OFlags, Stat, Uid, chownat, fchmod, fchown, fstat, fsync,
-    openat, statat,
+    AtFlags, Dir, FileType, FlockOperation, Gid, Mode, OFlags, Stat, Uid, chownat, fchmod, fchown,
+    fstat, fsync, openat, statat,
 };
 use rustix::io::Errno;
 use sha2::{Digest, Sha256};
@@ -13,6 +13,7 @@ use std::fs;
 use std::io::{self, Read};
 use std::os::fd::{BorrowedFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 // Nonblocking so that opening a FIFO returns, and it can then be refused.
@@ -31,6 +32,7 @@ impl Store {
         builder: u32,
         references: &BTreeSet<Key>,
     ) -> Result<PathBuf, Error> {
+        let _lock = self.exclusive()?;
         if let Some(path) = self.path(key)? {
             return Ok(path);
         }
@@ -65,15 +67,18 @@ impl Store {
         Ok(path)
     }
 
-    /// Unpacks a pulled archive for `key` and registers it with the sha256 of
-    /// the archive as read, so the digest never comes from the caller.
+    /// Unpacks a pulled archive for `key`. The whole stream must hash to
+    /// `digest` before the entry is renamed into place and registered, so a
+    /// caller that stops early can't pass off a partial archive.
     pub fn pull(
         &mut self,
         key: &Key,
         entry: &str,
+        digest: &str,
         references: &BTreeSet<Key>,
         archive: impl Read,
     ) -> Result<PathBuf, Error> {
+        let _lock = self.exclusive()?;
         if let Some(path) = self.path(key)? {
             return Ok(path);
         }
@@ -87,12 +92,56 @@ impl Store {
             hasher: Sha256::new(),
         };
 
-        self.ingest(entry, &mut hashing)?;
-        io::copy(&mut hashing, &mut io::sink()).map_err(io_at(&path))?;
+        self.ingest(entry, &mut hashing, |hashing| {
+            io::copy(hashing, &mut io::sink()).map_err(io_at(&path))?;
 
-        let digest = format!("sha256:{}", HEXLOWER.encode(&hashing.hasher.finalize()));
-        self.register(key, entry, Origin::Pulled, Some(&digest), references)?;
+            let actual = format!(
+                "sha256:{}",
+                HEXLOWER.encode(&hashing.hasher.clone().finalize())
+            );
+            if actual != digest {
+                return Err(Error::Refused(format!(
+                    "the archive is {actual}, not {digest}"
+                )));
+            }
+
+            Ok(())
+        })?;
+
+        self.register(key, entry, Origin::Pulled, Some(digest), references)?;
         Ok(path)
+    }
+
+    fn exclusive(&self) -> Result<fs::File, Error> {
+        let path = self.root.join("var/lock");
+        let lock = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .open(&path)
+            .map_err(io_at(&path))?;
+
+        rustix::fs::flock(&lock, FlockOperation::LockExclusive)
+            .map_err(|error| io_at(&path)(error.into()))?;
+
+        let store = self.root.join("store");
+        for item in fs::read_dir(&store).map_err(io_at(&store))? {
+            let item = item.map_err(io_at(&store))?;
+            let staged = item.path();
+            let metadata = item.metadata().map_err(io_at(&staged))?;
+            if !item.file_name().as_bytes().starts_with(b".tmp-") || metadata.uid() != 0 {
+                continue;
+            }
+
+            let removed = match metadata.is_dir() {
+                true => fs::remove_dir_all(&staged),
+                false => fs::remove_file(&staged),
+            };
+
+            removed.map_err(io_at(&staged))?;
+        }
+
+        Ok(lock)
     }
 
     /// The path of `entry`, which must be named for `key`.

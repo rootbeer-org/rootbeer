@@ -6,12 +6,14 @@
 #   scripts/linux.sh build zstd
 #   RB_PLATFORM=linux/amd64 scripts/linux.sh build zlib
 #   RB_CATALOG=../pdr scripts/linux.sh show zlib
+#   RB_STORE_VOLUME=rb-scratch scripts/linux.sh install zlib <key> ...
 set -eu
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 catalog=$(cd "${RB_CATALOG:-$root/../pdr}" && pwd)
 platform=${RB_PLATFORM:-linux/arm64}
 arch=${platform#linux/}
+store=${RB_STORE_VOLUME:-rb-store-$arch}
 
 docker run --rm --platform "$platform" \
     --volume "$root:/src:ro" \
@@ -23,15 +25,17 @@ docker run --rm --platform "$platform" \
 
 # bubblewrap needs to create namespaces and mount its own /proc. The image
 # can't contain its own hash, so the sandbox learns it from RB_HOST_SYSTEM.
+# The host network lets a registry on the host's loopback be reached.
 builder="$catalog/.github/builder"
 image=$(docker build --quiet --platform "$platform" "$builder")
 hash=$(shasum -a 256 < "$builder/Dockerfile")
 exec docker run --rm --init --platform "$platform" \
+    --network host \
     --env "RB_HOST_SYSTEM=builder-sha256:${hash%% *}" \
     --security-opt seccomp=unconfined \
     --security-opt apparmor=unconfined \
     --security-opt systempaths=unconfined \
-    --volume "rb-store-$arch:/opt/rb" \
+    --volume "$store:/opt/rb" \
     --volume "rb-target-$arch:/target:ro" \
     --volume "$catalog:/catalog:ro" \
     --workdir /catalog \

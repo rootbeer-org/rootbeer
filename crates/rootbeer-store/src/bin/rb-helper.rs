@@ -14,7 +14,7 @@ use std::path::Path;
 
 const SHARED: [&str; 3] = ["store", "var/build", "var/log"];
 const USAGE: &str = "usage: rb-helper setup <group> | seal <key> <entry> [reference...] | \
-                     pull <key> <entry> [reference...] < archive";
+                     pull <key> <entry> <digest> [reference...] < archive";
 
 fn main() {
     for (name, _) in std::env::vars_os() {
@@ -53,12 +53,12 @@ fn run() -> Result<String, String> {
 
             Ok(path.display().to_string())
         }
-        [command, key, entry, references @ ..] if command == "pull" => {
+        [command, key, entry, digest, references @ ..] if command == "pull" => {
             authorize(root)?;
             let (key, references) = parse(key, references)?;
             let mut store = Store::open(root).map_err(|error| error.to_string())?;
             let path = store
-                .pull(&key, entry, &references, io::stdin().lock())
+                .pull(&key, entry, digest, &references, io::stdin().lock())
                 .map_err(|error| error.to_string())?;
 
             Ok(path.display().to_string())
@@ -119,9 +119,11 @@ fn setup(root: &Path, group: &str) -> Result<String, String> {
     }
 
     Store::open(root).map_err(|error| error.to_string())?;
+    let database = root.join("var/db.sqlite");
+    let at = |error: io::Error| format!("{}: {error}", database.display());
+    chown(&database, Some(0), Some(trusted)).map_err(at)?;
+    fs::set_permissions(&database, fs::Permissions::from_mode(0o640)).map_err(at)?;
 
-    // Written and synced under a temporary name, so a partial setuid binary
-    // never runs.
     let libexec = root.join("libexec");
     let helper = libexec.join("rb-helper");
     let staged = libexec.join(".rb-helper");

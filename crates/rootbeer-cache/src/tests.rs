@@ -1,11 +1,11 @@
 use crate::manifest::{self, Descriptor, Manifest};
-use crate::{Cache, Error, Verified, encode};
+use crate::{Cache, Error, Verified, encode, reference};
 use rootbeer_drv::{Build, Derivation, Key, Platform};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 fn build() -> Build {
     Build {
@@ -97,9 +97,9 @@ fn serve(
 #[test]
 fn manifests_match_the_published_contract() {
     let key: Key = "a".repeat(32).parse().unwrap();
-    let references = BTreeSet::from([
-        "b".repeat(32).parse().unwrap(),
-        "c".repeat(32).parse().unwrap(),
+    let references = BTreeMap::from([
+        ("b".repeat(32).parse().unwrap(), "lz4".to_string()),
+        ("c".repeat(32).parse().unwrap(), "zlib".to_string()),
     ]);
 
     let digest = |digit: char| format!("sha256:{}", digit.to_string().repeat(64));
@@ -172,7 +172,7 @@ fn pulls_refuse_what_a_hostile_registry_serves() {
         let manifest = Manifest::output(
             &key,
             &build(),
-            &BTreeSet::new(),
+            &BTreeMap::new(),
             descriptor(manifest::CONFIG, &config),
             descriptor(manifest::LAYER, &layer),
         );
@@ -218,16 +218,18 @@ fn pulls_refuse_what_a_hostile_registry_serves() {
             (200, String::new(), body.clone())
         });
 
-        let pulled = Cache::new(&registry, "rootbeer-test/store")
+        let cache = Cache::new(&registry, "rootbeer-test/store").allow_http();
+        let pulled = cache
             .pull("zlib", &key)
             .map_err(|error| error.to_string())
-            .and_then(|mut pulled| {
+            .and_then(|pulled| {
+                assert_eq!(pulled.derivation, derivation);
                 let mut bytes = Vec::new();
                 pulled
-                    .archive
+                    .archive()
+                    .map_err(|error| error.to_string())?
                     .read_to_end(&mut bytes)
                     .map_err(|error| error.to_string())?;
-                assert_eq!(pulled.derivation, derivation);
                 assert_eq!(bytes, layer);
                 Ok(())
             });
@@ -252,10 +254,16 @@ fn credentials_never_leave_the_registry_in_the_clear() {
     });
 
     let key: Key = "a".repeat(32).parse().unwrap();
-    assert!(Cache::new(&registry, "a").exists("zlib", &key).unwrap());
+    assert!(
+        Cache::new(&registry, "a")
+            .allow_http()
+            .exists("zlib", &key)
+            .unwrap()
+    );
     assert_eq!(realm_log.lock().unwrap()[0].authorization, None);
 
     let error = Cache::new(&registry, "a")
+        .allow_http()
         .with_credentials("user", "secret")
         .exists("zlib", &key)
         .unwrap_err();
@@ -288,11 +296,12 @@ fn uploads_elsewhere_carry_no_authorization() {
     let derivation = Derivation::Build(build());
     let archive = tempfile::NamedTempFile::new().unwrap();
     Cache::new(&registry, "a")
+        .allow_http()
         .with_credentials("user", "secret")
         .push(
             &derivation.key().unwrap(),
             &derivation,
-            &BTreeSet::new(),
+            &BTreeMap::new(),
             archive.path(),
         )
         .unwrap();
@@ -318,11 +327,11 @@ fn uploads_elsewhere_carry_no_authorization() {
 #[ignore = "needs RB_REGISTRY, such as http://localhost:5050 from registry:2"]
 fn outputs_round_trip_through_a_registry() {
     let registry = std::env::var("RB_REGISTRY").unwrap();
-    let cache = Cache::new(&registry, "rootbeer-test/store");
+    let cache = Cache::new(&registry, "rootbeer-test/store").allow_http();
 
     let derivation = Derivation::Build(build());
     let key = derivation.key().unwrap();
-    let references = BTreeSet::from(["b".repeat(32).parse().unwrap()]);
+    let references = BTreeMap::from([("b".repeat(32).parse().unwrap(), "lz4".to_string())]);
     let archive = tempfile::NamedTempFile::new().unwrap();
 
     std::fs::write(archive.path(), b"not really a tar.zst").unwrap();
@@ -337,11 +346,116 @@ fn outputs_round_trip_through_a_registry() {
             .unwrap()
     );
 
-    let mut pulled = cache.pull("zlib", &key).unwrap();
+    let pulled = cache.pull("zlib", &key).unwrap();
     assert_eq!(pulled.derivation, derivation);
     assert_eq!(pulled.references, references);
 
     let mut bytes = Vec::new();
-    pulled.archive.read_to_end(&mut bytes).unwrap();
+    pulled.archive().unwrap().read_to_end(&mut bytes).unwrap();
+    assert_eq!(bytes, b"not really a tar.zst");
+}
+
+#[test]
+fn plain_http_needs_an_explicit_opt_in() {
+    let key: Key = "a".repeat(32).parse().unwrap();
+    let error = Cache::new("http://localhost:1", "a")
+        .exists("zlib", &key)
+        .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "refusing plain HTTP to http://localhost:1 unless allowed"
+    );
+}
+
+#[test]
+fn only_an_anonymous_denial_means_not_cached() {
+    let registry = Arc::new(OnceLock::<String>::new());
+    let realm = registry.clone();
+    let (url, _) = serve(move |request| match request.target.starts_with("/token") {
+        true => (403, String::new(), Vec::new()),
+        false => {
+            let realm = realm.get().unwrap();
+            let challenge = format!("WWW-Authenticate: Bearer realm=\"{realm}/token\"\r\n");
+            (401, challenge, Vec::new())
+        }
+    });
+    registry.set(url.clone()).unwrap();
+
+    let key: Key = "a".repeat(32).parse().unwrap();
+    let cache = Cache::new(&url, "a").allow_http();
+    assert!(!cache.exists("zlib", &key).unwrap());
+
+    let error = cache
+        .with_credentials("user", "secret")
+        .exists("zlib", &key)
+        .unwrap_err();
+    assert!(
+        matches!(error, Error::Status { status: 403, .. }),
+        "{error}"
+    );
+}
+
+#[test]
+fn references_name_a_plain_package() {
+    let key = "b".repeat(32);
+    let cases = [
+        (format!("lz4:{key}"), true),
+        (format!("xz-utils2:{key}"), true),
+        (key.clone(), false),
+        (format!(":{key}"), false),
+        (format!("-x:{key}"), false),
+        (format!("Zlib:{key}"), false),
+        (format!("../x:{key}"), false),
+        ("lz4:nope".into(), false),
+    ];
+
+    for (text, is_valid) in cases {
+        assert_eq!(reference(&text).is_ok(), is_valid, "{text}");
+    }
+}
+
+#[test]
+fn a_token_that_expires_before_the_archive_is_renewed() {
+    let derivation = Derivation::Build(build());
+    let key = derivation.key().unwrap();
+    let config = serde_json::to_vec(&derivation).unwrap();
+    let layer = b"not really a tar.zst".to_vec();
+    let manifest = Manifest::output(
+        &key,
+        &build(),
+        &BTreeMap::new(),
+        descriptor(manifest::CONFIG, &config),
+        descriptor(manifest::LAYER, &layer),
+    );
+    let manifest = serde_json::to_vec(&manifest).unwrap();
+
+    let issued = Mutex::new(0);
+    let (realm, _) = serve(move |_| {
+        let mut issued = issued.lock().unwrap();
+        *issued += 1;
+        (
+            200,
+            String::new(),
+            format!(r#"{{"token":"t{issued}"}}"#).into_bytes(),
+        )
+    });
+
+    let challenge = format!("WWW-Authenticate: Bearer realm=\"{realm}/token\"\r\n");
+    let (registry, _) = serve(move |request| {
+        let is_blob = request.target.contains(&encode(&Sha256::digest(&layer)));
+        let body = match (request.authorization.as_deref(), is_blob) {
+            (None, _) | (Some("Bearer t1"), true) => return (401, challenge.clone(), Vec::new()),
+            (_, true) => &layer,
+            _ if request.target.contains("/manifests/") => &manifest,
+            _ => &config,
+        };
+        (200, String::new(), body.clone())
+    });
+
+    let cache = Cache::new(&registry, "a").allow_http();
+    let pulled = cache.pull("zlib", &key).unwrap();
+
+    let mut bytes = Vec::new();
+    pulled.archive().unwrap().read_to_end(&mut bytes).unwrap();
     assert_eq!(bytes, b"not really a tar.zst");
 }
