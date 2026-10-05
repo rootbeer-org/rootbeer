@@ -38,7 +38,16 @@ export RB_ARTIFACTS="$artifacts"
 
 # Promotion only talks to the registry, so it runs on this machine.
 cargo run --quiet --manifest-path "$root/Cargo.toml" --package rootbeer-cli -- \
-    drv promote "$name" "$key" --registry "$url" --from "$staging" --to "$store" --allow-http
+    drv promote "$name" "$key" --registry "$url" --from "$staging" --to "$store" --allow-http \
+    --unattested
+
+# Everything is in store now, so publishing again must push nothing.
+again=$("$linux" publish /artifacts --registry "$url" --namespace "$staging-again" \
+    --skip "$store" --allow-http 2>&1)
+if printf '%s\n' "$again" | grep -v '^skipped '; then
+    echo "publishing with --skip $store still pushed" >&2
+    exit 1
+fi
 
 RB_STORE_VOLUME=$installed "$linux" install "$name" "$key" \
     --registry "$url" --namespace "$store" --allow-http

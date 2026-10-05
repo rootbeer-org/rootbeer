@@ -42,6 +42,13 @@ pub struct Pulled<'a> {
     manifest: Vec<u8>,
 }
 
+pub struct Output<'a> {
+    pub key: &'a Key,
+    pub derivation: &'a Derivation,
+    pub references: &'a BTreeMap<Key, String>,
+    pub archive: &'a Path,
+}
+
 #[derive(Debug)]
 pub enum Error {
     Status { url: String, status: u16 },
@@ -104,53 +111,35 @@ impl Cache {
         }
     }
 
-    pub fn push(
-        &self,
-        key: &Key,
-        derivation: &Derivation,
-        references: &BTreeMap<Key, String>,
-        archive: &Path,
-    ) -> Result<(), Error> {
-        let Derivation::Build(build) = derivation else {
-            return Err(Error::Invalid("only build outputs are cached".into()));
-        };
+    pub fn push(&self, output: &Output, manifest: &[u8]) -> Result<(), Error> {
+        let Described {
+            build,
+            json,
+            manifest: expected,
+        } = describe(output)?;
 
-        if let Some(name) = references.values().find(|name| !is_name(name)) {
+        if expected != manifest {
             return Err(Error::Invalid(format!(
-                "reference name {name:?} is invalid"
+                "the manifest doesn't describe {}",
+                output.key
             )));
         }
 
-        verify_key(key, derivation)?;
-        let json = serde_json::to_vec(derivation).map_err(invalid)?;
-        let mut hasher = Sha256::new();
-        let size = File::open(archive)
-            .and_then(|mut file| io::copy(&mut file, &mut hasher))
-            .map_err(io_at(archive))?;
+        let parsed: Manifest = serde_json::from_slice(manifest).map_err(invalid)?;
+        let [layer] = parsed.layers.as_slice() else {
+            return Err(Error::Invalid("a manifest has one layer".into()));
+        };
 
         let mut session = self.session(&build.name, "pull,push")?;
-        let config = Descriptor {
-            media_type: manifest::CONFIG.into(),
-            digest: encode(&Sha256::digest(&json)),
-            size: json.len() as u64,
-        };
+        session.upload(parsed.config.clone(), || Ok(json.as_slice()))?;
+        session.upload(layer.clone(), || File::open(output.archive))?;
 
-        let config = session.upload(config, || Ok(json.as_slice()))?;
-        let layer = Descriptor {
-            media_type: manifest::LAYER.into(),
-            digest: encode(&hasher.finalize()),
-            size,
-        };
-
-        let layer = session.upload(layer, || File::open(archive))?;
-        let manifest = Manifest::output(key, build, references, config, layer);
-        let body = serde_json::to_vec(&manifest).map_err(invalid)?;
-        let url = session.url(&format!("manifests/{key}"));
+        let url = session.url(&format!("manifests/{}", output.key));
         let response = session.request(&url, |agent| {
             agent
                 .put(&url)
                 .header("Content-Type", manifest::MANIFEST)
-                .send(body.as_slice())
+                .send(manifest)
         })?;
 
         expect(response, &url, 201).map(drop)
@@ -345,6 +334,11 @@ impl Cache {
 }
 
 impl Pulled<'_> {
+    /// The manifest exactly as it was verified, for checking an attestation.
+    pub fn manifest(&self) -> &[u8] {
+        &self.manifest
+    }
+
     pub fn archive(mut self) -> Result<Box<dyn Read>, Error> {
         let layer = self.layer;
         let url = self.session.url(&format!("blobs/{}", layer.digest));
@@ -527,6 +521,55 @@ impl<R: Read> Read for Verified<R> {
 
         Ok(count)
     }
+}
+
+pub fn manifest(output: &Output) -> Result<Vec<u8>, Error> {
+    describe(output).map(|described| described.manifest)
+}
+
+struct Described<'a> {
+    build: &'a rootbeer_drv::Build,
+    json: Vec<u8>,
+    manifest: Vec<u8>,
+}
+
+fn describe<'a>(output: &Output<'a>) -> Result<Described<'a>, Error> {
+    let Derivation::Build(build) = output.derivation else {
+        return Err(Error::Invalid("only build outputs are cached".into()));
+    };
+
+    if let Some(name) = output.references.values().find(|name| !is_name(name)) {
+        return Err(Error::Invalid(format!(
+            "reference name {name:?} is invalid"
+        )));
+    }
+
+    verify_key(output.key, output.derivation)?;
+    let json = serde_json::to_vec(output.derivation).map_err(invalid)?;
+    let mut hasher = Sha256::new();
+    let size = File::open(output.archive)
+        .and_then(|mut file| io::copy(&mut file, &mut hasher))
+        .map_err(io_at(output.archive))?;
+
+    let config = Descriptor {
+        media_type: manifest::CONFIG.into(),
+        digest: encode(&Sha256::digest(&json)),
+        size: json.len() as u64,
+    };
+
+    let layer = Descriptor {
+        media_type: manifest::LAYER.into(),
+        digest: encode(&hasher.finalize()),
+        size,
+    };
+
+    let manifest = Manifest::output(output.key, build, output.references, config, layer);
+    let manifest = serde_json::to_vec(&manifest).map_err(invalid)?;
+    Ok(Described {
+        build,
+        json,
+        manifest,
+    })
 }
 
 fn encode(hash: &[u8]) -> String {

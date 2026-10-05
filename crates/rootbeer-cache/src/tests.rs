@@ -1,5 +1,5 @@
 use crate::manifest::{self, Descriptor, Manifest};
-use crate::{Cache, Error, Verified, encode, reference};
+use crate::{Cache, Error, Output, Verified, encode, reference};
 use rootbeer_drv::{Build, Derivation, Key, Platform};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -296,15 +296,17 @@ fn uploads_elsewhere_carry_no_authorization() {
 
     let derivation = Derivation::Build(build());
     let archive = tempfile::NamedTempFile::new().unwrap();
+    let output = Output {
+        key: &derivation.key().unwrap(),
+        derivation: &derivation,
+        references: &BTreeMap::new(),
+        archive: archive.path(),
+    };
+
     Cache::new(&registry, "a")
         .allow_http()
         .with_credentials("user", "secret")
-        .push(
-            &derivation.key().unwrap(),
-            &derivation,
-            &BTreeMap::new(),
-            archive.path(),
-        )
+        .push(&output, &crate::manifest(&output).unwrap())
         .unwrap();
 
     let uploads = elsewhere_log.lock().unwrap().clone();
@@ -336,9 +338,15 @@ fn outputs_round_trip_through_a_registry() {
     let archive = tempfile::NamedTempFile::new().unwrap();
 
     std::fs::write(archive.path(), b"not really a tar.zst").unwrap();
-    cache
-        .push(&key, &derivation, &references, archive.path())
-        .unwrap();
+    let output = Output {
+        key: &key,
+        derivation: &derivation,
+        references: &references,
+        archive: archive.path(),
+    };
+
+    let manifest = crate::manifest(&output).unwrap();
+    cache.push(&output, &manifest).unwrap();
 
     assert!(cache.exists("zlib", &key).unwrap());
     assert!(
@@ -350,6 +358,7 @@ fn outputs_round_trip_through_a_registry() {
     let pulled = cache.pull("zlib", &key).unwrap();
     assert_eq!(pulled.derivation, derivation);
     assert_eq!(pulled.references, references);
+    assert_eq!(pulled.manifest(), manifest);
 
     let mut bytes = Vec::new();
     pulled.archive().unwrap().read_to_end(&mut bytes).unwrap();
@@ -363,6 +372,7 @@ fn outputs_round_trip_through_a_registry() {
     let pulled = promoted.pull("zlib", &key).unwrap();
     assert_eq!(pulled.digest, digest);
     assert_eq!(pulled.references, references);
+    assert_eq!(pulled.manifest(), manifest);
 
     let mut bytes = Vec::new();
     pulled.archive().unwrap().read_to_end(&mut bytes).unwrap();
@@ -429,16 +439,47 @@ fn references_name_a_plain_package() {
 
     let derivation = Derivation::Build(build());
     let references = BTreeMap::from([(key.parse().unwrap(), "Zlib".to_string())]);
-    let error = Cache::new("http://localhost:1", "a")
-        .allow_http()
-        .push(
-            &derivation.key().unwrap(),
-            &derivation,
-            &references,
-            "missing".as_ref(),
-        )
-        .unwrap_err();
+    let error = crate::manifest(&Output {
+        key: &derivation.key().unwrap(),
+        derivation: &derivation,
+        references: &references,
+        archive: "missing".as_ref(),
+    })
+    .unwrap_err();
     assert_eq!(error.to_string(), "reference name \"Zlib\" is invalid");
+}
+
+#[test]
+fn pushes_refuse_a_manifest_of_anything_else() {
+    let (registry, log) = serve(|_| (201, String::new(), Vec::new()));
+    let derivation = Derivation::Build(build());
+    let key = derivation.key().unwrap();
+    let archive = tempfile::NamedTempFile::new().unwrap();
+    let references = BTreeMap::new();
+    let output = Output {
+        key: &key,
+        derivation: &derivation,
+        references: &references,
+        archive: archive.path(),
+    };
+
+    let honest = crate::manifest(&output).unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&honest).unwrap();
+    let pretty = serde_json::to_vec_pretty(&value).unwrap();
+    let cache = Cache::new(&registry, "a").allow_http();
+    let refuse = |manifest: &[u8]| {
+        let error = cache.push(&output, manifest).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!("the manifest doesn't describe {key}")
+        );
+    };
+
+    refuse(b"{}");
+    refuse(&pretty);
+    std::fs::write(archive.path(), b"rebuilt since").unwrap();
+    refuse(&honest);
+    assert!(log.lock().unwrap().is_empty());
 }
 
 #[test]

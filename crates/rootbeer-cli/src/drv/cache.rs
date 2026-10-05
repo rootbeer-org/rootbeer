@@ -4,7 +4,7 @@ use rootbeer_drv::{output_path, Derivation, Key, STORE_ROOT};
 use rootbeer_store::{Store, ROOT};
 use std::collections::BTreeSet;
 use std::fs;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -20,7 +20,11 @@ pub(super) struct Registry {
 
 impl Registry {
     pub(super) fn cache(&self) -> Cache {
-        open(&self.registry, &self.namespace, self.is_http_allowed)
+        self.cache_at(&self.namespace)
+    }
+
+    pub(super) fn cache_at(&self, namespace: &str) -> Cache {
+        open(&self.registry, namespace, self.is_http_allowed)
     }
 }
 
@@ -47,7 +51,7 @@ impl Caches {
     }
 }
 
-fn open(registry: &str, namespace: &str, is_http_allowed: bool) -> Cache {
+pub(super) fn open(registry: &str, namespace: &str, is_http_allowed: bool) -> Cache {
     let mut cache = Cache::new(registry, namespace);
     if is_http_allowed {
         cache = cache.allow_http();
@@ -225,22 +229,24 @@ pub(super) fn helper_pull(
     Ok(())
 }
 
+/// Copies an output and its references between namespaces. With a signer
+/// workflow, each manifest must carry an attestation from it, or nothing more
+/// is copied.
 pub(super) fn promote(
-    registry: &str,
-    from: &str,
-    to: &str,
-    is_http_allowed: bool,
+    source: &Cache,
+    target: &Cache,
+    signer: Option<&str>,
     name: &str,
     key: &Key,
 ) -> Result<(), String> {
-    let source = open(registry, from, is_http_allowed);
-    let target = open(registry, to, is_http_allowed);
-    promote_into(&source, &target, name, key, &mut Vec::new())
+    let mut promoting = Vec::new();
+    promote_into(source, target, signer, name, key, &mut promoting)
 }
 
 fn promote_into(
     source: &Cache,
     target: &Cache,
+    signer: Option<&str>,
     name: &str,
     key: &Key,
     promoting: &mut Vec<Key>,
@@ -257,12 +263,49 @@ fn promote_into(
     }
 
     let pulled = source.pull(name, key).map_err(|error| error.to_string())?;
+    if let Some(signer) = signer {
+        verify_attestation(pulled.manifest(), signer)
+            .map_err(|error| format!("{name} {key} isn't attested: {error}"))?;
+    }
+
     promoting.push(key.clone());
     for (reference, name) in &pulled.references {
-        promote_into(source, target, name, reference, promoting)?;
+        promote_into(source, target, signer, name, reference, promoting)?;
     }
 
     promoting.pop();
     eprintln!("promoting {key} {name}");
     target.promote(pulled).map_err(|error| error.to_string())
+}
+
+fn verify_attestation(manifest: &[u8], signer: &str) -> Result<(), String> {
+    let mut parts = signer.splitn(3, '/');
+    let (Some(owner), Some(repository), Some(_)) = (parts.next(), parts.next(), parts.next())
+    else {
+        return Err(format!("{signer} isn't owner/repository/path"));
+    };
+
+    let mut file = tempfile::NamedTempFile::new().map_err(|error| error.to_string())?;
+    file.write_all(manifest)
+        .map_err(|error| error.to_string())?;
+
+    let output = Command::new("gh")
+        .args(["attestation", "verify"])
+        .arg(file.path())
+        .args([
+            "--repo",
+            &format!("{owner}/{repository}"),
+            "--signer-workflow",
+            signer,
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|error| format!("gh: {error}"))?;
+
+    if !output.status.success() {
+        let reason = String::from_utf8_lossy(&output.stderr);
+        return Err(reason.trim().to_string());
+    }
+
+    Ok(())
 }

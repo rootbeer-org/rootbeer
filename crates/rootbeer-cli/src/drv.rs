@@ -56,6 +56,9 @@ enum Command {
         directory: PathBuf,
         #[command(flatten)]
         registry: cache::Registry,
+        /// Namespace whose outputs aren't pushed again, such as `rootbeer-org/store`
+        #[arg(long)]
+        skip: Vec<String>,
     },
     /// Copy an output and its references between namespaces of a registry
     Promote {
@@ -74,6 +77,13 @@ enum Command {
         /// Allow a plain `http://` registry, such as a local test one
         #[arg(long = "allow-http")]
         is_http_allowed: bool,
+        /// The workflow every output must be attested by, such as
+        /// `rootbeer-org/pdr/.github/workflows/build.yml`
+        #[arg(long, required_unless_present = "is_unattested")]
+        signer_workflow: Option<String>,
+        /// Copy outputs without verifying their attestations, such as in local tests
+        #[arg(long = "unattested", conflicts_with = "signer_workflow")]
+        is_unattested: bool,
     },
     /// Install an output by key from a registry, after what it references
     Install {
@@ -161,7 +171,8 @@ pub fn run(args: Args) {
         Command::Publish {
             directory,
             registry,
-        } => artifact::publish(&directory, &registry),
+            skip,
+        } => artifact::publish(&directory, &registry, &skip),
         Command::Promote {
             name,
             key,
@@ -169,7 +180,14 @@ pub fn run(args: Args) {
             from,
             to,
             is_http_allowed,
-        } => cache::promote(&registry, &from, &to, is_http_allowed, &name, &key),
+            signer_workflow,
+            is_unattested: _,
+        } => {
+            let source = cache::open(&registry, &from, is_http_allowed);
+            let target = cache::open(&registry, &to, is_http_allowed);
+            let signer = signer_workflow.as_deref();
+            cache::promote(&source, &target, signer, &name, &key)
+        }
         Command::Install {
             name,
             key,
