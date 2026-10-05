@@ -1,5 +1,7 @@
 mod cache;
+mod plan;
 
+use rootbeer_cache::Cache;
 use rootbeer_drv::{
     fetch_path, output_path, Build, DependencyKind, Derivation, Key, Platform, STORE_ROOT,
 };
@@ -55,6 +57,18 @@ enum Command {
         #[command(flatten)]
         registry: cache::Registry,
     },
+    /// Print, as JSON levels, the packages CI must build because no cache has them
+    Plan {
+        /// Each `name` or `name@version`; versions default to the platform's
+        #[arg(required = true)]
+        packages: Vec<String>,
+        #[arg(long, value_parser = parse_platform)]
+        platform: Platform,
+        #[command(flatten)]
+        caches: cache::Caches,
+        #[command(flatten)]
+        sources: Sources,
+    },
     /// Fetch, build, and check a package and its dependencies on this machine
     Build {
         /// `name` or `name@version`; defaults to the platform's default version
@@ -62,6 +76,8 @@ enum Command {
         /// Show build output as it happens, as well as logging it
         #[arg(long = "verbose")]
         is_verbose: bool,
+        #[command(flatten)]
+        caches: cache::Caches,
         #[command(flatten)]
         sources: Sources,
     },
@@ -98,11 +114,18 @@ pub fn run(args: Args) {
         } => show(&sources, &package, platform),
         Command::Keys { sources } => keys(&sources),
         Command::Diff { base, head } => diff(&base, &head),
+        Command::Plan {
+            packages,
+            platform,
+            caches,
+            sources,
+        } => plan::plan(&sources, &packages, platform, &caches),
         Command::Build {
             package,
             is_verbose,
+            caches,
             sources,
-        } => build(&sources, &package, is_verbose),
+        } => build(&sources, &package, is_verbose, &caches),
         Command::Push {
             package,
             registry,
@@ -144,17 +167,17 @@ fn store_error(error: rootbeer_store::Error) -> String {
     )
 }
 
-fn build(sources: &Sources, package: &str, is_verbose: bool) -> Result<(), String> {
+fn build(
+    sources: &Sources,
+    package: &str,
+    is_verbose: bool,
+    caches: &cache::Caches,
+) -> Result<(), String> {
     let (graph, target) = evaluate(sources, package, None)?;
     let package = graph
         .packages
         .get(&target)
         .ok_or_else(|| format!("{target} did not evaluate"))?;
-
-    let mut order = Vec::new();
-    for key in std::iter::once(&package.build).chain(&package.check) {
-        dependencies_first(&graph.derivations, key, &mut order);
-    }
 
     let root = Path::new(ROOT);
     let logs = root.join("var/log");
@@ -172,8 +195,32 @@ fn build(sources: &Sources, package: &str, is_verbose: bool) -> Result<(), Strin
     }
     .map_err(store_error)?;
 
-    let jobs = std::thread::available_parallelism().map_err(|error| error.to_string())?;
+    let caches = caches.open();
+    let mut resolver = Resolver {
+        derivations: &graph.derivations,
+        published: graph
+            .packages
+            .values()
+            .map(|package| &package.build)
+            .collect(),
+        caches: &caches,
+        store: &mut store,
+        is_root,
+        order: Vec::new(),
+        seen: BTreeSet::new(),
+    };
+
+    for key in std::iter::once(&package.build).chain(&package.check) {
+        resolver.resolve(key)?;
+    }
+
+    let Resolver { order, seen, .. } = resolver;
     let mut references = BTreeMap::new();
+    for key in &seen {
+        present_references(&store, key, &mut references)?;
+    }
+
+    let jobs = std::thread::available_parallelism().map_err(|error| error.to_string())?;
 
     for key in &order {
         // Checks aren't outputs, so they run every time.
@@ -287,31 +334,88 @@ impl Write for Output {
     }
 }
 
-fn dependencies_first(derivations: &BTreeMap<Key, Derivation>, key: &Key, order: &mut Vec<Key>) {
-    if order.contains(key) {
-        return;
+struct Resolver<'a> {
+    derivations: &'a BTreeMap<Key, Derivation>,
+    published: BTreeSet<&'a Key>,
+    caches: &'a [Cache],
+    store: &'a mut Store,
+    is_root: bool,
+    order: Vec<Key>,
+    seen: BTreeSet<Key>,
+}
+
+impl Resolver<'_> {
+    fn resolve(&mut self, key: &Key) -> Result<(), String> {
+        if !self.seen.insert(key.clone()) {
+            return Ok(());
+        }
+
+        if self
+            .store
+            .path(key)
+            .map_err(|error| error.to_string())?
+            .is_some()
+        {
+            return Ok(());
+        }
+
+        let derivations = self.derivations;
+        let (named, dependencies) = match derivations.get(key) {
+            Some(Derivation::Build(build)) => {
+                let cache = match self.published.contains(key) {
+                    true => cache::find(self.caches, &build.name, key)?,
+                    false => None,
+                };
+
+                if let Some(cache) = cache {
+                    return cache::install_into(cache, self.store, self.is_root, &build.name, key);
+                }
+
+                (
+                    build.inputs.values().collect(),
+                    build.dependencies.as_slice(),
+                )
+            }
+            Some(Derivation::Check(check)) => (vec![&check.target], check.dependencies.as_slice()),
+            Some(Derivation::Fetch(_)) | None => (Vec::new(), [].as_slice()),
+        };
+
+        // Runtime dependencies aren't visible to the build.
+        let dependencies = dependencies
+            .iter()
+            .filter(|dependency| dependency.kind != DependencyKind::Runtime)
+            .map(|dependency| &dependency.key);
+
+        for named in named.into_iter().chain(dependencies) {
+            self.resolve(named)?;
+        }
+
+        self.order.push(key.clone());
+        Ok(())
+    }
+}
+
+fn present_references(
+    store: &Store,
+    key: &Key,
+    references: &mut BTreeMap<Key, BTreeSet<Key>>,
+) -> Result<(), String> {
+    if references.contains_key(key)
+        || store
+            .path(key)
+            .map_err(|error| error.to_string())?
+            .is_none()
+    {
+        return Ok(());
     }
 
-    let (named, dependencies) = match derivations.get(key) {
-        Some(Derivation::Build(build)) => (
-            build.inputs.values().collect(),
-            build.dependencies.as_slice(),
-        ),
-        Some(Derivation::Check(check)) => (vec![&check.target], check.dependencies.as_slice()),
-        Some(Derivation::Fetch(_)) | None => (Vec::new(), [].as_slice()),
-    };
-
-    // Runtime dependencies aren't visible to the build.
-    let dependencies = dependencies
-        .iter()
-        .filter(|dependency| dependency.kind != DependencyKind::Runtime)
-        .map(|dependency| &dependency.key);
-
-    for named in named.into_iter().chain(dependencies) {
-        dependencies_first(derivations, named, order);
+    let found = store.references(key).map_err(|error| error.to_string())?;
+    for reference in &found {
+        present_references(store, reference, references)?;
     }
 
-    order.push(key.clone());
+    references.insert(key.clone(), found);
+    Ok(())
 }
 
 fn label(derivation: Option<&Derivation>) -> String {
@@ -320,6 +424,25 @@ fn label(derivation: Option<&Derivation>) -> String {
         Some(Derivation::Check(check)) => format!("check {}", check.name),
         Some(Derivation::Fetch(_)) | None => "fetch".to_string(),
     }
+}
+
+/// `name` or `name@version` on `platform`, defaulting to its default version.
+fn target(catalog: &Catalog, package: &str, platform: Platform) -> Result<Target, String> {
+    let (name, version) = match package.split_once('@') {
+        Some((name, version)) => (name, version),
+        None => {
+            let version = catalog.default_version(package, platform).ok_or_else(|| {
+                format!("{package} is not in the catalog or has no default version on {platform}")
+            })?;
+            (package, version)
+        }
+    };
+
+    Ok(Target {
+        name: name.to_string(),
+        version: version.to_string(),
+        platform,
+    })
 }
 
 fn evaluate(
@@ -338,22 +461,7 @@ fn evaluate(
         .map_err(|error| format!("{error}; pass --platform"))?,
     };
 
-    let (name, version) = match package.split_once('@') {
-        Some((name, version)) => (name, version),
-        None => {
-            let version = catalog.default_version(package, platform).ok_or_else(|| {
-                format!("{package} is not in the catalog or has no default version on {platform}")
-            })?;
-            (package, version)
-        }
-    };
-
-    let target = Target {
-        name: name.to_string(),
-        version: version.to_string(),
-        platform,
-    };
-
+    let target = target(&catalog, package, platform)?;
     let graph = catalog
         .evaluate(&hosts, std::slice::from_ref(&target))
         .map_err(|error| error.to_string())?;

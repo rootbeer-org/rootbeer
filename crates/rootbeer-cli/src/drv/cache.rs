@@ -20,19 +20,77 @@ pub(super) struct Registry {
 
 impl Registry {
     fn cache(&self) -> Cache {
-        let mut cache = Cache::new(&self.registry, &self.namespace);
-        if self.is_http_allowed {
-            cache = cache.allow_http();
-        }
-
-        let user = std::env::var("RB_REGISTRY_USER");
-        let token = std::env::var("RB_REGISTRY_TOKEN");
-        if let (Ok(user), Ok(token)) = (user, token) {
-            cache = cache.with_credentials(&user, &token);
-        }
-
-        cache
+        open(&self.registry, &self.namespace, self.is_http_allowed)
     }
+}
+
+#[derive(clap::Args, Debug)]
+pub(super) struct Caches {
+    #[arg(long, requires = "namespaces")]
+    registry: Option<String>,
+    #[arg(long = "from", requires = "registry")]
+    namespaces: Vec<String>,
+    #[arg(long = "allow-http", requires = "registry")]
+    is_http_allowed: bool,
+}
+
+impl Caches {
+    pub(super) fn open(&self) -> Vec<Cache> {
+        let Some(registry) = &self.registry else {
+            return Vec::new();
+        };
+
+        self.namespaces
+            .iter()
+            .map(|namespace| open(registry, namespace, self.is_http_allowed))
+            .collect()
+    }
+}
+
+fn open(registry: &str, namespace: &str, is_http_allowed: bool) -> Cache {
+    let mut cache = Cache::new(registry, namespace);
+    if is_http_allowed {
+        cache = cache.allow_http();
+    }
+
+    let user = std::env::var("RB_REGISTRY_USER");
+    let token = std::env::var("RB_REGISTRY_TOKEN");
+    if let (Ok(user), Ok(token)) = (user, token) {
+        cache = cache.with_credentials(&user, &token);
+    }
+
+    cache
+}
+
+pub(super) fn find<'a>(
+    caches: &'a [Cache],
+    name: &str,
+    key: &Key,
+) -> Result<Option<&'a Cache>, String> {
+    for cache in caches {
+        if cache.exists(name, key).map_err(|error| error.to_string())? {
+            return Ok(Some(cache));
+        }
+    }
+
+    Ok(None)
+}
+
+pub(super) fn install_into(
+    cache: &Cache,
+    store: &mut Store,
+    is_root: bool,
+    name: &str,
+    key: &Key,
+) -> Result<(), String> {
+    let mut installer = Installer {
+        cache,
+        store,
+        is_root,
+        installing: Vec::new(),
+    };
+
+    installer.visit(name, key)
 }
 
 pub(super) fn push(sources: &Sources, package: &str, registry: &Registry) -> Result<(), String> {
@@ -119,15 +177,7 @@ pub(super) fn install(name: &str, key: &Key, registry: &Registry) -> Result<(), 
     }
     .map_err(store_error)?;
 
-    let cache = registry.cache();
-    let mut installer = Installer {
-        cache: &cache,
-        store: &mut store,
-        is_root,
-        installing: Vec::new(),
-    };
-
-    installer.visit(name, key)?;
+    install_into(&registry.cache(), &mut store, is_root, name, key)?;
     let path = store
         .path(key)
         .map_err(|error| error.to_string())?
