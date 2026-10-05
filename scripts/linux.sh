@@ -7,6 +7,7 @@
 #   RB_PLATFORM=linux/amd64 scripts/linux.sh build zlib
 #   RB_CATALOG=../pdr scripts/linux.sh show zlib
 #   RB_STORE_VOLUME=rb-scratch scripts/linux.sh install zlib <key> ...
+#   RB_ARTIFACTS=/tmp/out scripts/linux.sh export zstd /artifacts
 set -eu
 
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -14,6 +15,7 @@ catalog=$(cd "${RB_CATALOG:-$root/../pdr}" && pwd)
 platform=${RB_PLATFORM:-linux/arm64}
 arch=${platform#linux/}
 store=${RB_STORE_VOLUME:-rb-store-$arch}
+artifacts=${RB_ARTIFACTS:+$(cd "$RB_ARTIFACTS" && pwd)}
 
 docker run --rm --platform "$platform" \
     --volume "$root:/src:ro" \
@@ -39,4 +41,5 @@ exec docker run --rm --init --platform "$platform" \
     --volume "rb-target-$arch:/target:ro" \
     --volume "$catalog:/catalog:ro" \
     --workdir /catalog \
+    ${artifacts:+--volume "$artifacts:/artifacts"} \
     "$image" /target/debug/rb drv "$@"

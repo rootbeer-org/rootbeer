@@ -1,8 +1,8 @@
-use super::{evaluate, store_error, Sources, HELPER};
+use super::{store_error, HELPER};
 use rootbeer_cache::Cache;
 use rootbeer_drv::{output_path, Derivation, Key, STORE_ROOT};
-use rootbeer_store::{pack, Store, ROOT};
-use std::collections::{BTreeMap, BTreeSet};
+use rootbeer_store::{Store, ROOT};
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::{self, Read};
 use std::path::Path;
@@ -19,7 +19,7 @@ pub(super) struct Registry {
 }
 
 impl Registry {
-    fn cache(&self) -> Cache {
+    pub(super) fn cache(&self) -> Cache {
         open(&self.registry, &self.namespace, self.is_http_allowed)
     }
 }
@@ -93,59 +93,7 @@ pub(super) fn install_into(
     installer.visit(name, key)
 }
 
-pub(super) fn push(sources: &Sources, package: &str, registry: &Registry) -> Result<(), String> {
-    let (graph, target) = evaluate(sources, package, None)?;
-    let package = graph
-        .packages
-        .get(&target)
-        .ok_or_else(|| format!("{target} did not evaluate"))?;
-
-    let store = Store::open_read_only(Path::new(ROOT)).map_err(store_error)?;
-    let mut order = Vec::new();
-    references_first(&store, &package.build, &mut BTreeSet::new(), &mut order)?;
-
-    let cache = registry.cache();
-    let build_of = |key: &Key| match graph.derivations.get(key) {
-        Some(Derivation::Build(build)) => Ok(build),
-        _ => Err(format!(
-            "{key} isn't a build in the graph, so it can't be pushed"
-        )),
-    };
-
-    for (key, references) in &order {
-        let build = build_of(key)?;
-        let path = store
-            .path(key)
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| format!("{} isn't built, so run `rb drv build` first", build.name))?;
-
-        if cache
-            .exists(&build.name, key)
-            .map_err(|error| error.to_string())?
-        {
-            eprintln!("cached {key} {}@{}", build.name, build.version);
-            continue;
-        }
-
-        let named = references
-            .iter()
-            .map(|reference| Ok((reference.clone(), build_of(reference)?.name.clone())))
-            .collect::<Result<BTreeMap<_, _>, String>>()?;
-
-        let archive = tempfile::NamedTempFile::new().map_err(|error| error.to_string())?;
-        pack(&path, archive.as_file()).map_err(|error| error.to_string())?;
-
-        eprintln!("pushing {key} {}@{}", build.name, build.version);
-        let derivation = Derivation::Build(build.clone());
-        cache
-            .push(key, &derivation, &named, archive.path())
-            .map_err(|error| error.to_string())?;
-    }
-
-    Ok(())
-}
-
-fn references_first(
+pub(super) fn references_first(
     store: &Store,
     key: &Key,
     seen: &mut BTreeSet<Key>,
@@ -245,7 +193,7 @@ impl Installer<'_> {
     }
 }
 
-fn helper_pull(
+pub(super) fn helper_pull(
     key: &Key,
     entry: &str,
     digest: &str,
@@ -275,4 +223,46 @@ fn helper_pull(
     }
 
     Ok(())
+}
+
+pub(super) fn promote(
+    registry: &str,
+    from: &str,
+    to: &str,
+    is_http_allowed: bool,
+    name: &str,
+    key: &Key,
+) -> Result<(), String> {
+    let source = open(registry, from, is_http_allowed);
+    let target = open(registry, to, is_http_allowed);
+    promote_into(&source, &target, name, key, &mut Vec::new())
+}
+
+fn promote_into(
+    source: &Cache,
+    target: &Cache,
+    name: &str,
+    key: &Key,
+    promoting: &mut Vec<Key>,
+) -> Result<(), String> {
+    if promoting.contains(key) {
+        return Err(format!("{name} {key} is in its own references"));
+    }
+
+    if target
+        .exists(name, key)
+        .map_err(|error| error.to_string())?
+    {
+        return Ok(());
+    }
+
+    let pulled = source.pull(name, key).map_err(|error| error.to_string())?;
+    promoting.push(key.clone());
+    for (reference, name) in &pulled.references {
+        promote_into(source, target, name, reference, promoting)?;
+    }
+
+    promoting.pop();
+    eprintln!("promoting {key} {name}");
+    target.promote(pulled).map_err(|error| error.to_string())
 }

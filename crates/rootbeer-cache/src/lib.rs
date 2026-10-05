@@ -38,6 +38,8 @@ pub struct Pulled<'a> {
     pub digest: String,
     session: Session<'a>,
     layer: Descriptor,
+    config: Descriptor,
+    manifest: Vec<u8>,
 }
 
 #[derive(Debug)]
@@ -113,6 +115,12 @@ impl Cache {
             return Err(Error::Invalid("only build outputs are cached".into()));
         };
 
+        if let Some(name) = references.values().find(|name| !is_name(name)) {
+            return Err(Error::Invalid(format!(
+                "reference name {name:?} is invalid"
+            )));
+        }
+
         verify_key(key, derivation)?;
         let json = serde_json::to_vec(derivation).map_err(invalid)?;
         let mut hasher = Sha256::new();
@@ -182,6 +190,11 @@ impl Cache {
         let derivation: Derivation = serde_json::from_slice(&config).map_err(invalid)?;
         verify_key(key, &derivation)?;
 
+        // Promotion puts the output under its build's name
+        if !matches!(&derivation, Derivation::Build(build) if build.name == name) {
+            return Err(Error::Invalid(format!("{url} isn't a build of {name}")));
+        }
+
         let references = manifest
             .annotations
             .get(manifest::REFERENCES)
@@ -197,8 +210,56 @@ impl Cache {
             references,
             digest: layer.digest.clone(),
             layer: layer.clone(),
+            config: manifest.config.clone(),
+            manifest: bytes,
             session,
         })
+    }
+
+    /// Copies an output pulled from another namespace of the same registry into
+    /// this one, without downloading it. The registry mounts its blobs, and the
+    /// manifest that was verified is put unchanged.
+    pub fn promote(&self, pulled: Pulled<'_>) -> Result<(), Error> {
+        let source = pulled.session.cache;
+        if source.registry != self.registry {
+            return Err(Error::Invalid(format!(
+                "{} and {} are different registries",
+                source.registry, self.registry
+            )));
+        }
+
+        let Derivation::Build(build) = &pulled.derivation else {
+            return Err(Error::Invalid("only build outputs are cached".into()));
+        };
+
+        let key = pulled.derivation.key().map_err(invalid)?;
+        let mut session = self.session(&build.name, "pull,push")?;
+        let from = pulled.session.repository.clone();
+        session.scopes.push(format!("repository:{from}:pull"));
+
+        for blob in [&pulled.config, &pulled.layer] {
+            let uploads = session.url("blobs/uploads/");
+            let response = session.request(&uploads, |agent| {
+                agent
+                    .post(&uploads)
+                    .query("mount", &blob.digest)
+                    .query("from", &from)
+                    .send(&[])
+            })?;
+
+            // 202 means the registry started an upload rather than mount
+            expect(response, &uploads, 201)?;
+        }
+
+        let url = session.url(&format!("manifests/{key}"));
+        let response = session.request(&url, |agent| {
+            agent
+                .put(&url)
+                .header("Content-Type", manifest::MANIFEST)
+                .send(pulled.manifest.as_slice())
+        })?;
+
+        expect(response, &url, 201).map(drop)
     }
 
     fn session(&self, name: &str, actions: &str) -> Result<Session<'_>, Error> {
@@ -212,7 +273,7 @@ impl Cache {
         let repository = format!("{}/{name}", self.namespace);
         Ok(Session {
             cache: self,
-            scope: format!("repository:{repository}:{actions}"),
+            scopes: vec![format!("repository:{repository}:{actions}")],
             repository,
             authorization: None,
         })
@@ -223,7 +284,7 @@ impl Cache {
             .is_some_and(|path| path.starts_with('/'))
     }
 
-    fn authorize(&self, header: &str, scope: &str) -> Result<String, Error> {
+    fn authorize(&self, header: &str, scopes: &[String]) -> Result<String, Error> {
         let challenges = http_auth::parse_challenges(header)
             .map_err(|error| Error::Invalid(format!("challenge {header:?}: {error}")))?;
 
@@ -258,7 +319,11 @@ impl Cache {
             )));
         }
 
-        let mut request = self.agent.get(&realm).query("scope", scope);
+        let mut request = self.agent.get(&realm);
+        for scope in scopes {
+            request = request.query("scope", scope);
+        }
+
         if let Some(service) = parameter("service") {
             request = request.query("service", service);
         }
@@ -305,7 +370,7 @@ impl Pulled<'_> {
 struct Session<'a> {
     cache: &'a Cache,
     repository: String,
-    scope: String,
+    scopes: Vec<String>,
     authorization: Option<String>,
 }
 
@@ -339,7 +404,7 @@ impl Session<'_> {
             .and_then(|value| value.to_str().ok())
             .ok_or_else(|| Error::Invalid(format!("{url} returned 401 without a challenge")))?;
 
-        let authorization = self.cache.authorize(challenge, &self.scope)?;
+        let authorization = self.cache.authorize(challenge, &self.scopes)?;
         let response = send(Some(&authorization))?;
         self.authorization = Some(authorization);
         Ok(response)
@@ -477,20 +542,22 @@ fn reference(text: &str) -> Result<(Key, String), Error> {
         .split_once(':')
         .ok_or_else(|| Error::Invalid(format!("reference {text:?} has no name")))?;
 
-    let is_name = name
-        .bytes()
-        .next()
-        .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
-        && name
-            .bytes()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-');
-    if !is_name {
+    if !is_name(name) {
         return Err(Error::Invalid(format!(
             "reference {text:?} has an invalid name"
         )));
     }
 
     Ok((key.parse().map_err(invalid)?, name.to_string()))
+}
+
+fn is_name(name: &str) -> bool {
+    name.bytes()
+        .next()
+        .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        && name
+            .bytes()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
 }
 
 fn verify_key(key: &Key, derivation: &Derivation) -> Result<(), Error> {

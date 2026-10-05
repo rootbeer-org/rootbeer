@@ -1,3 +1,4 @@
+mod artifact;
 mod cache;
 mod plan;
 
@@ -40,14 +41,39 @@ enum Command {
     },
     /// Compare two `keys` outputs: added, removed, and changed packages, and why
     Diff { base: PathBuf, head: PathBuf },
-    /// Push a package's built output and its runtime references to a registry
-    Push {
+    /// Export a package's built output and its runtime references to a directory
+    Export {
         /// `name` or `name@version`; defaults to the platform's default version
         package: String,
-        #[command(flatten)]
-        registry: cache::Registry,
+        directory: PathBuf,
         #[command(flatten)]
         sources: Sources,
+    },
+    /// Install every output exported to a directory, references first
+    Import { directory: PathBuf },
+    /// Push every output exported to a directory to a registry
+    Publish {
+        directory: PathBuf,
+        #[command(flatten)]
+        registry: cache::Registry,
+    },
+    /// Copy an output and its references between namespaces of a registry
+    Promote {
+        /// The package name the output was pushed under
+        name: String,
+        key: Key,
+        /// Base URL of the registry, such as `https://ghcr.io`
+        #[arg(long)]
+        registry: String,
+        /// Namespace to copy from, such as `rootbeer-org/staging`
+        #[arg(long)]
+        from: String,
+        /// Namespace to copy to, such as `rootbeer-org/store`
+        #[arg(long)]
+        to: String,
+        /// Allow a plain `http://` registry, such as a local test one
+        #[arg(long = "allow-http")]
+        is_http_allowed: bool,
     },
     /// Install an output by key from a registry, after what it references
     Install {
@@ -126,11 +152,24 @@ pub fn run(args: Args) {
             caches,
             sources,
         } => build(&sources, &package, is_verbose, &caches),
-        Command::Push {
+        Command::Export {
             package,
-            registry,
+            directory,
             sources,
-        } => cache::push(&sources, &package, &registry),
+        } => artifact::export(&sources, &package, &directory),
+        Command::Import { directory } => artifact::import(&directory),
+        Command::Publish {
+            directory,
+            registry,
+        } => artifact::publish(&directory, &registry),
+        Command::Promote {
+            name,
+            key,
+            registry,
+            from,
+            to,
+            is_http_allowed,
+        } => cache::promote(&registry, &from, &to, is_http_allowed, &name, &key),
         Command::Install {
             name,
             key,

@@ -196,14 +196,15 @@ fn pulls_refuse_what_a_hostile_registry_serves() {
     };
 
     let cases = [
-        (honest(&derivation), Ok(())),
-        (honest(&other), Err("the derivation is")),
-        (foreign, Err("isn't a rootbeer output")),
-        (tampered_config, Err("doesn't match its digest")),
-        (tampered_layer, Err("the archive is sha256:")),
+        (honest(&derivation), "zlib", Ok(())),
+        (honest(&derivation), "zstd", Err("isn't a build of zstd")),
+        (honest(&other), "zlib", Err("the derivation is")),
+        (foreign, "zlib", Err("isn't a rootbeer output")),
+        (tampered_config, "zlib", Err("doesn't match its digest")),
+        (tampered_layer, "zlib", Err("the archive is sha256:")),
     ];
 
-    for ((manifest, served_config, served_layer), expected) in cases {
+    for ((manifest, served_config, served_layer), name, expected) in cases {
         let body = serde_json::to_vec(&manifest).unwrap();
         let manifest_path = format!("/manifests/{key}");
         let config_path = format!("/blobs/{}", manifest.config.digest);
@@ -220,7 +221,7 @@ fn pulls_refuse_what_a_hostile_registry_serves() {
 
         let cache = Cache::new(&registry, "rootbeer-test/store").allow_http();
         let pulled = cache
-            .pull("zlib", &key)
+            .pull(name, &key)
             .map_err(|error| error.to_string())
             .and_then(|pulled| {
                 assert_eq!(pulled.derivation, derivation);
@@ -353,6 +354,19 @@ fn outputs_round_trip_through_a_registry() {
     let mut bytes = Vec::new();
     pulled.archive().unwrap().read_to_end(&mut bytes).unwrap();
     assert_eq!(bytes, b"not really a tar.zst");
+
+    let promoted = Cache::new(&registry, "rootbeer-test/promoted").allow_http();
+    let staged = cache.pull("zlib", &key).unwrap();
+    let digest = staged.digest.clone();
+    promoted.promote(staged).unwrap();
+
+    let pulled = promoted.pull("zlib", &key).unwrap();
+    assert_eq!(pulled.digest, digest);
+    assert_eq!(pulled.references, references);
+
+    let mut bytes = Vec::new();
+    pulled.archive().unwrap().read_to_end(&mut bytes).unwrap();
+    assert_eq!(bytes, b"not really a tar.zst");
 }
 
 #[test]
@@ -411,6 +425,89 @@ fn references_name_a_plain_package() {
 
     for (text, is_valid) in cases {
         assert_eq!(reference(&text).is_ok(), is_valid, "{text}");
+    }
+
+    let derivation = Derivation::Build(build());
+    let references = BTreeMap::from([(key.parse().unwrap(), "Zlib".to_string())]);
+    let error = Cache::new("http://localhost:1", "a")
+        .allow_http()
+        .push(
+            &derivation.key().unwrap(),
+            &derivation,
+            &references,
+            "missing".as_ref(),
+        )
+        .unwrap_err();
+    assert_eq!(error.to_string(), "reference name \"Zlib\" is invalid");
+}
+
+#[test]
+fn promotions_mount_with_pull_on_the_source_and_refuse_a_copy() {
+    let derivation = Derivation::Build(build());
+    let key = derivation.key().unwrap();
+    let config = serde_json::to_vec(&derivation).unwrap();
+    let manifest = Manifest::output(
+        &key,
+        &build(),
+        &BTreeMap::new(),
+        descriptor(manifest::CONFIG, &config),
+        descriptor(manifest::LAYER, b"not really a tar.zst"),
+    );
+
+    let manifest = serde_json::to_vec(&manifest).unwrap();
+    let digest = encode(&Sha256::digest(&config)).replace(':', "%3A");
+    for (mounted, expected) in [(201, None), (202, Some(202))] {
+        let registry = Arc::new(OnceLock::<String>::new());
+        let realm = registry.clone();
+        let (manifest, config) = (manifest.clone(), config.clone());
+        let (url, log) = serve(move |request| {
+            let challenge = format!(
+                "WWW-Authenticate: Bearer realm=\"{}/token\"\r\n",
+                realm.get().unwrap()
+            );
+
+            match (request.method.as_str(), &request.authorization) {
+                _ if request.target.starts_with("/token") => {
+                    (200, String::new(), br#"{"token":"t"}"#.to_vec())
+                }
+                (_, None) => (401, challenge, Vec::new()),
+                ("GET", _) if request.target.contains("/manifests/") => {
+                    (200, String::new(), manifest.clone())
+                }
+                ("GET", _) => (200, String::new(), config.clone()),
+                ("POST", _) => (mounted, String::new(), Vec::new()),
+                _ => (201, String::new(), Vec::new()),
+            }
+        });
+
+        registry.set(url.clone()).unwrap();
+        let staging = Cache::new(&url, "staging").allow_http();
+        let store = Cache::new(&url, "store").allow_http();
+        let result = store.promote(staging.pull("zlib", &key).unwrap());
+        match expected {
+            None => result.unwrap(),
+            Some(status) => assert!(
+                matches!(result, Err(Error::Status { status: actual, .. }) if actual == status)
+            ),
+        }
+
+        let log = log.lock().unwrap();
+        let token = log
+            .iter()
+            .rfind(|request| request.target.starts_with("/token"))
+            .unwrap();
+
+        assert_eq!(
+            token.target,
+            "/token?scope=repository%3Astore%2Fzlib%3Apull%2Cpush\
+             &scope=repository%3Astaging%2Fzlib%3Apull"
+        );
+
+        let mount = log.iter().find(|request| request.method == "POST").unwrap();
+        assert_eq!(
+            mount.target,
+            format!("/v2/store/zlib/blobs/uploads/?mount={digest}&from=staging%2Fzlib")
+        );
     }
 }
 

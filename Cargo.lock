@@ -1746,6 +1746,7 @@ name = "rootbeer-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "data-encoding",
  "libc",
  "owo-colors",
  "rootbeer-build",
@@ -1758,6 +1759,7 @@ dependencies = [
  "rustix",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
 ]
 
