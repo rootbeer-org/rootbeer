@@ -1,7 +1,7 @@
-use super::cache::{helper_pull, references_first, Registry};
+use super::cache::{find, helper_pull, references_first, Registry};
 use super::{evaluate, store_error, Sources};
 use data_encoding::HEXLOWER;
-use rootbeer_cache::{Cache, Output};
+use rootbeer_cache::Output;
 use rootbeer_drv::{output_path, Build, Derivation, Key, STORE_ROOT};
 use rootbeer_store::{pack, Store, ROOT};
 use sha2::{Digest, Sha256};
@@ -9,7 +9,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::slice;
 
 const DERIVATION: &str = "derivation.json";
 const REFERENCES: &str = "references";
@@ -111,17 +110,9 @@ pub(super) fn publish(
         .map(|namespace| registry.cache_at(namespace))
         .collect::<Vec<_>>();
 
-    let is_in = |caches: &[Cache], name: &str, key: &Key| {
-        for cache in caches {
-            if cache.exists(name, key).map_err(|error| error.to_string())? {
-                return Ok(true);
-            }
-        }
+    let is_published =
+        |name: &str, key: &Key| cache.exists(name, key).map_err(|error| error.to_string());
 
-        Ok::<_, String>(false)
-    };
-
-    let target = slice::from_ref(&cache);
     for Artifact {
         key,
         build,
@@ -130,18 +121,18 @@ pub(super) fn publish(
         manifest,
     } in read(directory)?
     {
-        if is_in(&skipped, &build.name, &key)? {
+        if find(&skipped, &build.name, &key)?.is_some() {
             eprintln!("skipped {key} {}", build.name);
             continue;
         }
 
-        if is_in(target, &build.name, &key)? {
+        if is_published(&build.name, &key)? {
             eprintln!("cached {key} {}", build.name);
             continue;
         }
 
         for (reference, name) in &references {
-            if !is_in(target, name, reference)? && !is_in(&skipped, name, reference)? {
+            if !is_published(name, reference)? && find(&skipped, name, reference)?.is_none() {
                 return Err(format!(
                     "{key} references {name} {reference}, which isn't published"
                 ));

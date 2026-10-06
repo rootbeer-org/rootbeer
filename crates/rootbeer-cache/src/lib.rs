@@ -115,6 +115,8 @@ impl Cache {
         let Described {
             build,
             json,
+            config,
+            layer,
             manifest: expected,
         } = describe(output)?;
 
@@ -125,14 +127,9 @@ impl Cache {
             )));
         }
 
-        let parsed: Manifest = serde_json::from_slice(manifest).map_err(invalid)?;
-        let [layer] = parsed.layers.as_slice() else {
-            return Err(Error::Invalid("a manifest has one layer".into()));
-        };
-
         let mut session = self.session(&build.name, "pull,push")?;
-        session.upload(parsed.config.clone(), || Ok(json.as_slice()))?;
-        session.upload(layer.clone(), || File::open(output.archive))?;
+        session.upload(config, || Ok(json.as_slice()))?;
+        session.upload(layer, || File::open(output.archive))?;
 
         let url = session.url(&format!("manifests/{}", output.key));
         let response = session.request(&url, |agent| {
@@ -334,7 +331,7 @@ impl Cache {
 }
 
 impl Pulled<'_> {
-    /// The manifest exactly as it was verified, for checking an attestation.
+    /// The manifest exactly as it was pulled, for a verifier to check.
     pub fn manifest(&self) -> &[u8] {
         &self.manifest
     }
@@ -530,6 +527,8 @@ pub fn manifest(output: &Output) -> Result<Vec<u8>, Error> {
 struct Described<'a> {
     build: &'a rootbeer_drv::Build,
     json: Vec<u8>,
+    config: Descriptor,
+    layer: Descriptor,
     manifest: Vec<u8>,
 }
 
@@ -563,11 +562,20 @@ fn describe<'a>(output: &Output<'a>) -> Result<Described<'a>, Error> {
         size,
     };
 
-    let manifest = Manifest::output(output.key, build, output.references, config, layer);
+    let manifest = Manifest::output(
+        output.key,
+        build,
+        output.references,
+        config.clone(),
+        layer.clone(),
+    );
+
     let manifest = serde_json::to_vec(&manifest).map_err(invalid)?;
     Ok(Described {
         build,
         json,
+        config,
+        layer,
         manifest,
     })
 }

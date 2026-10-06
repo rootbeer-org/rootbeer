@@ -37,14 +37,33 @@ export RB_ARTIFACTS="$artifacts"
 "$linux" publish /artifacts --registry "$url" --namespace "$staging" --allow-http
 
 # Promotion only talks to the registry, so it runs on this machine.
-cargo run --quiet --manifest-path "$root/Cargo.toml" --package rootbeer-cli -- \
-    drv promote "$name" "$key" --registry "$url" --from "$staging" --to "$store" --allow-http \
-    --unattested
+promote() {
+    cargo run --quiet --manifest-path "$root/Cargo.toml" --package rootbeer-cli -- \
+        drv promote "$1" "$2" --registry "$url" --from "$staging" --to "$3" --allow-http \
+        --unverified
+}
+
+# With only a reference in a skipped namespace, that reference is left alone
+# and the output using it is still pushed.
+reference=$(head -n 1 "$artifacts/$key/references")
+if [ -n "$reference" ]; then
+    partial=$run/partial
+    promote "${reference%%:*}" "${reference#*:}" "$partial"
+    pushed=$("$linux" publish /artifacts --registry "$url" --namespace "$partial-staging" \
+        --skip "$partial" --allow-http 2>&1)
+    if ! printf '%s\n' "$pushed" | grep -q "^skipped ${reference#*:} " ||
+        ! printf '%s\n' "$pushed" | grep -q "^publishing $key "; then
+        echo "publishing with --skip $partial didn't skip $reference and push $key" >&2
+        exit 1
+    fi
+fi
+
+promote "$name" "$key" "$store"
 
 # Everything is in store now, so publishing again must push nothing.
 again=$("$linux" publish /artifacts --registry "$url" --namespace "$staging-again" \
     --skip "$store" --allow-http 2>&1)
-if printf '%s\n' "$again" | grep -v '^skipped '; then
+if printf '%s\n' "$again" | grep -E '^(publishing|cached) '; then
     echo "publishing with --skip $store still pushed" >&2
     exit 1
 fi

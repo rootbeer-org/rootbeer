@@ -3,7 +3,7 @@ use crate::{Cache, Error, Output, Verified, encode, reference};
 use rootbeer_drv::{Build, Derivation, Key, Platform};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -35,6 +35,7 @@ struct Request {
     method: String,
     target: String,
     authorization: Option<String>,
+    body: Vec<u8>,
 }
 
 type Reply = (u16, String, Vec<u8>);
@@ -66,13 +67,15 @@ fn serve(
             };
 
             let length = header("content-length").map_or(0, |value| value.parse().unwrap());
-            io::copy(&mut (&mut reader).take(length), &mut io::sink()).unwrap();
+            let mut body = Vec::new();
+            (&mut reader).take(length).read_to_end(&mut body).unwrap();
 
             let mut parts = lines[0].split(' ');
             let request = Request {
                 method: parts.next().unwrap().into(),
                 target: parts.next().unwrap().into(),
                 authorization: header("authorization"),
+                body,
             };
 
             let (status, headers, body) = respond(&request);
@@ -500,7 +503,7 @@ fn promotions_mount_with_pull_on_the_source_and_refuse_a_copy() {
     for (mounted, expected) in [(201, None), (202, Some(202))] {
         let registry = Arc::new(OnceLock::<String>::new());
         let realm = registry.clone();
-        let (manifest, config) = (manifest.clone(), config.clone());
+        let (served, config) = (manifest.clone(), config.clone());
         let (url, log) = serve(move |request| {
             let challenge = format!(
                 "WWW-Authenticate: Bearer realm=\"{}/token\"\r\n",
@@ -513,7 +516,7 @@ fn promotions_mount_with_pull_on_the_source_and_refuse_a_copy() {
                 }
                 (_, None) => (401, challenge, Vec::new()),
                 ("GET", _) if request.target.contains("/manifests/") => {
-                    (200, String::new(), manifest.clone())
+                    (200, String::new(), served.clone())
                 }
                 ("GET", _) => (200, String::new(), config.clone()),
                 ("POST", _) => (mounted, String::new(), Vec::new()),
@@ -549,6 +552,12 @@ fn promotions_mount_with_pull_on_the_source_and_refuse_a_copy() {
             mount.target,
             format!("/v2/store/zlib/blobs/uploads/?mount={digest}&from=staging%2Fzlib")
         );
+
+        let put = log.iter().rfind(|request| request.method == "PUT");
+        match expected {
+            None => assert_eq!(put.unwrap().body, manifest),
+            Some(_) => assert!(put.is_none()),
+        }
     }
 }
 

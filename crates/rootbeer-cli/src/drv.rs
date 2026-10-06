@@ -2,7 +2,6 @@ mod artifact;
 mod cache;
 mod plan;
 
-use rootbeer_cache::Cache;
 use rootbeer_drv::{
     fetch_path, output_path, Build, DependencyKind, Derivation, Key, Platform, STORE_ROOT,
 };
@@ -56,7 +55,8 @@ enum Command {
         directory: PathBuf,
         #[command(flatten)]
         registry: cache::Registry,
-        /// Namespace whose outputs aren't pushed again, such as `rootbeer-org/store`
+        /// Namespace whose outputs aren't pushed again, such as
+        /// `rootbeer-org/store`
         #[arg(long)]
         skip: Vec<String>,
     },
@@ -77,13 +77,17 @@ enum Command {
         /// Allow a plain `http://` registry, such as a local test one
         #[arg(long = "allow-http")]
         is_http_allowed: bool,
-        /// The workflow every output must be attested by, such as
-        /// `rootbeer-org/pdr/.github/workflows/build.yml`
-        #[arg(long, required_unless_present = "is_unattested")]
-        signer_workflow: Option<String>,
-        /// Copy outputs without verifying their attestations, such as in local tests
-        #[arg(long = "unattested", conflicts_with = "signer_workflow")]
-        is_unattested: bool,
+        /// Program run on each manifest before it's copied, given the
+        /// manifest's path. Any exit but success stops the promotion.
+        #[arg(
+            long,
+            value_name = "PROGRAM",
+            required_unless_present = "is_unverified"
+        )]
+        verify: Option<PathBuf>,
+        /// Copy outputs without verifying them, such as in local tests
+        #[arg(long = "unverified", conflicts_with = "verify")]
+        is_unverified: bool,
     },
     /// Install an output by key from a registry, after what it references
     Install {
@@ -180,13 +184,12 @@ pub fn run(args: Args) {
             from,
             to,
             is_http_allowed,
-            signer_workflow,
-            is_unattested: _,
+            verify,
+            is_unverified: _,
         } => {
             let source = cache::open(&registry, &from, is_http_allowed);
             let target = cache::open(&registry, &to, is_http_allowed);
-            let signer = signer_workflow.as_deref();
-            cache::promote(&source, &target, signer, &name, &key)
+            cache::promote(&source, &target, verify.as_deref(), &name, &key)
         }
         Command::Install {
             name,
@@ -252,7 +255,7 @@ fn build(
     }
     .map_err(store_error)?;
 
-    let caches = caches.open();
+    let sources = caches.open();
     let mut resolver = Resolver {
         derivations: &graph.derivations,
         published: graph
@@ -260,7 +263,7 @@ fn build(
             .values()
             .map(|package| &package.build)
             .collect(),
-        caches: &caches,
+        sources: &sources,
         store: &mut store,
         is_root,
         order: Vec::new(),
@@ -394,7 +397,7 @@ impl Write for Output {
 struct Resolver<'a> {
     derivations: &'a BTreeMap<Key, Derivation>,
     published: BTreeSet<&'a Key>,
-    caches: &'a [Cache],
+    sources: &'a [cache::Source],
     store: &'a mut Store,
     is_root: bool,
     order: Vec<Key>,
@@ -419,13 +422,11 @@ impl Resolver<'_> {
         let derivations = self.derivations;
         let (named, dependencies) = match derivations.get(key) {
             Some(Derivation::Build(build)) => {
-                let cache = match self.published.contains(key) {
-                    true => cache::find(self.caches, &build.name, key)?,
-                    false => None,
-                };
+                let is_substituted = self.published.contains(key)
+                    && cache::substitute(self.sources, self.store, self.is_root, &build.name, key)?;
 
-                if let Some(cache) = cache {
-                    return cache::install_into(cache, self.store, self.is_root, &build.name, key);
+                if is_substituted {
+                    return Ok(());
                 }
 
                 (

@@ -5,7 +5,7 @@ use rootbeer_store::{Store, ROOT};
 use std::collections::BTreeSet;
 use std::fs;
 use std::io::{self, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 #[derive(clap::Args, Debug)]
@@ -30,24 +30,53 @@ impl Registry {
 
 #[derive(clap::Args, Debug)]
 pub(super) struct Caches {
-    #[arg(long, requires = "namespaces")]
+    #[arg(long)]
     registry: Option<String>,
     #[arg(long = "from", requires = "registry")]
     namespaces: Vec<String>,
+    /// Namespace whose outputs are used only once `--verify` accepts them,
+    /// such as `rootbeer-org/staging`. It's searched after every `--from`.
+    #[arg(
+        long = "from-verified",
+        value_name = "NAMESPACE",
+        requires_all = ["registry", "verify"]
+    )]
+    verified: Vec<String>,
+    /// Program run on each manifest from a `--from-verified` namespace, given
+    /// the manifest's path. Any exit but success rejects that output.
+    #[arg(long, value_name = "PROGRAM", requires = "verified")]
+    verify: Option<PathBuf>,
     #[arg(long = "allow-http", requires = "registry")]
     is_http_allowed: bool,
 }
 
+/// A namespace to substitute from, and the program its outputs must pass.
+pub(super) struct Source {
+    pub(super) cache: Cache,
+    pub(super) verify: Option<PathBuf>,
+}
+
 impl Caches {
-    pub(super) fn open(&self) -> Vec<Cache> {
+    pub(super) fn open(&self) -> Vec<Source> {
         let Some(registry) = &self.registry else {
             return Vec::new();
         };
 
-        self.namespaces
+        let source = |namespace: &String, verify: Option<PathBuf>| Source {
+            cache: open(registry, namespace, self.is_http_allowed),
+            verify,
+        };
+
+        let trusted = self
+            .namespaces
             .iter()
-            .map(|namespace| open(registry, namespace, self.is_http_allowed))
-            .collect()
+            .map(|namespace| source(namespace, None));
+        let verified = self
+            .verified
+            .iter()
+            .map(|namespace| source(namespace, self.verify.clone()));
+
+        trusted.chain(verified).collect()
     }
 }
 
@@ -80,8 +109,34 @@ pub(super) fn find<'a>(
     Ok(None)
 }
 
+/// Installs an output from the first source that has it. A source anyone can
+/// write to may hold a bad output, so that one is built instead.
+pub(super) fn substitute(
+    sources: &[Source],
+    store: &mut Store,
+    is_root: bool,
+    name: &str,
+    key: &Key,
+) -> Result<bool, String> {
+    for Source { cache, verify } in sources {
+        if !cache.exists(name, key).map_err(|error| error.to_string())? {
+            continue;
+        }
+
+        let result = install_into(cache, verify.as_deref(), store, is_root, name, key);
+        match (result, verify) {
+            (Ok(()), _) => return Ok(true),
+            (Err(error), Some(_)) => eprintln!("not substituting {name} {key}: {error}"),
+            (Err(error), None) => return Err(error),
+        }
+    }
+
+    Ok(false)
+}
+
 pub(super) fn install_into(
     cache: &Cache,
+    verify: Option<&Path>,
     store: &mut Store,
     is_root: bool,
     name: &str,
@@ -89,6 +144,7 @@ pub(super) fn install_into(
 ) -> Result<(), String> {
     let mut installer = Installer {
         cache,
+        verify,
         store,
         is_root,
         installing: Vec::new(),
@@ -129,7 +185,7 @@ pub(super) fn install(name: &str, key: &Key, registry: &Registry) -> Result<(), 
     }
     .map_err(store_error)?;
 
-    install_into(&registry.cache(), &mut store, is_root, name, key)?;
+    install_into(&registry.cache(), None, &mut store, is_root, name, key)?;
     let path = store
         .path(key)
         .map_err(|error| error.to_string())?
@@ -141,6 +197,7 @@ pub(super) fn install(name: &str, key: &Key, registry: &Registry) -> Result<(), 
 
 struct Installer<'a> {
     cache: &'a Cache,
+    verify: Option<&'a Path>,
     store: &'a mut Store,
     is_root: bool,
     installing: Vec<Key>,
@@ -168,6 +225,11 @@ impl Installer<'_> {
         let Derivation::Build(build) = &pulled.derivation else {
             return Err(format!("{key} isn't a build output"));
         };
+
+        if let Some(program) = self.verify {
+            run_verifier(program, pulled.manifest())
+                .map_err(|error| format!("{name} {key} wasn't verified: {error}"))?;
+        }
 
         self.installing.push(key.clone());
         for (reference, name) in &pulled.references {
@@ -229,24 +291,23 @@ pub(super) fn helper_pull(
     Ok(())
 }
 
-/// Copies an output and its references between namespaces. With a signer
-/// workflow, each manifest must carry an attestation from it, or nothing more
-/// is copied.
+/// Copies an output and its references between namespaces. With a verifier,
+/// each manifest must pass it, or nothing more is copied.
 pub(super) fn promote(
     source: &Cache,
     target: &Cache,
-    signer: Option<&str>,
+    verify: Option<&Path>,
     name: &str,
     key: &Key,
 ) -> Result<(), String> {
     let mut promoting = Vec::new();
-    promote_into(source, target, signer, name, key, &mut promoting)
+    promote_into(source, target, verify, name, key, &mut promoting)
 }
 
 fn promote_into(
     source: &Cache,
     target: &Cache,
-    signer: Option<&str>,
+    verify: Option<&Path>,
     name: &str,
     key: &Key,
     promoting: &mut Vec<Key>,
@@ -263,14 +324,14 @@ fn promote_into(
     }
 
     let pulled = source.pull(name, key).map_err(|error| error.to_string())?;
-    if let Some(signer) = signer {
-        verify_attestation(pulled.manifest(), signer)
-            .map_err(|error| format!("{name} {key} isn't attested: {error}"))?;
+    if let Some(program) = verify {
+        run_verifier(program, pulled.manifest())
+            .map_err(|error| format!("{name} {key} wasn't verified: {error}"))?;
     }
 
     promoting.push(key.clone());
     for (reference, name) in &pulled.references {
-        promote_into(source, target, signer, name, reference, promoting)?;
+        promote_into(source, target, verify, name, reference, promoting)?;
     }
 
     promoting.pop();
@@ -278,34 +339,45 @@ fn promote_into(
     target.promote(pulled).map_err(|error| error.to_string())
 }
 
-fn verify_attestation(manifest: &[u8], signer: &str) -> Result<(), String> {
-    let mut parts = signer.splitn(3, '/');
-    let (Some(owner), Some(repository), Some(_)) = (parts.next(), parts.next(), parts.next())
-    else {
-        return Err(format!("{signer} isn't owner/repository/path"));
-    };
-
+/// Runs a verifier on a manifest's exact bytes, which the registry addresses
+/// by their digest. Its output goes to stderr, and any exit but success
+/// rejects the manifest.
+fn run_verifier(program: &Path, manifest: &[u8]) -> Result<(), String> {
     let mut file = tempfile::NamedTempFile::new().map_err(|error| error.to_string())?;
     file.write_all(manifest)
         .map_err(|error| error.to_string())?;
 
-    let output = Command::new("gh")
-        .args(["attestation", "verify"])
+    let status = Command::new(program)
         .arg(file.path())
-        .args([
-            "--repo",
-            &format!("{owner}/{repository}"),
-            "--signer-workflow",
-            signer,
-        ])
         .stdin(Stdio::null())
-        .output()
-        .map_err(|error| format!("gh: {error}"))?;
+        .stdout(io::stderr())
+        .status()
+        .map_err(|error| format!("{}: {error}", program.display()))?;
 
-    if !output.status.success() {
-        let reason = String::from_utf8_lossy(&output.stderr);
-        return Err(reason.trim().to_string());
+    if !status.success() {
+        return Err(format!("{} {status}", program.display()));
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn verifiers_see_the_exact_manifest_and_reject_by_exit_status() {
+        let directory = tempfile::tempdir().unwrap();
+        let program = directory.path().join("verify");
+        fs::write(&program, "#!/bin/sh\n[ \"$(cat \"$1\")\" = signed ]\n").unwrap();
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+
+        run_verifier(&program, b"signed").unwrap();
+        let error = run_verifier(&program, b"forged").unwrap_err();
+        assert!(error.ends_with("exit status: 1"), "{error}");
+
+        let missing = directory.path().join("missing");
+        assert!(run_verifier(&missing, b"signed").is_err());
+    }
 }

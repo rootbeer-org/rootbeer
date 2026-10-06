@@ -27,7 +27,13 @@ pub(super) fn plan(
         .evaluate(&hosts, &targets)
         .map_err(|error| error.to_string())?;
 
-    let caches = caches.open();
+    // Planning only skips work, and building verifies what it substitutes
+    let caches = caches
+        .open()
+        .into_iter()
+        .map(|source| source.cache)
+        .collect::<Vec<_>>();
+
     let levels = levels(&graph, &targets, |name, key| {
         Ok(cache::find(&caches, name, key)?.is_some())
     })?;
