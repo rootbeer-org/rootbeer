@@ -2,8 +2,8 @@ use crate::{Error, Origin, Store, io_at};
 use data_encoding::HEXLOWER;
 use rootbeer_drv::Key;
 use rustix::fs::{
-    AtFlags, Dir, FileType, FlockOperation, Gid, Mode, OFlags, Stat, Uid, chownat, fchmod, fchown,
-    fstat, fsync, openat, statat,
+    AtFlags, Dev, Dir, FileType, FlockOperation, Gid, Mode, OFlags, Stat, Uid, chownat, fchmod,
+    fchown, fstat, fsync, openat, statat,
 };
 use rustix::io::Errno;
 use sha2::{Digest, Sha256};
@@ -51,9 +51,10 @@ impl Store {
             other => errno_at(&path)(other),
         })?;
 
-        let sealer = Sealer {
+        let mut sealer = Sealer {
             builder,
             is_root: rustix::process::geteuid().is_root(),
+            sealed: BTreeSet::new(),
         };
 
         let sealed = sealer.seal(output, &path)?;
@@ -158,17 +159,24 @@ impl Store {
 struct Sealer {
     builder: u32,
     is_root: bool,
+    /// Files with more than one name, which the walk reaches once per name.
+    /// Each is root's after its first, so later names skip the owner check.
+    sealed: BTreeSet<(Dev, u64)>,
 }
 
 impl Sealer {
     /// Seals `fd` and everything under it. A directory is root's and
     /// read-only before it is read, so its entries can no longer change.
-    fn seal(&self, fd: OwnedFd, path: &Path) -> Result<Stat, Error> {
+    fn seal(&mut self, fd: OwnedFd, path: &Path) -> Result<Stat, Error> {
         let at = errno_at(path);
         let stat = fstat(&fd).map_err(&at)?;
-        self.check(&stat, path)?;
-
         let kind = FileType::from_raw_mode(stat.st_mode);
+        let inode = (stat.st_dev, stat.st_ino);
+        if kind == FileType::RegularFile && self.sealed.contains(&inode) {
+            return Ok(stat);
+        }
+
+        self.check(&stat, path)?;
         if !matches!(kind, FileType::RegularFile | FileType::Directory) {
             return Err(Error::Refused(format!(
                 "{} isn't a file, directory, or symlink",
@@ -194,6 +202,10 @@ impl Sealer {
         fsync(&fd).map_err(&at)?;
 
         if kind == FileType::RegularFile {
+            if stat.st_nlink > 1 {
+                self.sealed.insert(inode);
+            }
+
             return Ok(stat);
         }
 
@@ -213,7 +225,7 @@ impl Sealer {
         Ok(stat)
     }
 
-    fn seal_child(&self, parent: BorrowedFd, name: &CStr, path: &Path) -> Result<(), Error> {
+    fn seal_child(&mut self, parent: BorrowedFd, name: &CStr, path: &Path) -> Result<(), Error> {
         let at = errno_at(path);
         let stat = statat(parent, name, AtFlags::SYMLINK_NOFOLLOW).map_err(&at)?;
         if FileType::from_raw_mode(stat.st_mode) != FileType::Symlink {
