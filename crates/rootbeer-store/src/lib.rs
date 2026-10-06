@@ -81,8 +81,8 @@ impl Store {
         db::register(&mut self.connection, key, entry, origin, digest, references)
     }
 
-    /// Unpacks `archive` into a staging directory, then seals it and renames it
-    /// into place only once `verify` accepts what was read.
+    /// Unpacks `archive` into a staging directory, then renames it into place
+    /// and seals it only once `verify` accepts what was read.
     pub(crate) fn ingest<R: Read>(
         &self,
         entry: &str,
@@ -106,9 +106,11 @@ impl Store {
         // writable and its drop can remove it without root.
         unpack(&mut *archive, staging.path())?;
         verify(archive)?;
-        seal(staging.path())?;
 
+        // Sealed in place, since macOS refuses a non-root rename of a directory
+        // that isn't writable. The entry is private and unregistered until then.
         fs::rename(staging.path(), &path).map_err(io_at(&path))?;
+        seal(&path)?;
         fs::File::open(&store)
             .and_then(|directory| directory.sync_all())
             .map_err(io_at(&store))?;
