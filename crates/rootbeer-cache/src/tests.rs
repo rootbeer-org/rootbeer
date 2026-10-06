@@ -1,9 +1,9 @@
 use crate::manifest::{self, Descriptor, Manifest};
-use crate::{Cache, Error, Output, Verified, encode, reference};
+use crate::{Cache, Error, Verified, encode, reference};
 use rootbeer_drv::{Build, Derivation, Key, Platform};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -35,7 +35,6 @@ struct Request {
     method: String,
     target: String,
     authorization: Option<String>,
-    body: Vec<u8>,
 }
 
 type Reply = (u16, String, Vec<u8>);
@@ -67,15 +66,13 @@ fn serve(
             };
 
             let length = header("content-length").map_or(0, |value| value.parse().unwrap());
-            let mut body = Vec::new();
-            (&mut reader).take(length).read_to_end(&mut body).unwrap();
+            io::copy(&mut (&mut reader).take(length), &mut io::sink()).unwrap();
 
             let mut parts = lines[0].split(' ');
             let request = Request {
                 method: parts.next().unwrap().into(),
                 target: parts.next().unwrap().into(),
                 authorization: header("authorization"),
-                body,
             };
 
             let (status, headers, body) = respond(&request);
@@ -253,11 +250,7 @@ fn credentials_never_leave_the_registry_in_the_clear() {
     );
 
     let (registry, _) = serve(move |request| match request.authorization {
-        Some(_) => (
-            200,
-            "Docker-Content-Digest: sha256:0\r\n".into(),
-            Vec::new(),
-        ),
+        Some(_) => (200, String::new(), Vec::new()),
         None => (401, challenge.clone(), Vec::new()),
     });
 
@@ -303,17 +296,15 @@ fn uploads_elsewhere_carry_no_authorization() {
 
     let derivation = Derivation::Build(build());
     let archive = tempfile::NamedTempFile::new().unwrap();
-    let output = Output {
-        key: &derivation.key().unwrap(),
-        derivation: &derivation,
-        references: &BTreeMap::new(),
-        archive: archive.path(),
-    };
-
     Cache::new(&registry, "a")
         .allow_http()
         .with_credentials("user", "secret")
-        .push(&output, &crate::manifest(&output).unwrap())
+        .push(
+            &derivation.key().unwrap(),
+            &derivation,
+            &BTreeMap::new(),
+            archive.path(),
+        )
         .unwrap();
 
     let uploads = elsewhere_log.lock().unwrap().clone();
@@ -345,15 +336,9 @@ fn outputs_round_trip_through_a_registry() {
     let archive = tempfile::NamedTempFile::new().unwrap();
 
     std::fs::write(archive.path(), b"not really a tar.zst").unwrap();
-    let output = Output {
-        key: &key,
-        derivation: &derivation,
-        references: &references,
-        archive: archive.path(),
-    };
-
-    let manifest = crate::manifest(&output).unwrap();
-    cache.push(&output, &manifest).unwrap();
+    cache
+        .push(&key, &derivation, &references, archive.path())
+        .unwrap();
 
     assert!(cache.exists("zlib", &key).unwrap());
     assert!(
@@ -365,21 +350,6 @@ fn outputs_round_trip_through_a_registry() {
     let pulled = cache.pull("zlib", &key).unwrap();
     assert_eq!(pulled.derivation, derivation);
     assert_eq!(pulled.references, references);
-    assert_eq!(pulled.manifest(), manifest);
-
-    let mut bytes = Vec::new();
-    pulled.archive().unwrap().read_to_end(&mut bytes).unwrap();
-    assert_eq!(bytes, b"not really a tar.zst");
-
-    let promoted = Cache::new(&registry, "rootbeer-test/promoted").allow_http();
-    let staged = cache.pull("zlib", &key).unwrap();
-    let digest = staged.digest.clone();
-    promoted.promote(staged).unwrap();
-
-    let pulled = promoted.pull("zlib", &key).unwrap();
-    assert_eq!(pulled.digest, digest);
-    assert_eq!(pulled.references, references);
-    assert_eq!(pulled.manifest(), manifest);
 
     let mut bytes = Vec::new();
     pulled.archive().unwrap().read_to_end(&mut bytes).unwrap();
@@ -427,25 +397,6 @@ fn only_an_anonymous_denial_means_not_cached() {
 }
 
 #[test]
-fn digests_come_from_the_registry_and_are_never_guessed() {
-    let (url, _) = serve(|request| match request.target.as_str() {
-        "/v2/a/zlib/manifests/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" => (
-            200,
-            "Docker-Content-Digest: sha256:1\r\n".into(),
-            Vec::new(),
-        ),
-        "/v2/a/zlib/manifests/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" => (200, String::new(), Vec::new()),
-        _ => (404, String::new(), Vec::new()),
-    });
-
-    let cache = Cache::new(&url, "a").allow_http();
-    let digest = |key: char| cache.digest("zlib", &key.to_string().repeat(32).parse().unwrap());
-    assert_eq!(digest('a').unwrap().as_deref(), Some("sha256:1"));
-    assert!(digest('b').is_err());
-    assert_eq!(digest('c').unwrap(), None);
-}
-
-#[test]
 fn references_name_a_plain_package() {
     let key = "b".repeat(32);
     let cases = [
@@ -465,123 +416,16 @@ fn references_name_a_plain_package() {
 
     let derivation = Derivation::Build(build());
     let references = BTreeMap::from([(key.parse().unwrap(), "Zlib".to_string())]);
-    let error = crate::manifest(&Output {
-        key: &derivation.key().unwrap(),
-        derivation: &derivation,
-        references: &references,
-        archive: "missing".as_ref(),
-    })
-    .unwrap_err();
+    let error = Cache::new("http://localhost:1", "a")
+        .allow_http()
+        .push(
+            &derivation.key().unwrap(),
+            &derivation,
+            &references,
+            "missing".as_ref(),
+        )
+        .unwrap_err();
     assert_eq!(error.to_string(), "reference name \"Zlib\" is invalid");
-}
-
-#[test]
-fn pushes_refuse_a_manifest_of_anything_else() {
-    let (registry, log) = serve(|_| (201, String::new(), Vec::new()));
-    let derivation = Derivation::Build(build());
-    let key = derivation.key().unwrap();
-    let archive = tempfile::NamedTempFile::new().unwrap();
-    let references = BTreeMap::new();
-    let output = Output {
-        key: &key,
-        derivation: &derivation,
-        references: &references,
-        archive: archive.path(),
-    };
-
-    let honest = crate::manifest(&output).unwrap();
-    let value: serde_json::Value = serde_json::from_slice(&honest).unwrap();
-    let pretty = serde_json::to_vec_pretty(&value).unwrap();
-    let cache = Cache::new(&registry, "a").allow_http();
-    let refuse = |manifest: &[u8]| {
-        let error = cache.push(&output, manifest).unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            format!("the manifest doesn't describe {key}")
-        );
-    };
-
-    refuse(b"{}");
-    refuse(&pretty);
-    std::fs::write(archive.path(), b"rebuilt since").unwrap();
-    refuse(&honest);
-    assert!(log.lock().unwrap().is_empty());
-}
-
-#[test]
-fn promotions_mount_with_pull_on_the_source_and_refuse_a_copy() {
-    let derivation = Derivation::Build(build());
-    let key = derivation.key().unwrap();
-    let config = serde_json::to_vec(&derivation).unwrap();
-    let manifest = Manifest::output(
-        &key,
-        &build(),
-        &BTreeMap::new(),
-        descriptor(manifest::CONFIG, &config),
-        descriptor(manifest::LAYER, b"not really a tar.zst"),
-    );
-
-    let manifest = serde_json::to_vec(&manifest).unwrap();
-    let digest = encode(&Sha256::digest(&config)).replace(':', "%3A");
-    for (mounted, expected) in [(201, None), (202, Some(202))] {
-        let registry = Arc::new(OnceLock::<String>::new());
-        let realm = registry.clone();
-        let (served, config) = (manifest.clone(), config.clone());
-        let (url, log) = serve(move |request| {
-            let challenge = format!(
-                "WWW-Authenticate: Bearer realm=\"{}/token\"\r\n",
-                realm.get().unwrap()
-            );
-
-            match (request.method.as_str(), &request.authorization) {
-                _ if request.target.starts_with("/token") => {
-                    (200, String::new(), br#"{"token":"t"}"#.to_vec())
-                }
-                (_, None) => (401, challenge, Vec::new()),
-                ("GET", _) if request.target.contains("/manifests/") => {
-                    (200, String::new(), served.clone())
-                }
-                ("GET", _) => (200, String::new(), config.clone()),
-                ("POST", _) => (mounted, String::new(), Vec::new()),
-                _ => (201, String::new(), Vec::new()),
-            }
-        });
-
-        registry.set(url.clone()).unwrap();
-        let staging = Cache::new(&url, "staging").allow_http();
-        let store = Cache::new(&url, "store").allow_http();
-        let result = store.promote(staging.pull("zlib", &key).unwrap());
-        match expected {
-            None => result.unwrap(),
-            Some(status) => assert!(
-                matches!(result, Err(Error::Status { status: actual, .. }) if actual == status)
-            ),
-        }
-
-        let log = log.lock().unwrap();
-        let token = log
-            .iter()
-            .rfind(|request| request.target.starts_with("/token"))
-            .unwrap();
-
-        assert_eq!(
-            token.target,
-            "/token?scope=repository%3Astore%2Fzlib%3Apull%2Cpush\
-             &scope=repository%3Astaging%2Fzlib%3Apull"
-        );
-
-        let mount = log.iter().find(|request| request.method == "POST").unwrap();
-        assert_eq!(
-            mount.target,
-            format!("/v2/store/zlib/blobs/uploads/?mount={digest}&from=staging%2Fzlib")
-        );
-
-        let put = log.iter().rfind(|request| request.method == "PUT");
-        match expected {
-            None => assert_eq!(put.unwrap().body, manifest),
-            Some(_) => assert!(put.is_none()),
-        }
-    }
 }
 
 #[test]

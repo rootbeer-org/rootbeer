@@ -1,35 +1,14 @@
 use super::cache::{self, Caches};
 use super::{load, target, Sources};
-use rootbeer_drv::{Dependency, DependencyKind, Derivation, Key, Platform};
+use rootbeer_drv::{DependencyKind, Derivation, Key, Platform};
 use rootbeer_eval::{Graph, Target};
 use serde::Serialize;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 #[derive(Serialize)]
-struct Plan<'a> {
+struct Plan {
     platform: Platform,
-    /// What to build, with the key each build must produce, so CI can attest
-    /// a job's own output and nothing else
-    levels: Vec<Vec<Step<'a>>>,
-    /// Every requested package and its build key, cached or not, so CI can
-    /// promote them without evaluating again
-    targets: Vec<Planned<'a>>,
-}
-
-#[derive(Serialize)]
-struct Planned<'a> {
-    name: &'a str,
-    version: &'a str,
-    key: &'a Key,
-}
-
-#[derive(Serialize)]
-struct Step<'a> {
-    #[serde(flatten)]
-    planned: Planned<'a>,
-    /// Planned keys this build imports from earlier levels, which are its
-    /// dependencies and the references of those, and nothing else
-    needs: BTreeSet<&'a Key>,
+    levels: Vec<Vec<String>>,
 }
 
 pub(super) fn plan(
@@ -48,44 +27,22 @@ pub(super) fn plan(
         .evaluate(&hosts, &targets)
         .map_err(|error| error.to_string())?;
 
-    let sources = caches.open();
+    let caches = caches.open();
     let levels = levels(&graph, &targets, |name, key| {
-        cache::is_available(&sources, name, key)
+        Ok(cache::find(&caches, name, key)?.is_some())
     })?;
 
-    let targets = targets
-        .iter()
-        .map(|target| planned(&graph, target))
-        .collect::<Result<Vec<_>, String>>()?;
-
-    let plan = Plan {
-        platform,
-        levels,
-        targets,
-    };
+    let plan = Plan { platform, levels };
     let json = serde_json::to_string(&plan).map_err(|error| error.to_string())?;
     println!("{json}");
     Ok(())
 }
 
-fn planned<'a>(graph: &'a Graph, target: &'a Target) -> Result<Planned<'a>, String> {
-    let package = graph
-        .packages
-        .get(target)
-        .ok_or_else(|| format!("{target} did not evaluate"))?;
-
-    Ok(Planned {
-        name: &target.name,
-        version: &target.version,
-        key: &package.build,
-    })
-}
-
-fn levels<'a>(
-    graph: &'a Graph,
-    targets: &'a [Target],
+fn levels(
+    graph: &Graph,
+    targets: &[Target],
     is_cached: impl FnMut(&str, &Key) -> Result<bool, String>,
-) -> Result<Vec<Vec<Step<'a>>>, String> {
+) -> Result<Vec<Vec<String>>, String> {
     let mut planner = Planner {
         graph,
         is_cached,
@@ -101,15 +58,11 @@ fn levels<'a>(
         planner.level(target)?;
     }
 
-    let mut levels = BTreeMap::<usize, Vec<Step>>::new();
+    let mut levels = BTreeMap::<usize, Vec<String>>::new();
     for (target, level) in &planner.levels {
         if let Some(level) = level {
-            let step = Step {
-                planned: planned(graph, target)?,
-                needs: planner.needs(target)?,
-            };
-
-            levels.entry(*level).or_default().push(step);
+            let name = format!("{}@{}", target.name, target.version);
+            levels.entry(*level).or_default().push(name);
         }
     }
 
@@ -163,54 +116,6 @@ impl<'a, F: FnMut(&str, &Key) -> Result<bool, String>> Planner<'a, F> {
 
         self.levels.insert(target, Some(level));
         Ok(Some(level))
-    }
-
-    /// Building needs the build's own dependencies other than runtime ones,
-    /// and importing each of those needs its references. Cached ones are
-    /// substituted instead, along with what they reference.
-    fn needs(&self, target: &'a Target) -> Result<BTreeSet<&'a Key>, String> {
-        let mut needs = BTreeSet::new();
-        let mut pending = self
-            .dependencies(target)?
-            .filter(|dependency| dependency.kind != DependencyKind::Runtime)
-            .collect::<Vec<_>>();
-
-        while let Some(dependency) = pending.pop() {
-            let below = self
-                .builds
-                .get(&dependency.key)
-                .copied()
-                .ok_or_else(|| format!("{target}'s {} did not evaluate", dependency.name))?;
-
-            let is_planned = matches!(self.levels.get(below), Some(Some(_)));
-            if !is_planned || !needs.insert(&dependency.key) {
-                continue;
-            }
-
-            pending.extend(
-                self.dependencies(below)?
-                    .filter(|dependency| dependency.kind != DependencyKind::Build),
-            );
-        }
-
-        Ok(needs)
-    }
-
-    fn dependencies(
-        &self,
-        target: &'a Target,
-    ) -> Result<impl Iterator<Item = &'a Dependency>, String> {
-        let package = self
-            .graph
-            .packages
-            .get(target)
-            .ok_or_else(|| format!("{target} did not evaluate"))?;
-
-        let Some(Derivation::Build(build)) = self.graph.derivations.get(&package.build) else {
-            return Err(format!("{target} has no build derivation"));
-        };
-
-        Ok(build.dependencies.iter())
     }
 }
 
@@ -304,41 +209,9 @@ mod tests {
         );
 
         let targets = [zstd.clone(), zstd];
-        let names = |levels: &[Vec<Step>]| {
-            levels
-                .iter()
-                .map(|level| {
-                    level
-                        .iter()
-                        .map(|step| format!("{}@{}", step.planned.name, step.planned.version))
-                        .collect::<Vec<_>>()
-                })
-                .collect::<Vec<_>>()
-        };
-
-        let key = |target: &Target| graph.packages[target].build.clone();
-        let needs = |levels: &[Vec<Step>], name: &str| {
-            levels
-                .iter()
-                .flatten()
-                .find(|step| step.planned.name == name)
-                .map(|step| {
-                    step.needs
-                        .iter()
-                        .map(|key| (*key).clone())
-                        .collect::<BTreeSet<_>>()
-                })
-                .unwrap()
-        };
-
         let uncached = levels(&graph, &targets, |_, _| Ok(false)).unwrap();
-        // zlib's build tool isn't a reference, and docs is only needed at runtime
         assert_eq!(
-            needs(&uncached, "zstd"),
-            BTreeSet::from([key(&cmake4), key(&xz), key(&zlib)])
-        );
-        assert_eq!(
-            names(&uncached),
+            uncached,
             [
                 vec!["cmake@3", "cmake@4", "xz@5"],
                 vec!["zlib@1"],
@@ -346,12 +219,8 @@ mod tests {
             ]
         );
 
-        let zlib = key(&zlib);
+        let zlib = graph.packages[&zlib].build.clone();
         let cached = levels(&graph, &targets, |_, key| Ok(*key == zlib)).unwrap();
-        assert_eq!(names(&cached), [vec!["cmake@4", "xz@5"], vec!["zstd@1"]]);
-        assert_eq!(
-            needs(&cached, "zstd"),
-            BTreeSet::from([key(&cmake4), key(&xz)])
-        );
+        assert_eq!(cached, [vec!["cmake@4", "xz@5"], vec!["zstd@1"]]);
     }
 }

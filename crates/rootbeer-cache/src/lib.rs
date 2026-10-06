@@ -38,15 +38,6 @@ pub struct Pulled<'a> {
     pub digest: String,
     session: Session<'a>,
     layer: Descriptor,
-    config: Descriptor,
-    manifest: Vec<u8>,
-}
-
-pub struct Output<'a> {
-    pub key: &'a Key,
-    pub derivation: &'a Derivation,
-    pub references: &'a BTreeMap<Key, String>,
-    pub archive: &'a Path,
 }
 
 #[derive(Debug)]
@@ -91,11 +82,6 @@ impl Cache {
     }
 
     pub fn exists(&self, name: &str, key: &Key) -> Result<bool, Error> {
-        self.digest(name, key).map(|digest| digest.is_some())
-    }
-
-    /// The digest of the manifest tagged with a key, if there is one.
-    pub fn digest(&self, name: &str, key: &Key) -> Result<Option<String>, Error> {
         let mut session = self.session(name, "pull")?;
         let url = session.url(&format!("manifests/{key}"));
         let response = session.request(&url, |agent| {
@@ -104,52 +90,65 @@ impl Cache {
 
         let response = match response {
             Err(Error::Status { status: 403, .. }) if self.credentials.is_none() => {
-                return Ok(None);
+                return Ok(false);
             }
             response => response?,
         };
 
         match response.status().as_u16() {
-            200 => {}
-            404 => return Ok(None),
-            status => return Err(Error::Status { url, status }),
+            200 => Ok(true),
+            404 => Ok(false),
+            status => Err(Error::Status { url, status }),
         }
-
-        let digest = response
-            .headers()
-            .get("docker-content-digest")
-            .and_then(|value| value.to_str().ok())
-            .ok_or_else(|| Error::Invalid(format!("{url} has no Docker-Content-Digest")))?;
-
-        Ok(Some(digest.to_string()))
     }
 
-    pub fn push(&self, output: &Output, manifest: &[u8]) -> Result<(), Error> {
-        let Described {
-            build,
-            json,
-            config,
-            layer,
-            manifest: expected,
-        } = describe(output)?;
+    pub fn push(
+        &self,
+        key: &Key,
+        derivation: &Derivation,
+        references: &BTreeMap<Key, String>,
+        archive: &Path,
+    ) -> Result<(), Error> {
+        let Derivation::Build(build) = derivation else {
+            return Err(Error::Invalid("only build outputs are cached".into()));
+        };
 
-        if expected != manifest {
+        if let Some(name) = references.values().find(|name| !is_name(name)) {
             return Err(Error::Invalid(format!(
-                "the manifest doesn't describe {}",
-                output.key
+                "reference name {name:?} is invalid"
             )));
         }
 
-        let mut session = self.session(&build.name, "pull,push")?;
-        session.upload(config, || Ok(json.as_slice()))?;
-        session.upload(layer, || File::open(output.archive))?;
+        verify_key(key, derivation)?;
+        let json = serde_json::to_vec(derivation).map_err(invalid)?;
+        let mut hasher = Sha256::new();
+        let size = File::open(archive)
+            .and_then(|mut file| io::copy(&mut file, &mut hasher))
+            .map_err(io_at(archive))?;
 
-        let url = session.url(&format!("manifests/{}", output.key));
+        let mut session = self.session(&build.name, "pull,push")?;
+        let config = Descriptor {
+            media_type: manifest::CONFIG.into(),
+            digest: encode(&Sha256::digest(&json)),
+            size: json.len() as u64,
+        };
+
+        let config = session.upload(config, || Ok(json.as_slice()))?;
+        let layer = Descriptor {
+            media_type: manifest::LAYER.into(),
+            digest: encode(&hasher.finalize()),
+            size,
+        };
+
+        let layer = session.upload(layer, || File::open(archive))?;
+        let manifest = Manifest::output(key, build, references, config, layer);
+        let body = serde_json::to_vec(&manifest).map_err(invalid)?;
+        let url = session.url(&format!("manifests/{key}"));
         let response = session.request(&url, |agent| {
             agent
                 .put(&url)
                 .header("Content-Type", manifest::MANIFEST)
-                .send(manifest)
+                .send(body.as_slice())
         })?;
 
         expect(response, &url, 201).map(drop)
@@ -209,56 +208,8 @@ impl Cache {
             references,
             digest: layer.digest.clone(),
             layer: layer.clone(),
-            config: manifest.config.clone(),
-            manifest: bytes,
             session,
         })
-    }
-
-    /// Copies an output pulled from another namespace of the same registry into
-    /// this one, without downloading it. The registry mounts its blobs, and the
-    /// manifest that was verified is put unchanged.
-    pub fn promote(&self, pulled: Pulled<'_>) -> Result<(), Error> {
-        let source = pulled.session.cache;
-        if source.registry != self.registry {
-            return Err(Error::Invalid(format!(
-                "{} and {} are different registries",
-                source.registry, self.registry
-            )));
-        }
-
-        let Derivation::Build(build) = &pulled.derivation else {
-            return Err(Error::Invalid("only build outputs are cached".into()));
-        };
-
-        let key = pulled.derivation.key().map_err(invalid)?;
-        let mut session = self.session(&build.name, "pull,push")?;
-        let from = pulled.session.repository.clone();
-        session.scopes.push(format!("repository:{from}:pull"));
-
-        for blob in [&pulled.config, &pulled.layer] {
-            let uploads = session.url("blobs/uploads/");
-            let response = session.request(&uploads, |agent| {
-                agent
-                    .post(&uploads)
-                    .query("mount", &blob.digest)
-                    .query("from", &from)
-                    .send(&[])
-            })?;
-
-            // 202 means the registry started an upload rather than mount
-            expect(response, &uploads, 201)?;
-        }
-
-        let url = session.url(&format!("manifests/{key}"));
-        let response = session.request(&url, |agent| {
-            agent
-                .put(&url)
-                .header("Content-Type", manifest::MANIFEST)
-                .send(pulled.manifest.as_slice())
-        })?;
-
-        expect(response, &url, 201).map(drop)
     }
 
     fn session(&self, name: &str, actions: &str) -> Result<Session<'_>, Error> {
@@ -344,11 +295,6 @@ impl Cache {
 }
 
 impl Pulled<'_> {
-    /// The manifest exactly as it was pulled, for a verifier to check.
-    pub fn manifest(&self) -> &[u8] {
-        &self.manifest
-    }
-
     pub fn archive(mut self) -> Result<Box<dyn Read>, Error> {
         let layer = self.layer;
         let url = self.session.url(&format!("blobs/{}", layer.digest));
@@ -531,66 +477,6 @@ impl<R: Read> Read for Verified<R> {
 
         Ok(count)
     }
-}
-
-pub fn manifest(output: &Output) -> Result<Vec<u8>, Error> {
-    describe(output).map(|described| described.manifest)
-}
-
-struct Described<'a> {
-    build: &'a rootbeer_drv::Build,
-    json: Vec<u8>,
-    config: Descriptor,
-    layer: Descriptor,
-    manifest: Vec<u8>,
-}
-
-fn describe<'a>(output: &Output<'a>) -> Result<Described<'a>, Error> {
-    let Derivation::Build(build) = output.derivation else {
-        return Err(Error::Invalid("only build outputs are cached".into()));
-    };
-
-    if let Some(name) = output.references.values().find(|name| !is_name(name)) {
-        return Err(Error::Invalid(format!(
-            "reference name {name:?} is invalid"
-        )));
-    }
-
-    verify_key(output.key, output.derivation)?;
-    let json = serde_json::to_vec(output.derivation).map_err(invalid)?;
-    let mut hasher = Sha256::new();
-    let size = File::open(output.archive)
-        .and_then(|mut file| io::copy(&mut file, &mut hasher))
-        .map_err(io_at(output.archive))?;
-
-    let config = Descriptor {
-        media_type: manifest::CONFIG.into(),
-        digest: encode(&Sha256::digest(&json)),
-        size: json.len() as u64,
-    };
-
-    let layer = Descriptor {
-        media_type: manifest::LAYER.into(),
-        digest: encode(&hasher.finalize()),
-        size,
-    };
-
-    let manifest = Manifest::output(
-        output.key,
-        build,
-        output.references,
-        config.clone(),
-        layer.clone(),
-    );
-
-    let manifest = serde_json::to_vec(&manifest).map_err(invalid)?;
-    Ok(Described {
-        build,
-        json,
-        config,
-        layer,
-        manifest,
-    })
 }
 
 fn encode(hash: &[u8]) -> String {

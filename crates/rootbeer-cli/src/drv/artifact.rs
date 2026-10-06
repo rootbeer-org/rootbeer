@@ -1,7 +1,6 @@
-use super::cache::{self, find, helper_pull, references_first, Caches, Registry};
+use super::cache::{helper_pull, references_first, Registry};
 use super::{evaluate, store_error, Sources};
 use data_encoding::HEXLOWER;
-use rootbeer_cache::Output;
 use rootbeer_drv::{output_path, Build, Derivation, Key, STORE_ROOT};
 use rootbeer_store::{pack, Store, ROOT};
 use sha2::{Digest, Sha256};
@@ -13,14 +12,12 @@ use std::path::{Path, PathBuf};
 const DERIVATION: &str = "derivation.json";
 const REFERENCES: &str = "references";
 const ARCHIVE: &str = "archive.tar.zst";
-const MANIFEST: &str = "manifest.json";
 
 struct Artifact {
     key: Key,
     build: Build,
     references: BTreeMap<Key, String>,
     archive: PathBuf,
-    manifest: PathBuf,
 }
 
 pub(super) fn export(sources: &Sources, package: &str, directory: &Path) -> Result<(), String> {
@@ -55,15 +52,10 @@ pub(super) fn export(sources: &Sources, package: &str, directory: &Path) -> Resu
             .map_err(|error| error.to_string())?
             .ok_or_else(|| format!("{key} isn't built, so run `rb drv build` first"))?;
 
-        let references = references
-            .iter()
-            .map(|reference| Ok((reference.clone(), build_of(reference)?.name.clone())))
-            .collect::<Result<BTreeMap<_, _>, String>>()?;
-
         let lines = references
             .iter()
-            .map(|(reference, name)| format!("{name}:{reference}\n"))
-            .collect::<String>();
+            .map(|reference| Ok(format!("{}:{reference}\n", build_of(reference)?.name)))
+            .collect::<Result<String, String>>()?;
 
         // Renamed into place AFTER it's completed
         let staging = tempfile::Builder::new()
@@ -73,24 +65,13 @@ pub(super) fn export(sources: &Sources, package: &str, directory: &Path) -> Resu
 
         let staged = |name: &str| staging.path().join(name);
         let at = |error: io::Error| format!("{}: {error}", staging.path().display());
-        let derivation = Derivation::Build(build.clone());
-        let json = serde_json::to_vec(&derivation).map_err(|error| error.to_string())?;
+        let json = serde_json::to_vec(&Derivation::Build(build.clone()))
+            .map_err(|error| error.to_string())?;
 
         fs::write(staged(DERIVATION), json).map_err(at)?;
         fs::write(staged(REFERENCES), lines).map_err(at)?;
         let archive = File::create(staged(ARCHIVE)).map_err(at)?;
         pack(&path, archive).map_err(|error| error.to_string())?;
-
-        // What CI attests, and so the exact bytes publish must push
-        let manifest = rootbeer_cache::manifest(&Output {
-            key,
-            derivation: &derivation,
-            references: &references,
-            archive: &staged(ARCHIVE),
-        })
-        .map_err(|error| error.to_string())?;
-
-        fs::write(staged(MANIFEST), manifest).map_err(at)?;
 
         fs::rename(staging.path(), &out).map_err(|error| format!("{}: {error}", out.display()))?;
         eprintln!("exported {key} {}", build.name);
@@ -99,100 +80,39 @@ pub(super) fn export(sources: &Sources, package: &str, directory: &Path) -> Resu
     Ok(())
 }
 
-/// Each derivation must hash to its directory's key, which reading checks, and
-/// each manifest must be exactly the one publish would push.
-pub(super) fn validate(directory: &Path) -> Result<(), String> {
-    for Artifact {
-        key,
-        build,
-        references,
-        archive,
-        manifest,
-    } in read(directory)?
-    {
-        let expected = rootbeer_cache::manifest(&Output {
-            key: &key,
-            derivation: &Derivation::Build(build),
-            references: &references,
-            archive: &archive,
-        })
-        .map_err(|error| error.to_string())?;
-
-        let actual =
-            fs::read(&manifest).map_err(|error| format!("{}: {error}", manifest.display()))?;
-        if actual != expected {
-            return Err(format!("{} doesn't describe {key}", manifest.display()));
-        }
-    }
-
-    Ok(())
-}
-
-pub(super) fn publish(
-    directory: &Path,
-    registry: &Registry,
-    skip: &[String],
-) -> Result<(), String> {
+pub(super) fn publish(directory: &Path, registry: &Registry) -> Result<(), String> {
     let cache = registry.cache();
-    let skipped = skip
-        .iter()
-        .map(|namespace| registry.cache_at(namespace))
-        .collect::<Vec<_>>();
-
-    let digest = |name: &str, key: &Key| cache.digest(name, key).map_err(|error| error.to_string());
-
+    let exists = |name: &str, key: &Key| cache.exists(name, key).map_err(|error| error.to_string());
     for Artifact {
         key,
         build,
         references,
         archive,
-        manifest,
     } in read(directory)?
     {
-        if find(&skipped, &build.name, &key)?.is_some() {
-            eprintln!("skipped {key} {}", build.name);
+        if exists(&build.name, &key)? {
+            eprintln!("cached {key} {}", build.name);
             continue;
         }
 
-        let manifest =
-            fs::read(&manifest).map_err(|error| format!("{}: {error}", manifest.display()))?;
-
-        // A different manifest under the key was built elsewhere, perhaps by
-        // workflows that no longer verify, so this one replaces it
-        let ours = format!("sha256:{}", HEXLOWER.encode(&Sha256::digest(&manifest)));
-        match digest(&build.name, &key)? {
-            Some(theirs) if theirs == ours => {
-                eprintln!("cached {key} {}", build.name);
-                continue;
-            }
-            Some(_) => eprintln!("replacing {key} {}", build.name),
-            None => eprintln!("publishing {key} {}", build.name),
-        }
-
         for (reference, name) in &references {
-            if digest(name, reference)?.is_none() && find(&skipped, name, reference)?.is_none() {
+            if !exists(name, reference)? {
                 return Err(format!(
                     "{key} references {name} {reference}, which isn't published"
                 ));
             }
         }
 
-        let output = Output {
-            key: &key,
-            derivation: &Derivation::Build(build),
-            references: &references,
-            archive: &archive,
-        };
-
+        eprintln!("publishing {key} {}", build.name);
         cache
-            .push(&output, &manifest)
+            .push(&key, &Derivation::Build(build), &references, &archive)
             .map_err(|error| error.to_string())?;
     }
 
     Ok(())
 }
 
-pub(super) fn import(directory: &Path, caches: &Caches) -> Result<(), String> {
+pub(super) fn import(directory: &Path) -> Result<(), String> {
     let root = Path::new(ROOT);
     let is_root = rustix::process::geteuid().is_root();
     if is_root {
@@ -205,7 +125,6 @@ pub(super) fn import(directory: &Path, caches: &Caches) -> Result<(), String> {
     }
     .map_err(store_error)?;
 
-    let sources = caches.open();
     let is_present = |store: &Store, key: &Key| {
         store
             .path(key)
@@ -218,23 +137,18 @@ pub(super) fn import(directory: &Path, caches: &Caches) -> Result<(), String> {
         build,
         references,
         archive,
-        ..
     } in read(directory)?
     {
         if is_present(&store, &key)? {
             continue;
         }
 
-        for (reference, name) in &references {
-            if is_present(&store, reference)?
-                || cache::substitute(&sources, &mut store, is_root, name, reference)?
-            {
-                continue;
+        for reference in references.keys() {
+            if !is_present(&store, reference)? {
+                return Err(format!(
+                    "{key} references {reference}, which is neither exported nor present"
+                ));
             }
-
-            return Err(format!(
-                "{key} references {reference}, which is neither exported, present, nor cached"
-            ));
         }
 
         let path = output_path(&key, &build.name, &build.version, "out");
@@ -298,14 +212,14 @@ fn read(directory: &Path) -> Result<Vec<Artifact>, String> {
             })
             .collect::<Result<BTreeMap<Key, String>, String>>()?;
 
+        let archive = path.join(ARCHIVE);
         artifacts.insert(
             key.clone(),
             Artifact {
                 key,
                 build,
                 references,
-                archive: path.join(ARCHIVE),
-                manifest: path.join(MANIFEST),
+                archive,
             },
         );
     }
@@ -379,36 +293,6 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(keys, [used, user]);
-    }
-
-    #[test]
-    fn validating_refuses_a_manifest_of_another_key() {
-        let directory = tempfile::tempdir().unwrap();
-        let [ours, theirs] = ["zlib", "zstd"].map(derivation);
-        let key = ours.key().unwrap();
-        write(directory.path(), key.as_str(), &ours, "");
-
-        let path = directory.path().join(key.as_str());
-        fs::write(path.join(ARCHIVE), b"output").unwrap();
-        let manifest = |derivation: &Derivation| {
-            rootbeer_cache::manifest(&Output {
-                key: &derivation.key().unwrap(),
-                derivation,
-                references: &BTreeMap::new(),
-                archive: &path.join(ARCHIVE),
-            })
-            .unwrap()
-        };
-
-        fs::write(path.join(MANIFEST), manifest(&ours)).unwrap();
-        validate(directory.path()).unwrap();
-
-        fs::write(path.join(MANIFEST), manifest(&theirs)).unwrap();
-        let error = validate(directory.path()).unwrap_err();
-        assert!(
-            error.ends_with(&format!("doesn't describe {key}")),
-            "{error}"
-        );
     }
 
     #[test]

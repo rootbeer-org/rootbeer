@@ -2,6 +2,7 @@ mod artifact;
 mod cache;
 mod plan;
 
+use rootbeer_cache::Cache;
 use rootbeer_drv::{
     fetch_path, output_path, Build, DependencyKind, Derivation, Key, Platform, STORE_ROOT,
 };
@@ -48,54 +49,13 @@ enum Command {
         #[command(flatten)]
         sources: Sources,
     },
-    /// Install every output exported to a directory, references first, taking
-    /// any reference that wasn't exported from the caches
-    Import {
-        directory: PathBuf,
-        #[command(flatten)]
-        caches: cache::Caches,
-    },
-    /// Check every export in a directory without the network, so attesting
-    /// its manifest attests that key's output and nothing else
-    Validate { directory: PathBuf },
+    /// Install every output exported to a directory, references first
+    Import { directory: PathBuf },
     /// Push every output exported to a directory to a registry
     Publish {
         directory: PathBuf,
         #[command(flatten)]
         registry: cache::Registry,
-        /// Namespace whose outputs aren't pushed again, such as
-        /// `rootbeer-org/store`
-        #[arg(long)]
-        skip: Vec<String>,
-    },
-    /// Copy an output and its references between namespaces of a registry
-    Promote {
-        /// The package name the output was pushed under
-        name: String,
-        key: Key,
-        /// Base URL of the registry, such as `https://ghcr.io`
-        #[arg(long)]
-        registry: String,
-        /// Namespace to copy from, such as `rootbeer-org/staging`
-        #[arg(long)]
-        from: String,
-        /// Namespace to copy to, such as `rootbeer-org/store`
-        #[arg(long)]
-        to: String,
-        /// Allow a plain `http://` registry, such as a local test one
-        #[arg(long = "allow-http")]
-        is_http_allowed: bool,
-        /// Program run on each manifest before it's copied, given the
-        /// manifest's path. Any exit but success stops the promotion.
-        #[arg(
-            long,
-            value_name = "PROGRAM",
-            required_unless_present = "is_unverified"
-        )]
-        verify: Option<PathBuf>,
-        /// Copy outputs without verifying them, such as in local tests
-        #[arg(long = "unverified", conflicts_with = "verify")]
-        is_unverified: bool,
     },
     /// Install an output by key from a registry, after what it references
     Install {
@@ -179,27 +139,11 @@ pub fn run(args: Args) {
             directory,
             sources,
         } => artifact::export(&sources, &package, &directory),
-        Command::Import { directory, caches } => artifact::import(&directory, &caches),
-        Command::Validate { directory } => artifact::validate(&directory),
+        Command::Import { directory } => artifact::import(&directory),
         Command::Publish {
             directory,
             registry,
-            skip,
-        } => artifact::publish(&directory, &registry, &skip),
-        Command::Promote {
-            name,
-            key,
-            registry,
-            from,
-            to,
-            is_http_allowed,
-            verify,
-            is_unverified: _,
-        } => {
-            let source = cache::open(&registry, &from, is_http_allowed);
-            let target = cache::open(&registry, &to, is_http_allowed);
-            cache::promote(&source, &target, verify.as_deref(), &name, &key)
-        }
+        } => artifact::publish(&directory, &registry),
         Command::Install {
             name,
             key,
@@ -264,7 +208,7 @@ fn build(
     }
     .map_err(store_error)?;
 
-    let sources = caches.open();
+    let caches = caches.open();
     let mut resolver = Resolver {
         derivations: &graph.derivations,
         published: graph
@@ -272,7 +216,7 @@ fn build(
             .values()
             .map(|package| &package.build)
             .collect(),
-        sources: &sources,
+        caches: &caches,
         store: &mut store,
         is_root,
         order: Vec::new(),
@@ -406,7 +350,7 @@ impl Write for Output {
 struct Resolver<'a> {
     derivations: &'a BTreeMap<Key, Derivation>,
     published: BTreeSet<&'a Key>,
-    sources: &'a [cache::Source],
+    caches: &'a [Cache],
     store: &'a mut Store,
     is_root: bool,
     order: Vec<Key>,
@@ -431,11 +375,13 @@ impl Resolver<'_> {
         let derivations = self.derivations;
         let (named, dependencies) = match derivations.get(key) {
             Some(Derivation::Build(build)) => {
-                let is_substituted = self.published.contains(key)
-                    && cache::substitute(self.sources, self.store, self.is_root, &build.name, key)?;
+                let cache = match self.published.contains(key) {
+                    true => cache::find(self.caches, &build.name, key)?,
+                    false => None,
+                };
 
-                if is_substituted {
-                    return Ok(());
+                if let Some(cache) = cache {
+                    return cache::install_into(cache, self.store, self.is_root, &build.name, key);
                 }
 
                 (
