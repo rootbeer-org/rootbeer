@@ -39,6 +39,7 @@ name=${package%@*}
 
 export RB_ARTIFACTS="$artifacts"
 "$linux" export "$package" /artifacts
+"$linux" validate /artifacts
 "$linux" publish /artifacts --registry "$url" --namespace "$staging" --allow-http
 
 # Promotion only talks to the registry, so it runs on this machine.

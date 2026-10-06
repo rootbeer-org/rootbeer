@@ -99,6 +99,35 @@ pub(super) fn export(sources: &Sources, package: &str, directory: &Path) -> Resu
     Ok(())
 }
 
+/// Each derivation must hash to its directory's key, which reading checks, and
+/// each manifest must be exactly the one publish would push.
+pub(super) fn validate(directory: &Path) -> Result<(), String> {
+    for Artifact {
+        key,
+        build,
+        references,
+        archive,
+        manifest,
+    } in read(directory)?
+    {
+        let expected = rootbeer_cache::manifest(&Output {
+            key: &key,
+            derivation: &Derivation::Build(build),
+            references: &references,
+            archive: &archive,
+        })
+        .map_err(|error| error.to_string())?;
+
+        let actual =
+            fs::read(&manifest).map_err(|error| format!("{}: {error}", manifest.display()))?;
+        if actual != expected {
+            return Err(format!("{} doesn't describe {key}", manifest.display()));
+        }
+    }
+
+    Ok(())
+}
+
 pub(super) fn publish(
     directory: &Path,
     registry: &Registry,
@@ -350,6 +379,36 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(keys, [used, user]);
+    }
+
+    #[test]
+    fn validating_refuses_a_manifest_of_another_key() {
+        let directory = tempfile::tempdir().unwrap();
+        let [ours, theirs] = ["zlib", "zstd"].map(derivation);
+        let key = ours.key().unwrap();
+        write(directory.path(), key.as_str(), &ours, "");
+
+        let path = directory.path().join(key.as_str());
+        fs::write(path.join(ARCHIVE), b"output").unwrap();
+        let manifest = |derivation: &Derivation| {
+            rootbeer_cache::manifest(&Output {
+                key: &derivation.key().unwrap(),
+                derivation,
+                references: &BTreeMap::new(),
+                archive: &path.join(ARCHIVE),
+            })
+            .unwrap()
+        };
+
+        fs::write(path.join(MANIFEST), manifest(&ours)).unwrap();
+        validate(directory.path()).unwrap();
+
+        fs::write(path.join(MANIFEST), manifest(&theirs)).unwrap();
+        let error = validate(directory.path()).unwrap_err();
+        assert!(
+            error.ends_with(&format!("doesn't describe {key}")),
+            "{error}"
+        );
     }
 
     #[test]

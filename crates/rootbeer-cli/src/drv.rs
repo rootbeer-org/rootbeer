@@ -55,6 +55,9 @@ enum Command {
         #[command(flatten)]
         caches: cache::Caches,
     },
+    /// Check every export in a directory without the network, so attesting
+    /// its manifest attests that key's output and nothing else
+    Validate { directory: PathBuf },
     /// Push every output exported to a directory to a registry
     Publish {
         directory: PathBuf,
@@ -177,6 +180,7 @@ pub fn run(args: Args) {
             sources,
         } => artifact::export(&sources, &package, &directory),
         Command::Import { directory, caches } => artifact::import(&directory, &caches),
+        Command::Validate { directory } => artifact::validate(&directory),
         Command::Publish {
             directory,
             registry,
