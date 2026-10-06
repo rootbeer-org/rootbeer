@@ -1,4 +1,4 @@
-use super::cache::{find, helper_pull, references_first, Registry};
+use super::cache::{self, find, helper_pull, references_first, Caches, Registry};
 use super::{evaluate, store_error, Sources};
 use data_encoding::HEXLOWER;
 use rootbeer_cache::Output;
@@ -110,8 +110,7 @@ pub(super) fn publish(
         .map(|namespace| registry.cache_at(namespace))
         .collect::<Vec<_>>();
 
-    let is_published =
-        |name: &str, key: &Key| cache.exists(name, key).map_err(|error| error.to_string());
+    let digest = |name: &str, key: &Key| cache.digest(name, key).map_err(|error| error.to_string());
 
     for Artifact {
         key,
@@ -126,23 +125,29 @@ pub(super) fn publish(
             continue;
         }
 
-        if is_published(&build.name, &key)? {
-            eprintln!("cached {key} {}", build.name);
-            continue;
+        let manifest =
+            fs::read(&manifest).map_err(|error| format!("{}: {error}", manifest.display()))?;
+
+        // A different manifest under the key was built elsewhere, perhaps by
+        // workflows that no longer verify, so this one replaces it
+        let ours = format!("sha256:{}", HEXLOWER.encode(&Sha256::digest(&manifest)));
+        match digest(&build.name, &key)? {
+            Some(theirs) if theirs == ours => {
+                eprintln!("cached {key} {}", build.name);
+                continue;
+            }
+            Some(_) => eprintln!("replacing {key} {}", build.name),
+            None => eprintln!("publishing {key} {}", build.name),
         }
 
         for (reference, name) in &references {
-            if !is_published(name, reference)? && find(&skipped, name, reference)?.is_none() {
+            if digest(name, reference)?.is_none() && find(&skipped, name, reference)?.is_none() {
                 return Err(format!(
                     "{key} references {name} {reference}, which isn't published"
                 ));
             }
         }
 
-        let manifest =
-            fs::read(&manifest).map_err(|error| format!("{}: {error}", manifest.display()))?;
-
-        eprintln!("publishing {key} {}", build.name);
         let output = Output {
             key: &key,
             derivation: &Derivation::Build(build),
@@ -158,7 +163,7 @@ pub(super) fn publish(
     Ok(())
 }
 
-pub(super) fn import(directory: &Path) -> Result<(), String> {
+pub(super) fn import(directory: &Path, caches: &Caches) -> Result<(), String> {
     let root = Path::new(ROOT);
     let is_root = rustix::process::geteuid().is_root();
     if is_root {
@@ -171,6 +176,7 @@ pub(super) fn import(directory: &Path) -> Result<(), String> {
     }
     .map_err(store_error)?;
 
+    let sources = caches.open();
     let is_present = |store: &Store, key: &Key| {
         store
             .path(key)
@@ -190,12 +196,16 @@ pub(super) fn import(directory: &Path) -> Result<(), String> {
             continue;
         }
 
-        for reference in references.keys() {
-            if !is_present(&store, reference)? {
-                return Err(format!(
-                    "{key} references {reference}, which is neither exported nor present"
-                ));
+        for (reference, name) in &references {
+            if is_present(&store, reference)?
+                || cache::substitute(&sources, &mut store, is_root, name, reference)?
+            {
+                continue;
             }
+
+            return Err(format!(
+                "{key} references {reference}, which is neither exported, present, nor cached"
+            ));
         }
 
         let path = output_path(&key, &build.name, &build.version, "out");

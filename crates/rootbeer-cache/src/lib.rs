@@ -91,6 +91,11 @@ impl Cache {
     }
 
     pub fn exists(&self, name: &str, key: &Key) -> Result<bool, Error> {
+        self.digest(name, key).map(|digest| digest.is_some())
+    }
+
+    /// The digest of the manifest tagged with a key, if there is one.
+    pub fn digest(&self, name: &str, key: &Key) -> Result<Option<String>, Error> {
         let mut session = self.session(name, "pull")?;
         let url = session.url(&format!("manifests/{key}"));
         let response = session.request(&url, |agent| {
@@ -99,16 +104,24 @@ impl Cache {
 
         let response = match response {
             Err(Error::Status { status: 403, .. }) if self.credentials.is_none() => {
-                return Ok(false);
+                return Ok(None);
             }
             response => response?,
         };
 
         match response.status().as_u16() {
-            200 => Ok(true),
-            404 => Ok(false),
-            status => Err(Error::Status { url, status }),
+            200 => {}
+            404 => return Ok(None),
+            status => return Err(Error::Status { url, status }),
         }
+
+        let digest = response
+            .headers()
+            .get("docker-content-digest")
+            .and_then(|value| value.to_str().ok())
+            .ok_or_else(|| Error::Invalid(format!("{url} has no Docker-Content-Digest")))?;
+
+        Ok(Some(digest.to_string()))
     }
 
     pub fn push(&self, output: &Output, manifest: &[u8]) -> Result<(), Error> {

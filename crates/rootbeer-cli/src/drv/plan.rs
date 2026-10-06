@@ -6,9 +6,21 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 
 #[derive(Serialize)]
-struct Plan {
+struct Plan<'a> {
     platform: Platform,
-    levels: Vec<Vec<String>>,
+    /// What to build, with the key each build must produce, so CI can attest
+    /// a job's own output and nothing else
+    levels: Vec<Vec<Planned<'a>>>,
+    /// Every requested package and its build key, cached or not, so CI can
+    /// promote them without evaluating again
+    targets: Vec<Planned<'a>>,
+}
+
+#[derive(Serialize)]
+struct Planned<'a> {
+    name: &'a str,
+    version: &'a str,
+    key: &'a Key,
 }
 
 pub(super) fn plan(
@@ -27,28 +39,44 @@ pub(super) fn plan(
         .evaluate(&hosts, &targets)
         .map_err(|error| error.to_string())?;
 
-    // Planning only skips work, and building verifies what it substitutes
-    let caches = caches
-        .open()
-        .into_iter()
-        .map(|source| source.cache)
-        .collect::<Vec<_>>();
-
+    let sources = caches.open();
     let levels = levels(&graph, &targets, |name, key| {
-        Ok(cache::find(&caches, name, key)?.is_some())
+        cache::is_available(&sources, name, key)
     })?;
 
-    let plan = Plan { platform, levels };
+    let targets = targets
+        .iter()
+        .map(|target| planned(&graph, target))
+        .collect::<Result<Vec<_>, String>>()?;
+
+    let plan = Plan {
+        platform,
+        levels,
+        targets,
+    };
     let json = serde_json::to_string(&plan).map_err(|error| error.to_string())?;
     println!("{json}");
     Ok(())
 }
 
-fn levels(
-    graph: &Graph,
-    targets: &[Target],
+fn planned<'a>(graph: &'a Graph, target: &'a Target) -> Result<Planned<'a>, String> {
+    let package = graph
+        .packages
+        .get(target)
+        .ok_or_else(|| format!("{target} did not evaluate"))?;
+
+    Ok(Planned {
+        name: &target.name,
+        version: &target.version,
+        key: &package.build,
+    })
+}
+
+fn levels<'a>(
+    graph: &'a Graph,
+    targets: &'a [Target],
     is_cached: impl FnMut(&str, &Key) -> Result<bool, String>,
-) -> Result<Vec<Vec<String>>, String> {
+) -> Result<Vec<Vec<Planned<'a>>>, String> {
     let mut planner = Planner {
         graph,
         is_cached,
@@ -64,11 +92,13 @@ fn levels(
         planner.level(target)?;
     }
 
-    let mut levels = BTreeMap::<usize, Vec<String>>::new();
+    let mut levels = BTreeMap::<usize, Vec<Planned>>::new();
     for (target, level) in &planner.levels {
         if let Some(level) = level {
-            let name = format!("{}@{}", target.name, target.version);
-            levels.entry(*level).or_default().push(name);
+            levels
+                .entry(*level)
+                .or_default()
+                .push(planned(graph, target)?);
         }
     }
 
@@ -215,7 +245,19 @@ mod tests {
         );
 
         let targets = [zstd.clone(), zstd];
-        let uncached = levels(&graph, &targets, |_, _| Ok(false)).unwrap();
+        let names = |levels: Vec<Vec<Planned>>| {
+            levels
+                .iter()
+                .map(|level| {
+                    level
+                        .iter()
+                        .map(|planned| format!("{}@{}", planned.name, planned.version))
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let uncached = names(levels(&graph, &targets, |_, _| Ok(false)).unwrap());
         assert_eq!(
             uncached,
             [
@@ -226,7 +268,7 @@ mod tests {
         );
 
         let zlib = graph.packages[&zlib].build.clone();
-        let cached = levels(&graph, &targets, |_, key| Ok(*key == zlib)).unwrap();
+        let cached = names(levels(&graph, &targets, |_, key| Ok(*key == zlib)).unwrap());
         assert_eq!(cached, [vec!["cmake@4", "xz@5"], vec!["zstd@1"]]);
     }
 }

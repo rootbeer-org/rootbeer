@@ -48,8 +48,13 @@ enum Command {
         #[command(flatten)]
         sources: Sources,
     },
-    /// Install every output exported to a directory, references first
-    Import { directory: PathBuf },
+    /// Install every output exported to a directory, references first, taking
+    /// any reference that wasn't exported from the caches
+    Import {
+        directory: PathBuf,
+        #[command(flatten)]
+        caches: cache::Caches,
+    },
     /// Push every output exported to a directory to a registry
     Publish {
         directory: PathBuf,
@@ -171,7 +176,7 @@ pub fn run(args: Args) {
             directory,
             sources,
         } => artifact::export(&sources, &package, &directory),
-        Command::Import { directory } => artifact::import(&directory),
+        Command::Import { directory, caches } => artifact::import(&directory, &caches),
         Command::Publish {
             directory,
             registry,

@@ -109,6 +109,33 @@ pub(super) fn find<'a>(
     Ok(None)
 }
 
+/// Whether any source has an output it would substitute. An output from a
+/// verified source counts only if its manifest passes the verifier, so one
+/// that no longer does is planned and built again.
+pub(super) fn is_available(sources: &[Source], name: &str, key: &Key) -> Result<bool, String> {
+    for Source { cache, verify } in sources {
+        if !cache.exists(name, key).map_err(|error| error.to_string())? {
+            continue;
+        }
+
+        let Some(program) = verify else {
+            return Ok(true);
+        };
+
+        let verified = cache
+            .pull(name, key)
+            .map_err(|error| error.to_string())
+            .and_then(|pulled| run_verifier(program, pulled.manifest()));
+
+        match verified {
+            Ok(()) => return Ok(true),
+            Err(error) => eprintln!("not counting {name} {key} as cached: {error}"),
+        }
+    }
+
+    Ok(false)
+}
+
 /// Installs an output from the first source that has it. A source anyone can
 /// write to may hold a bad output, so that one is built instead.
 pub(super) fn substitute(

@@ -253,7 +253,11 @@ fn credentials_never_leave_the_registry_in_the_clear() {
     );
 
     let (registry, _) = serve(move |request| match request.authorization {
-        Some(_) => (200, String::new(), Vec::new()),
+        Some(_) => (
+            200,
+            "Docker-Content-Digest: sha256:0\r\n".into(),
+            Vec::new(),
+        ),
         None => (401, challenge.clone(), Vec::new()),
     });
 
@@ -420,6 +424,25 @@ fn only_an_anonymous_denial_means_not_cached() {
         matches!(error, Error::Status { status: 403, .. }),
         "{error}"
     );
+}
+
+#[test]
+fn digests_come_from_the_registry_and_are_never_guessed() {
+    let (url, _) = serve(|request| match request.target.as_str() {
+        "/v2/a/zlib/manifests/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" => (
+            200,
+            "Docker-Content-Digest: sha256:1\r\n".into(),
+            Vec::new(),
+        ),
+        "/v2/a/zlib/manifests/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" => (200, String::new(), Vec::new()),
+        _ => (404, String::new(), Vec::new()),
+    });
+
+    let cache = Cache::new(&url, "a").allow_http();
+    let digest = |key: char| cache.digest("zlib", &key.to_string().repeat(32).parse().unwrap());
+    assert_eq!(digest('a').unwrap().as_deref(), Some("sha256:1"));
+    assert!(digest('b').is_err());
+    assert_eq!(digest('c').unwrap(), None);
 }
 
 #[test]
