@@ -63,14 +63,22 @@ const SANDBOX_ENV: [&str; 14] = [
 ];
 
 impl Pattern {
+    fn is_match(&self, value: &str) -> bool {
+        value.bytes().next().is_some_and(self.first) && value.bytes().all(self.rest)
+    }
+
     fn check(&self, field: &str, value: &str) -> Result<(), Error> {
-        let is_match = value.bytes().next().is_some_and(self.first) && value.bytes().all(self.rest);
-        if !is_match {
+        if !self.is_match(value) {
             return Err(Error::invalid(field, value, self.reason));
         }
 
         Ok(())
     }
+}
+
+/// Whether `name` is a package name a derivation accepts.
+pub fn is_package_name(name: &str) -> bool {
+    PACKAGE_NAME.is_match(name)
 }
 
 impl Derivation {
