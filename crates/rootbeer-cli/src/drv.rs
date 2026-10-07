@@ -1,5 +1,6 @@
 mod artifact;
 mod cache;
+mod index;
 mod plan;
 
 use rootbeer_cache::Cache;
@@ -56,6 +57,24 @@ enum Command {
         directory: PathBuf,
         #[command(flatten)]
         registry: cache::Registry,
+    },
+    /// Write a package index entry for each package with outputs in a namespace
+    Index {
+        directory: PathBuf,
+        #[command(flatten)]
+        registry: cache::Registry,
+        #[command(flatten)]
+        sources: Sources,
+    },
+    /// Merge index entries into a TUF repository and sign it with the online
+    /// key
+    Sign {
+        repository: PathBuf,
+        /// The online key as PKCS#8 DER
+        #[arg(long)]
+        key: PathBuf,
+        /// Entries from `rb drv index`, or none to only renew the signatures
+        entries: Option<PathBuf>,
     },
     /// Install an output by key from a registry, after what it references
     Install {
@@ -144,6 +163,16 @@ pub fn run(args: Args) {
             directory,
             registry,
         } => artifact::publish(&directory, &registry),
+        Command::Index {
+            directory,
+            registry,
+            sources,
+        } => index::index(&sources, &directory, &registry),
+        Command::Sign {
+            repository,
+            key,
+            entries,
+        } => index::sign(&repository, &key, entries.as_deref()),
         Command::Install {
             name,
             key,

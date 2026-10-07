@@ -2129,6 +2129,7 @@ dependencies = [
  "rootbeer-eval",
  "rootbeer-sandbox",
  "rootbeer-store",
+ "rootbeer-trust",
  "rustix",
  "serde",
  "serde_json",

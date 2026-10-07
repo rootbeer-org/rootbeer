@@ -42,6 +42,16 @@ impl Fixture {
     }
 
     fn root(&self, version: u64, root_key: &Path, online: &Path) -> Vec<u8> {
+        self.root_expiring(version, root_key, online, days(365))
+    }
+
+    fn root_expiring(
+        &self,
+        version: u64,
+        root_key: &Path,
+        online: &Path,
+        expires: jiff::Timestamp,
+    ) -> Vec<u8> {
         self.runtime.block_on(async {
             let mut keys = HashMap::new();
             let mut ids = Vec::new();
@@ -71,7 +81,7 @@ impl Fixture {
                 spec_version: "1.0.0".into(),
                 consistent_snapshot: true,
                 version: NonZeroU64::new(version).unwrap(),
-                expires: days(365),
+                expires,
                 keys,
                 roles: HashMap::from(roles),
                 _extra: HashMap::new(),
@@ -161,12 +171,17 @@ fn package(name: &str) -> Package {
     let output = Output {
         key: "a".repeat(32).parse().unwrap(),
         manifest: format!("sha256:{}", "0".repeat(64)),
+        bins: BTreeSet::from([name.into()]),
+        apps: BTreeMap::new(),
     };
 
     Package {
         name: name.into(),
+        description: format!("{name} compresses"),
+        license: "BSD-3-Clause".into(),
         default: BTreeMap::from([(platform, "1.0".into())]),
         versions: BTreeMap::from([("1.0".into(), BTreeMap::from([(platform, output)]))]),
+        retired: BTreeMap::new(),
     }
 }
 
@@ -236,7 +251,7 @@ fn unknown_platforms_are_dropped_and_digests_checked() {
 
     let grown = serde_json::json!({
         "name": "zstd",
-        "description": "a field this client doesn't know",
+        "homepage": "a field this client doesn't know",
         "default": { "aarch64-linux": "1.0", "riscv64-linux": "1.0" },
         "versions": { "1.0": { "aarch64-linux": platform("a"), "riscv64-linux": platform("b") } },
     });
@@ -257,6 +272,54 @@ fn unknown_platforms_are_dropped_and_digests_checked() {
         error.to_string().contains("isn't a sha256 digest"),
         "{error}"
     );
+
+    let escapes = |change: fn(&mut Output)| {
+        let mut escaping = package("zstd");
+        escaping
+            .versions
+            .values_mut()
+            .flat_map(|outputs| outputs.values_mut())
+            .for_each(change);
+        serde_json::from_slice::<Package>(&entry(&escaping)).is_err()
+    };
+
+    assert!(escapes(|output| {
+        output.bins.insert("../zstd".into());
+    }));
+
+    assert!(escapes(|output| {
+        output.apps.insert("..".into(), "Zstd.app".into());
+    }));
+
+    assert!(escapes(|output| {
+        output
+            .apps
+            .insert("Zstd".into(), "/Applications/Zstd.app".into());
+    }));
+
+    assert!(escapes(|output| {
+        output
+            .apps
+            .insert("Zstd".into(), "Contents/../../Zstd.app".into());
+    }));
+
+    assert!(escapes(|output| {
+        output.bins.insert(".".into());
+    }));
+
+    assert!(escapes(|output| {
+        output.bins.insert(String::new());
+    }));
+
+    assert!(escapes(|output| {
+        output.bins.insert("zs\0td".into());
+    }));
+
+    assert!(!escapes(|output| {
+        output
+            .apps
+            .insert("Zstd".into(), "Applications/Zstd.app".into());
+    }));
 }
 
 #[test]
@@ -383,4 +446,167 @@ fn http_needs_an_explicit_opt_in() {
 
     let index = Index::refresh(&root, &url, &datastore, true).unwrap();
     assert_eq!(index.package("zstd").unwrap(), Some(package("zstd")));
+}
+
+fn ceremony() -> (Fixture, Vec<u8>, PathBuf, PathBuf) {
+    ceremony_expiring(days(365))
+}
+
+fn ceremony_expiring(expires: jiff::Timestamp) -> (Fixture, Vec<u8>, PathBuf, PathBuf) {
+    let fixture = Fixture::new();
+    let root_key = fixture.key("root");
+    let online = fixture.key("online");
+    let root = fixture.root_expiring(1, &root_key, &online, expires);
+    let metadata = fixture.path("repository/metadata");
+    fs::create_dir_all(&metadata).unwrap();
+    fs::write(metadata.join("1.root.json"), &root).unwrap();
+    (fixture, root, root_key, online)
+}
+
+fn timestamp_version(fixture: &Fixture) -> u64 {
+    let path = fixture.path("repository/metadata/timestamp.json");
+    let timestamp: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    timestamp["signed"]["version"].as_u64().unwrap()
+}
+
+#[test]
+fn signing_merges_into_the_index_and_keeps_dropped_versions() {
+    let (fixture, root, _, online) = ceremony();
+    let repository = fixture.path("repository");
+    sign(&repository, &online, &[package("zstd"), package("lz4")]).unwrap();
+    let index = fixture.refresh(&root).unwrap();
+    assert_eq!(index.package("zstd").unwrap(), Some(package("zstd")));
+    drop(index);
+
+    // The catalog moved to 2.0, and 1.0 stays listed for locks that pin it
+    let mut newer = package("zstd");
+    let outputs = newer.versions.remove("1.0").unwrap();
+    newer.versions.insert("2.0".into(), outputs);
+    newer
+        .default
+        .values_mut()
+        .for_each(|version| *version = "2.0".into());
+    sign(&repository, &online, &[newer.clone()]).unwrap();
+
+    let index = fixture.refresh(&root).unwrap();
+    let read = index.package("zstd").unwrap().unwrap();
+    assert_eq!(read.default, newer.default);
+    assert_eq!(read.versions.keys().collect::<Vec<_>>(), ["1.0", "2.0"]);
+    assert_eq!(index.package("lz4").unwrap(), Some(package("lz4")));
+    assert_eq!(timestamp_version(&fixture), 2);
+}
+
+#[test]
+fn re_signing_alone_renews_an_expired_index() {
+    let (fixture, root, root_key, online) = ceremony();
+    fixture.publish(&[("zstd", entry(&package("zstd")))], 1, &online, days(-1));
+    assert!(fixture.refresh(&root).is_err());
+
+    let repository = fixture.path("repository");
+    assert!(is_unsigned(sign(&repository, &root_key, &[])));
+    sign(&repository, &online, &[]).unwrap();
+
+    let index = fixture.refresh(&root).unwrap();
+    assert_eq!(index.package("zstd").unwrap(), Some(package("zstd")));
+    assert_eq!(timestamp_version(&fixture), 2);
+}
+
+fn is_unsigned(result: Result<(), Error>) -> bool {
+    use tough::error::Error::{KeysNotFoundInRoot, SigningKeysNotFound};
+    matches!(result, Err(Error::Tuf(error)) if matches!(*error, SigningKeysNotFound { .. } | KeysNotFoundInRoot { .. }))
+}
+
+#[test]
+fn a_rotated_online_key_signs_and_the_old_one_no_longer_can() {
+    let (fixture, root, root_key, online) = ceremony();
+    let repository = fixture.path("repository");
+    sign(&repository, &online, &[package("zstd")]).unwrap();
+
+    let replacement = fixture.key("replacement");
+    let rotated = fixture.root(2, &root_key, &replacement);
+    fs::write(repository.join("metadata/2.root.json"), rotated).unwrap();
+
+    assert!(is_unsigned(sign(&repository, &online, &[])));
+    sign(&repository, &replacement, &[]).unwrap();
+    let index = fixture.refresh(&root).unwrap();
+    assert_eq!(index.package("zstd").unwrap(), Some(package("zstd")));
+}
+
+#[test]
+fn a_changed_output_is_retired_and_defaults_outlive_a_missing_one() {
+    let (fixture, root, _, online) = ceremony();
+    let repository = fixture.path("repository");
+    let first = package("zstd");
+    sign(&repository, &online, std::slice::from_ref(&first)).unwrap();
+
+    let mut rekeyed = first.clone();
+    let output = rekeyed
+        .output(Platform::Aarch64Linux, None)
+        .unwrap()
+        .clone();
+    let replaced = Output {
+        key: "b".repeat(32).parse().unwrap(),
+        manifest: format!("sha256:{}", "1".repeat(64)),
+        ..output.clone()
+    };
+    rekeyed.versions.insert(
+        "1.0".into(),
+        BTreeMap::from([(Platform::Aarch64Linux, replaced.clone())]),
+    );
+    rekeyed.default.clear();
+    sign(&repository, &online, &[rekeyed]).unwrap();
+
+    let read = fixture
+        .refresh(&root)
+        .unwrap()
+        .package("zstd")
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(read.output(Platform::Aarch64Linux, None), Some(&replaced));
+    assert_eq!(
+        read.retired,
+        BTreeMap::from([(output.key, output.manifest)])
+    );
+}
+
+#[test]
+fn fields_this_signer_does_not_know_survive_a_merge() {
+    let (fixture, _, _, online) = ceremony();
+    let mut grown = serde_json::to_value(package("zstd")).unwrap();
+    grown["homepage"] = "https://facebook.github.io/zstd".into();
+    fixture.publish(
+        &[("zstd", serde_json::to_vec(&grown).unwrap())],
+        1,
+        &online,
+        days(7),
+    );
+
+    let repository = fixture.path("repository");
+    let mut described = package("zstd");
+    described.description = "zstd compresses better".into();
+    sign(&repository, &online, &[described]).unwrap();
+    let kept = fs::read_dir(repository.join("targets"))
+        .unwrap()
+        .map(|item| fs::read_to_string(item.unwrap().path()).unwrap())
+        .filter(|entry| entry.contains("homepage"))
+        .count();
+
+    assert_eq!(kept, 2, "the published entry and its merge both have it");
+}
+
+#[test]
+fn signing_refuses_duplicates_a_damaged_repository_and_an_expiring_root() {
+    let (fixture, _, _, online) = ceremony();
+    let repository = fixture.path("repository");
+    let twice = sign(&repository, &online, &[package("zstd"), package("zstd")]);
+    assert!(matches!(twice, Err(Error::Invalid(reason)) if reason.ends_with("given twice")));
+
+    fs::write(repository.join("metadata/1.snapshot.json"), "{}").unwrap();
+    assert!(sign(&repository, &online, &[]).is_err());
+    assert!(sign(&fixture.path("elsewhere"), &online, &[]).is_err());
+
+    let (fixture, _, _, online) = ceremony_expiring(days(5));
+    let expiring = sign(&fixture.path("repository"), &online, &[]);
+    assert!(matches!(expiring, Err(Error::Invalid(reason)) if reason.contains("offline keys")));
 }

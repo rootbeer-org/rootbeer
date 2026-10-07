@@ -250,7 +250,11 @@ fn credentials_never_leave_the_registry_in_the_clear() {
     );
 
     let (registry, _) = serve(move |request| match request.authorization {
-        Some(_) => (200, String::new(), Vec::new()),
+        Some(_) => (
+            200,
+            "Docker-Content-Digest: sha256:0\r\n".into(),
+            Vec::new(),
+        ),
         None => (401, challenge.clone(), Vec::new()),
     });
 
@@ -393,6 +397,70 @@ fn only_an_anonymous_denial_means_not_cached() {
     assert!(
         matches!(error, Error::Status { status: 403, .. }),
         "{error}"
+    );
+}
+
+#[test]
+fn digests_are_hashed_here_from_manifests_naming_their_key() {
+    let key: Key = "a".repeat(32).parse().unwrap();
+    let other: Key = "b".repeat(32).parse().unwrap();
+    let manifest = |key: &Key| {
+        serde_json::to_vec(&Manifest::output(
+            key,
+            &build(),
+            &BTreeMap::new(),
+            descriptor(manifest::CONFIG, b"{}"),
+            descriptor(manifest::LAYER, b"tar"),
+        ))
+        .unwrap()
+    };
+
+    let ours = manifest(&key);
+    let served = ours.clone();
+    let mislabelled = manifest(&other);
+    let (url, log) = serve(move |request| match request.target.as_str() {
+        "/v2/a/zlib/manifests/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" => {
+            (200, String::new(), served.clone())
+        }
+        "/v2/a/zlib/manifests/cccccccccccccccccccccccccccccccc" => {
+            (200, String::new(), mislabelled.clone())
+        }
+        _ => (404, String::new(), Vec::new()),
+    });
+
+    let cache = Cache::new(&url, "a").allow_http();
+    let missing: Key = "d".repeat(32).parse().unwrap();
+    let digests = cache.digests("zlib", &[&key, &missing]).unwrap();
+    assert_eq!(digests, [Some(encode(&Sha256::digest(&ours))), None]);
+    assert_eq!(
+        log.lock().unwrap().len(),
+        2,
+        "one session, and no token needed"
+    );
+
+    let mislabelled: Key = "c".repeat(32).parse().unwrap();
+    assert!(cache.digests("zlib", &[&mislabelled]).is_err());
+
+    let registry = Arc::new(OnceLock::<String>::new());
+    let realm = registry.clone();
+    let (denied, log) = serve(move |request| match request.target.starts_with("/token") {
+        true => (403, String::new(), Vec::new()),
+        false => {
+            let realm = realm.get().unwrap();
+            let challenge = format!("WWW-Authenticate: Bearer realm=\"{realm}/token\"\r\n");
+            (401, challenge, Vec::new())
+        }
+    });
+    registry.set(denied.clone()).unwrap();
+    let cache = Cache::new(&denied, "a").allow_http();
+    assert_eq!(
+        cache.digests("lz4", &[&key, &missing]).unwrap(),
+        [None, None]
+    );
+    assert_eq!(
+        log.lock().unwrap().len(),
+        2,
+        "a denied name is asked about once"
     );
 }
 

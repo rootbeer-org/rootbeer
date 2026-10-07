@@ -1,6 +1,7 @@
 //! rootbeer-trust reads the package index from a TUF repository and uses it to
 //! verify signed manifests to validate the source of an output.
 
+mod sign;
 mod transport;
 
 #[cfg(test)]
@@ -8,12 +9,13 @@ mod tests;
 
 use rootbeer_drv::{Key, Platform, Sha256, is_package_name};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+pub use sign::sign;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs::{self, DirBuilder};
 use std::io;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt};
-use std::path::Path;
+use std::path::{Component, Path};
 use tough::schema::{Root, Signed};
 use tough::{IntoVec, Repository, RepositoryLoader, TargetName};
 use url::Url;
@@ -22,14 +24,23 @@ use url::Url;
 #[serde(try_from = "Entry")]
 pub struct Package {
     pub name: String,
+    pub description: String,
+    pub license: String,
     pub default: BTreeMap<Platform, String>,
     pub versions: BTreeMap<String, BTreeMap<Platform, Output>>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub retired: BTreeMap<Key, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "RawOutput")]
 pub struct Output {
     pub key: Key,
     pub manifest: String,
+    #[serde(skip_serializing_if = "BTreeSet::is_empty")]
+    pub bins: BTreeSet<String>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub apps: BTreeMap<String, String>,
 }
 
 pub struct Index {
@@ -50,8 +61,24 @@ pub enum Error {
 #[derive(Deserialize)]
 struct Entry {
     name: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    license: String,
     default: BTreeMap<String, String>,
     versions: BTreeMap<String, BTreeMap<String, Output>>,
+    #[serde(default)]
+    retired: BTreeMap<Key, String>,
+}
+
+#[derive(Deserialize)]
+struct RawOutput {
+    key: Key,
+    manifest: String,
+    #[serde(default)]
+    bins: BTreeSet<String>,
+    #[serde(default)]
+    apps: BTreeMap<String, String>,
 }
 
 impl Index {
@@ -90,11 +117,7 @@ impl Index {
             .transport(transport::Ureq::new(is_http_allowed))
             .datastore(datastore);
 
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|error| Error::Runtime(error.to_string()))?;
-
+        let runtime = runtime()?;
         let repository = runtime.block_on(loader.load()).map_err(tuf)?;
         Ok(Index {
             runtime,
@@ -163,26 +186,68 @@ impl TryFrom<Entry> for Package {
                     continue;
                 };
 
-                let digest = output.manifest.strip_prefix("sha256:").map(str::to_string);
-                if digest
-                    .and_then(|digest| Sha256::try_from(digest).ok())
-                    .is_none()
-                {
-                    return Err(format!("{:?} isn't a sha256 digest", output.manifest));
-                }
-
                 kept.insert(platform, output);
             }
 
             versions.insert(version, kept);
         }
 
+        if let Some(manifest) = entry.retired.values().find(|manifest| !is_digest(manifest)) {
+            return Err(format!("{manifest:?} isn't a sha256 digest"));
+        }
+
         Ok(Package {
             name: entry.name,
+            description: entry.description,
+            license: entry.license,
             default,
             versions,
+            retired: entry.retired,
         })
     }
+}
+
+impl TryFrom<RawOutput> for Output {
+    type Error = String;
+
+    fn try_from(raw: RawOutput) -> Result<Output, String> {
+        if !is_digest(&raw.manifest) {
+            return Err(format!("{:?} isn't a sha256 digest", raw.manifest));
+        }
+
+        let names = raw.bins.iter().chain(raw.apps.keys());
+        if let Some(name) = names.into_iter().find(|name| !is_file_name(name)) {
+            return Err(format!("{name:?} isn't a plain name"));
+        }
+
+        if let Some(path) = raw.apps.values().find(|path| !is_inside(path)) {
+            return Err(format!("{path:?} isn't a path inside the output"));
+        }
+
+        Ok(Output {
+            key: raw.key,
+            manifest: raw.manifest,
+            bins: raw.bins,
+            apps: raw.apps,
+        })
+    }
+}
+
+fn is_digest(manifest: &str) -> bool {
+    manifest
+        .strip_prefix("sha256:")
+        .is_some_and(|digest| Sha256::try_from(digest.to_string()).is_ok())
+}
+
+fn is_file_name(name: &str) -> bool {
+    !matches!(name, "" | "." | "..") && !name.contains('/') && !name.contains(char::is_control)
+}
+
+fn is_inside(path: &str) -> bool {
+    let mut components = Path::new(path).components().peekable();
+    !path.contains(char::is_control)
+        && components.peek().is_some()
+        && components.all(|component| matches!(component, Component::Normal(_)))
 }
 
 fn open_datastore(path: &Path) -> Result<(), Error> {
@@ -232,6 +297,13 @@ fn version(root: &[u8]) -> Option<u64> {
     let root: Signed<Root> = serde_json::from_slice(root).ok()?;
     root.signed.verify_role(&root).ok()?;
     Some(root.signed.version.get())
+}
+
+fn runtime() -> Result<tokio::runtime::Runtime, Error> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| Error::Runtime(error.to_string()))
 }
 
 fn outside_runtime() -> Result<(), Error> {

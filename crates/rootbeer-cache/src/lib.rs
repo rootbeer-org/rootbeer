@@ -102,6 +102,41 @@ impl Cache {
         }
     }
 
+    pub fn digests(&self, name: &str, keys: &[&Key]) -> Result<Vec<Option<String>>, Error> {
+        let mut session = self.session(name, "pull")?;
+        let mut digests = Vec::new();
+        for key in keys {
+            let url = session.url(&format!("manifests/{key}"));
+            let response = session.request(&url, |agent| {
+                agent.get(&url).header("Accept", manifest::MANIFEST).call()
+            });
+
+            // This means that it was never published to the registry
+            let response = match response {
+                Err(Error::Status { status: 403, .. }) if self.credentials.is_none() => {
+                    return Ok(keys.iter().map(|_| None).collect());
+                }
+                response => response?,
+            };
+
+            if response.status() == 404 {
+                digests.push(None);
+                continue;
+            }
+
+            let bytes = read_limited(expect(response, &url, 200)?, &url)?;
+            let manifest: Manifest = serde_json::from_slice(&bytes).map_err(invalid)?;
+            let is_key = manifest.annotations.get(manifest::KEY) == Some(&key.to_string());
+            if manifest.artifact_type != manifest::ARTIFACT || !is_key {
+                return Err(Error::Invalid(format!("{url} isn't the output of {key}")));
+            }
+
+            digests.push(Some(encode(&Sha256::digest(&bytes))));
+        }
+
+        Ok(digests)
+    }
+
     pub fn push(
         &self,
         key: &Key,
