@@ -221,7 +221,7 @@ fn pulls_refuse_what_a_hostile_registry_serves() {
 
         let cache = Cache::new(&registry, "rootbeer-test/store").allow_http();
         let pulled = cache
-            .pull(name, &key)
+            .pull(name, &key, None)
             .map_err(|error| error.to_string())
             .and_then(|pulled| {
                 assert_eq!(pulled.derivation, derivation);
@@ -238,6 +238,52 @@ fn pulls_refuse_what_a_hostile_registry_serves() {
         match expected {
             Ok(()) => pulled.unwrap(),
             Err(reason) => assert!(pulled.unwrap_err().contains(reason)),
+        }
+    }
+}
+
+#[test]
+fn a_signed_digest_pulls_that_manifest_and_nothing_else() {
+    let derivation = Derivation::Build(build());
+    let key = derivation.key().unwrap();
+    let config = serde_json::to_vec(&derivation).unwrap();
+    let manifest = |layer: &[u8]| {
+        let manifest = Manifest::output(
+            &key,
+            &build(),
+            &BTreeMap::new(),
+            descriptor(manifest::CONFIG, &config),
+            descriptor(manifest::LAYER, layer),
+        );
+        serde_json::to_vec(&manifest).unwrap()
+    };
+
+    let signed = manifest(b"signed");
+    let digest = encode(&Sha256::digest(&signed));
+    let cases = [
+        (signed.clone(), None),
+        (manifest(b"swapped"), Some("not sha256:")),
+    ];
+
+    for (served, error) in cases {
+        let config = config.clone();
+        let (registry, log) = serve(move |request| match request.target.as_str() {
+            target if target.contains("/manifests/") => (200, String::new(), served.clone()),
+            target if target.contains("/blobs/") => (200, String::new(), config.clone()),
+            _ => (404, String::new(), Vec::new()),
+        });
+
+        let cache = Cache::new(&registry, "rootbeer-test/store").allow_http();
+        let result = cache.pull("zlib", &key, Some(&digest)).map(drop);
+        let requested = log.lock().unwrap()[0].target.clone();
+        assert!(
+            requested.ends_with(&format!("/manifests/{digest}")),
+            "{requested}"
+        );
+
+        match error {
+            None => result.unwrap(),
+            Some(reason) => assert!(result.unwrap_err().to_string().contains(reason)),
         }
     }
 }
@@ -351,7 +397,7 @@ fn outputs_round_trip_through_a_registry() {
             .unwrap()
     );
 
-    let pulled = cache.pull("zlib", &key).unwrap();
+    let pulled = cache.pull("zlib", &key, None).unwrap();
     assert_eq!(pulled.derivation, derivation);
     assert_eq!(pulled.references, references);
 
@@ -535,7 +581,7 @@ fn a_token_that_expires_before_the_archive_is_renewed() {
     });
 
     let cache = Cache::new(&registry, "a").allow_http();
-    let pulled = cache.pull("zlib", &key).unwrap();
+    let pulled = cache.pull("zlib", &key, None).unwrap();
 
     let mut bytes = Vec::new();
     pulled.archive().unwrap().read_to_end(&mut bytes).unwrap();

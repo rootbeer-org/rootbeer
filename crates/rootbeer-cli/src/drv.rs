@@ -1,6 +1,7 @@
 mod artifact;
 mod cache;
 mod index;
+mod install;
 mod plan;
 
 use rootbeer_cache::Cache;
@@ -76,14 +77,8 @@ enum Command {
         /// Entries from `rb drv index`, or none to only renew the signatures
         entries: Option<PathBuf>,
     },
-    /// Install an output by key from a registry, after what it references
-    Install {
-        /// The package name the output was pushed under
-        name: String,
-        key: Key,
-        #[command(flatten)]
-        registry: cache::Registry,
-    },
+    /// Install a package from the signed index, after what it references
+    Install(install::Args),
     /// Print, as JSON levels, the packages CI must build because no cache has them
     Plan {
         /// Each `name` or `name@version`; versions default to the platform's
@@ -173,11 +168,7 @@ pub fn run(args: Args) {
             key,
             entries,
         } => index::sign(&repository, &key, entries.as_deref()),
-        Command::Install {
-            name,
-            key,
-            registry,
-        } => cache::install(&name, &key, &registry),
+        Command::Install(args) => install::install(&args),
     };
 
     if let Err(error) = result {
@@ -410,7 +401,14 @@ impl Resolver<'_> {
                 };
 
                 if let Some(cache) = cache {
-                    return cache::install_into(cache, self.store, self.is_root, &build.name, key);
+                    return cache::install_into(
+                        cache,
+                        self.store,
+                        self.is_root,
+                        &build.name,
+                        key,
+                        None,
+                    );
                 }
 
                 (
@@ -495,12 +493,7 @@ fn evaluate(
     let (catalog, hosts) = load(sources)?;
     let platform = match platform {
         Some(platform) => platform,
-        None => parse_platform(&format!(
-            "{}-{}",
-            std::env::consts::ARCH,
-            std::env::consts::OS
-        ))
-        .map_err(|error| format!("{error}; pass --platform"))?,
+        None => this_platform().map_err(|error| format!("{error}; pass --platform"))?,
     };
 
     let target = target(&catalog, package, platform)?;
@@ -681,6 +674,14 @@ fn load(sources: &Sources) -> Result<(Catalog, BTreeMap<Platform, Host>), String
         .map_err(|error| error.to_string())?;
 
     Ok((catalog, hosts))
+}
+
+fn this_platform() -> Result<Platform, String> {
+    parse_platform(&format!(
+        "{}-{}",
+        std::env::consts::ARCH,
+        std::env::consts::OS
+    ))
 }
 
 fn parse_platform(name: &str) -> Result<Platform, String> {

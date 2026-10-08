@@ -2,9 +2,13 @@
 # End to end test of the CI flow in the Linux builder. It builds a package,
 # exports its closure, publishes it to a store namespace on a local registry,
 # then installs it by key into one empty store and imports the export into
-# another. Both must match the build exactly.
+# another. Last it signs a throwaway index of the namespace and installs
+# through it into a third. Each must match the build exactly.
 #
 #   scripts/e2e.sh [package]
+#
+# The index needs tuftool and OpenSSL for the index repository's ceremony.sh,
+# found at ../index or RB_INDEX_REPO.
 set -eu
 
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -22,7 +26,8 @@ fi
 artifacts=$(mktemp -d)
 installed="rb-e2e-installed-$$"
 imported="rb-e2e-imported-$$"
-trap 'rm -rf "$artifacts"; docker volume rm "$installed" "$imported" > /dev/null 2>&1 || true' EXIT
+verified="rb-e2e-verified-$$"
+trap 'rm -rf "$artifacts"; docker volume rm "$installed" "$imported" "$verified" > /dev/null 2>&1 || true' EXIT
 
 # Not piped straight into tail, which would hide a failed build.
 built=$("$linux" build "$package")
@@ -41,9 +46,17 @@ if printf '%s\n' "$again" | grep '^publishing '; then
     exit 1
 fi
 
-RB_STORE_VOLUME=$installed "$linux" install "$name" "$key" \
+RB_STORE_VOLUME=$installed "$linux" install "$name" --key "$key" --unverified \
     --registry "$url" --namespace "$store" --allow-http
 RB_STORE_VOLUME=$imported "$linux" import /artifacts
+
+# After the import, which reads every directory in /artifacts as an output.
+"$linux" index /artifacts/entries --registry "$url" --namespace "$store" --allow-http
+"${RB_INDEX_REPO:-$root/../index}/ceremony.sh" "$artifacts/index" > /dev/null
+"$linux" sign /artifacts/index --key /artifacts/index/keys/online.der /artifacts/entries
+RB_STORE_VOLUME=$verified "$linux" install "$package" \
+    --index file:///artifacts/index --root /artifacts/index/metadata/1.root.json \
+    --registry "$url" --namespace "$store" --allow-http
 
 # Every tree, as tar with times and owners normalized, must be identical.
 # Each tar must succeed, so two missing trees can't compare equal.
@@ -52,13 +65,15 @@ docker run --rm --platform "$platform" \
     --volume "rb-store-${platform#linux/}:/built:ro" \
     --volume "$installed:/installed:ro" \
     --volume "$imported:/imported:ro" \
+    --volume "$verified:/verified:ro" \
     ubuntu:24.04 sh -ec "
-        for store in built installed imported; do
+        for store in built installed imported verified; do
             tar -C /\$store/store/$entry --sort=name --mtime=@0 --owner=0 --group=0 \
                 --numeric-owner -cf /tmp/\$store.tar .
         done
         cmp /tmp/built.tar /tmp/installed.tar
         cmp /tmp/built.tar /tmp/imported.tar
+        cmp /tmp/built.tar /tmp/verified.tar
     "
 
-echo "$entry went through the store and an export, and matches the build"
+echo "$entry went through the store, an export, and a signed index, and matches the build"

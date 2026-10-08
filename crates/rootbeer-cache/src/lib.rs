@@ -189,14 +189,20 @@ impl Cache {
         expect(response, &url, 201).map(drop)
     }
 
-    pub fn pull(&self, name: &str, key: &Key) -> Result<Pulled<'_>, Error> {
+    pub fn pull(&self, name: &str, key: &Key, digest: Option<&str>) -> Result<Pulled<'_>, Error> {
         let mut session = self.session(name, "pull")?;
-        let url = session.url(&format!("manifests/{key}"));
+        let wanted = digest.unwrap_or(key.as_str());
+        let url = session.url(&format!("manifests/{wanted}"));
         let response = session.request(&url, |agent| {
             agent.get(&url).header("Accept", manifest::MANIFEST).call()
         })?;
 
         let bytes = read_limited(expect(response, &url, 200)?, &url)?;
+        let actual = encode(&Sha256::digest(&bytes));
+        if digest.is_some_and(|expected| expected != actual) {
+            return Err(Error::Invalid(format!("{url} is {actual}, not {wanted}")));
+        }
+
         let manifest: Manifest = serde_json::from_slice(&bytes).map_err(invalid)?;
         let [layer] = manifest.layers.as_slice() else {
             return Err(Error::Invalid(format!("{url} has more than one layer")));
