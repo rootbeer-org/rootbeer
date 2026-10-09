@@ -2122,6 +2122,7 @@ dependencies = [
  "data-encoding",
  "libc",
  "owo-colors",
+ "rootbeer-bootstrap",
  "rootbeer-build",
  "rootbeer-cache",
  "rootbeer-core",

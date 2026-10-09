@@ -162,3 +162,51 @@ fn location_is_frozen() {
         "https://rbpkg.com/bootstrap/v1/x86_64-linux.json"
     );
 }
+
+#[test]
+#[ignore = "needs bash, OpenSSL 3, and jq"]
+fn the_release_scripts_sign_what_clients_verify() {
+    let scripts = concat!(env!("CARGO_MANIFEST_DIR"), "/../../scripts");
+    let work = tempfile::tempdir().unwrap();
+    let keys = work.path().join("keys");
+    let output = std::process::Command::new(format!("{scripts}/bootstrap-ceremony.sh"))
+        .arg(&keys)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+
+    let printed = String::from_utf8(output.stdout).unwrap();
+    let public = |name: &str| {
+        let line = printed.lines().find(|line| line.starts_with(name)).unwrap();
+        key(line.split(' ').nth(1).unwrap())
+    };
+
+    let rb = archive(&[("rb", b"#!/bin/sh\n")]);
+    let path = work.path().join("rb.tar.gz");
+    fs::write(&path, &rb).unwrap();
+
+    let out = work.path().join("v1");
+    let status = std::process::Command::new(format!("{scripts}/bootstrap-sign.sh"))
+        .arg(keys.join("active.pem"))
+        .arg(&out)
+        .args([PLATFORM, "20261009120000", "nightly-0123456789ab", "0123"])
+        .arg(&path)
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let document = fs::read(out.join(format!("{PLATFORM}.json"))).unwrap();
+    let release = newer(&document, &[public("active")], PLATFORM, 0)
+        .unwrap()
+        .unwrap();
+    assert_eq!(release.serial(), 20261009120000);
+    assert_eq!(release.version(), "nightly-0123456789ab");
+
+    let served = fs::read(out.join(format!("archives/{}.tar.gz", release.0.sha256))).unwrap();
+    let unpacked = unpack(&served, &release).unwrap();
+    assert_eq!(fs::read(&unpacked).unwrap(), b"#!/bin/sh\n");
+    fs::remove_dir_all(unpacked.parent().unwrap()).unwrap();
+
+    let error = newer(&document, &[public("backup")], PLATFORM, 0).unwrap_err();
+    assert!(matches!(error, Error::Untrusted));
+}

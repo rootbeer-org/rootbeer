@@ -5,6 +5,10 @@ on:
       - main
   workflow_dispatch:
 
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
 jobs:
   changes:
     name: Detect changes
@@ -12,6 +16,7 @@ jobs:
     outputs:
       source: ${{ steps.diff.outputs.source }}
       timestamp: ${{ steps.timestamp.outputs.value }}
+      serial: ${{ steps.timestamp.outputs.serial }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -50,7 +55,10 @@ jobs:
           fi
       - name: Generate build timestamp
         id: timestamp
-        run: echo "value=$(date -u '+%Y-%m-%d %H:%M UTC')" >> "$GITHUB_OUTPUT"
+        run: |
+          now=$(date -u +%s)
+          echo "value=$(date -u -d "@$now" '+%Y-%m-%d %H:%M UTC')" >> "$GITHUB_OUTPUT"
+          echo "serial=$(date -u -d "@$now" '+%Y%m%d%H%M%S')" >> "$GITHUB_OUTPUT"
 
   build:
     name: Build (${{ matrix.name }})
@@ -99,6 +107,7 @@ jobs:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
           CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
           RB_SOURCE_REVISION: ${{ github.sha }}
+          RB_SERIAL: ${{ needs.changes.outputs.serial }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -108,9 +117,87 @@ jobs:
             target/${{ matrix.target }}/release/rb
             target/${{ matrix.target }}/release/rb-store
 
+  # Signs apart from deploy, whose pnpm dependencies never see the key.
+  sign:
+    name: Sign bootstrap releases
+    needs: [changes, build]
+    if: needs.changes.outputs.source == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    environment:
+      name: release
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Download artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: rb-*
+          path: artifacts
+
+      - name: Check the release is newer
+        run: |
+          served=$(curl -fsSL https://rbpkg.com/nightly/source-sha.txt || true)
+          if [[ $served =~ ^[0-9a-f]{40}$ ]] && ! git merge-base --is-ancestor "$served" "$GITHUB_SHA"; then
+            echo "::error::$GITHUB_SHA doesn't descend from the served $served"
+            exit 1
+          fi
+
+          scripts/bootstrap-served.sh "$RUNNER_TEMP/served"
+          for document in "$RUNNER_TEMP"/served/*.json; do
+            [[ -e $document ]] || continue
+            previous=$(jq -r '.payload | @base64d | fromjson | .serial' "$document")
+            if (( RB_SERIAL <= previous )); then
+              echo "::error::serial $RB_SERIAL isn't above the served $previous"
+              exit 1
+            fi
+          done
+
+          chmod +x artifacts/rb-linux-x86_64/rb
+          version=$(artifacts/rb-linux-x86_64/rb --version)
+          if [[ $version != *"serial $RB_SERIAL)" ]]; then
+            echo "::error::the build says $version, not serial $RB_SERIAL"
+            exit 1
+          fi
+        env:
+          RB_SERIAL: ${{ needs.changes.outputs.serial }}
+
+      - name: Sign
+        run: |
+          if [[ -z $RB_BOOTSTRAP_KEY ]]; then
+            echo "::error::the release environment has no RB_BOOTSTRAP_KEY"
+            exit 1
+          fi
+
+          umask 077
+          key="$RUNNER_TEMP/bootstrap.pem"
+          trap 'rm -f "$key"' EXIT
+          printf '%s\n' "$RB_BOOTSTRAP_KEY" > "$key"
+          for pair in linux-x86_64:x86_64-linux linux-aarch64:aarch64-linux macos-aarch64:aarch64-macos; do
+            name=${pair%%:*}
+            platform=${pair#*:}
+            chmod +x "artifacts/rb-${name}/rb" "artifacts/rb-${name}/rb-store"
+            tar -czf "$RUNNER_TEMP/${platform}.tar.gz" -C "artifacts/rb-${name}" rb rb-store
+            scripts/bootstrap-sign.sh "$key" bootstrap "$platform" "$RB_SERIAL" \
+              "nightly-${GITHUB_SHA::12}" "$GITHUB_SHA" "$RUNNER_TEMP/${platform}.tar.gz"
+          done
+        env:
+          RB_BOOTSTRAP_KEY: ${{ secrets.RB_BOOTSTRAP_KEY }}
+          RB_SERIAL: ${{ needs.changes.outputs.serial }}
+
+      - name: Upload signed releases
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: bootstrap
+          path: bootstrap
+
   deploy:
     name: Deploy
-    needs: [changes, build]
+    needs: [changes, build, sign]
     if: always() && !failure() && !cancelled()
     runs-on: ubuntu-latest
     permissions:
@@ -150,6 +237,10 @@ jobs:
           echo '${{ needs.changes.outputs.timestamp }}' > .vitepress/dist/nightly/version.txt
           echo '${{ github.sha }}' > .vitepress/dist/nightly/source-sha.txt
 
+          # Pages caches documents for minutes, so the previous archives stay.
+          scripts/bootstrap-served.sh .vitepress/dist/bootstrap/v1
+          cp -R artifacts/bootstrap/. .vitepress/dist/bootstrap/v1/
+
       - name: Preserve existing nightly binaries
         if: needs.changes.outputs.source != 'true'
         run: |
@@ -164,6 +255,8 @@ jobs:
             -o ".vitepress/dist/nightly/version.txt" || true
           curl -fsSL "https://rbpkg.com/nightly/source-sha.txt" \
             -o ".vitepress/dist/nightly/source-sha.txt" || true
+
+          scripts/bootstrap-served.sh .vitepress/dist/bootstrap/v1
 
       - name: Upload pages artifact
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0

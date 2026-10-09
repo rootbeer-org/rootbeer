@@ -127,9 +127,11 @@ pub fn verify_root(bytes: &[u8], public_key: &str) -> Result<serde_json::Value, 
         serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
     let schema = value["schema"].as_u64().ok_or("PDR root has no schema")?;
     if schema > u64::from(ROOT_SCHEMA) {
-        return Err(format!(
+        let reason = format!(
             "this package repository needs a newer rb (schema {schema}); run rb self-update"
-        ));
+        );
+        crate::newer::reached(&reason);
+        return Err(reason);
     }
     if schema != u64::from(ROOT_SCHEMA) {
         return Err(format!(

@@ -18,11 +18,14 @@ pub fn ensure() -> Result<(), String> {
     let layout = layout::read(&root).map_err(|error| error.to_string())?;
     let version = layout.as_ref().map(|layout| layout.version);
     if let Some(version) = version.filter(|version| *version > layout::VERSION) {
-        return Err(format!(
+        let reason = format!(
             "{} uses layout v{version}, newer than this rootbeer understands (v{}); update rootbeer",
             root.display(),
             layout::VERSION
-        ));
+        );
+
+        crate::newer::relaunch(&reason);
+        return Err(reason);
     }
 
     let installed = layout.as_ref().and_then(|layout| layout.helper.as_ref());
@@ -42,22 +45,17 @@ pub fn ensure() -> Result<(), String> {
         Err(error) if error.kind() == io::ErrorKind::PermissionDenied => return Ok(()),
         Err(error) => return Err(format!("{}: {error}", root.display())),
     };
-    lock.lock().map_err(|error| error.to_string())?;
 
-    // Unmoved entries keep resolving where they are, and the next run retries.
+    lock.lock().map_err(|error| error.to_string())?;
     let _ = migrate_legacy_store(&root.join("store"));
     let _ = roots::seed(&Store::new(root.join("store")));
     Ok(())
 }
 
-/// The machine-wide root is owned by root and written through the setuid
-/// `rb-store` helper; an overridden root (tests, CI) or a root user writes directly.
 fn is_shared(root: &Path) -> bool {
     root == Path::new(DEFAULT_ROOT) && unsafe { libc::geteuid() } != 0
 }
 
-/// Creates the root, converts one from an older layout, or installs the helper
-/// this build ships when the installed one is too old.
 fn provision(root: &Path, version: Option<u32>) -> Result<(), String> {
     if is_shared(root) {
         let is_converting = version != Some(layout::VERSION);
@@ -86,6 +84,7 @@ fn provision(root: &Path, version: Option<u32>) -> Result<(), String> {
         }
         Err(error) => return Err(format!("{}: {error}", store.display())),
     }
+
     layout::write(root).map_err(|error| error.to_string())
 }
 
@@ -99,28 +98,31 @@ fn shared_setup(root: &Path, helper: &Path, is_converting: bool) -> Vec<String> 
         quote(&root.join("store")),
         quote(&bin)
     )];
+
     if is_converting {
         lines.push(format!("chown -R 0:0 {}", quote(root)));
     }
+
     lines.push(format!("touch {lock} && chmod 666 {lock}"));
     lines.push(format!(
         "install -m 4755 -o 0 -g 0 {} {installed}",
         quote(helper)
     ));
-    // Recorded from the installed binary itself, so the marker cannot drift from it.
+
     lines.push(format!(
         "printf '{{\"version\":{},\"helper\":%s}}\\n' \"$({installed} version)\" > {}",
         layout::VERSION,
         quote(&root.join("layout.json"))
     ));
+
     lines
 }
 
-/// `rb-store` ships next to `rb` in the tarball and the `rootbeer` package.
 fn helper_source() -> Result<PathBuf, String> {
     let executable = std::env::current_exe()
         .and_then(fs::canonicalize)
         .map_err(|error| error.to_string())?;
+
     let helper = executable.with_file_name("rb-store");
     if !helper.is_file() {
         return Err(format!(
@@ -128,6 +130,7 @@ fn helper_source() -> Result<PathBuf, String> {
             helper.display()
         ));
     }
+
     Ok(helper)
 }
 

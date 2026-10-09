@@ -449,7 +449,9 @@ impl PackageResolver for RepositoryResolver {
 }
 
 fn needs_newer(package: &str) -> String {
-    format!("{package} needs a newer rb; run rb self-update")
+    let reason = format!("{package} needs a newer rb; run rb self-update");
+    crate::newer::reached(&reason);
+    reason
 }
 
 fn catalog_package(name: &str, package: &RootPackage, document: PackageDocument) -> CatalogPackage {

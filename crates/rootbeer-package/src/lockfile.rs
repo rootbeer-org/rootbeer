@@ -109,6 +109,18 @@ impl fmt::Display for LockError {
 
 impl std::error::Error for LockError {}
 
+/// A newer rb's lock may not decode at all, so its schema is read first.
+fn check_schema(value: &serde_json::Value) -> io::Result<()> {
+    let schema = value.get("schema").and_then(serde_json::Value::as_u64);
+    if schema.is_some_and(|schema| schema > 3) {
+        let reason = "unsupported package lock schema; update Rootbeer";
+        crate::newer::reached(reason);
+        return Err(io::Error::new(io::ErrorKind::InvalidData, reason));
+    }
+
+    Ok(())
+}
+
 fn invalid_lock(path: &Path, error: serde_json::Error) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidData,
@@ -298,8 +310,12 @@ impl RootbeerLock {
     pub fn read(path: impl AsRef<Path>) -> io::Result<Self> {
         let path = path.as_ref();
         let bytes = fs::read(path)?;
-        let lock: Self =
+        let value: serde_json::Value =
             serde_json::from_slice(&bytes).map_err(|error| invalid_lock(path, error))?;
+        check_schema(&value)?;
+
+        let lock: Self =
+            serde_json::from_value(value).map_err(|error| invalid_lock(path, error))?;
         lock.validate()
     }
 
@@ -312,6 +328,7 @@ impl RootbeerLock {
         let bytes = fs::read(path)?;
         let mut value: serde_json::Value =
             serde_json::from_slice(&bytes).map_err(|error| invalid_lock(path, error))?;
+        check_schema(&value)?;
 
         let mut is_salvaged = false;
         if let Some(resolvers) = value.pointer_mut("/inputs/resolvers") {
@@ -434,5 +451,21 @@ mod tests {
             None
         );
         assert_eq!(RootbeerLock::read(&path).unwrap(), lock);
+    }
+
+    #[test]
+    fn a_newer_lock_asks_for_a_newer_rb_even_when_it_does_not_decode() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("rootbeer.lock");
+        fs::write(
+            &path,
+            r#"{"schema":4,"packages":{"jq":{"aarch64-macos":"k"}}}"#,
+        )
+        .unwrap();
+
+        let error = RootbeerLock::read(&path).unwrap_err();
+        assert!(error.to_string().contains("update Rootbeer"), "{error}");
+        let error = RootbeerLock::read_compatible(&path).unwrap_err();
+        assert!(error.to_string().contains("update Rootbeer"), "{error}");
     }
 }

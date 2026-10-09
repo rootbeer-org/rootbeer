@@ -16,6 +16,7 @@ pub mod github;
 pub mod graph;
 mod inputs;
 mod intent;
+pub mod newer;
 pub mod pdr;
 pub mod progress;
 pub mod realize;

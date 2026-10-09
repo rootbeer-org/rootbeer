@@ -27,8 +27,16 @@ pub fn fetch(release: &Release) -> Result<PathBuf, Error> {
     unpack(&archive, release)
 }
 
+/// Replaces this process with `rb`. It keeps this one's argv0, so the new rb
+/// sees how it was invoked instead of its temporary path.
 pub fn exec(rb: &Path) -> io::Error {
-    Command::new(rb).args(std::env::args_os().skip(1)).exec()
+    let mut arguments = std::env::args_os();
+    let mut command = Command::new(rb);
+    if let Some(name) = arguments.next() {
+        command.arg0(name);
+    }
+
+    command.args(arguments).exec()
 }
 
 pub(crate) fn unpack(archive: &[u8], release: &Release) -> Result<PathBuf, Error> {

@@ -5,6 +5,7 @@ mod drv;
 mod edit;
 mod gc;
 mod init;
+mod newer;
 mod progress;
 mod remote;
 mod run;
@@ -19,7 +20,7 @@ use clap::{Parser, Subcommand};
 #[derive(Parser, Debug)]
 #[command(
     name = "rb",
-    version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("RB_SOURCE_REVISION"), ")"),
+    version = env!("RB_VERSION"),
     about,
     long_about = None,
     max_term_width = 80
@@ -113,11 +114,27 @@ impl Commands {
             _ => false,
         }
     }
+
+    /// Whether a newer rb may be fetched to run this in its place. Offline
+    /// commands can't fetch, and a fetched rb can't update the installed one.
+    fn can_relaunch(&self) -> bool {
+        match self {
+            Commands::Run(args) => !args.offline,
+            Commands::Use(args) => !args.offline,
+            Commands::Apply(args) => !args.offline,
+            Commands::SelfUpdate => false,
+            _ => true,
+        }
+    }
 }
 
 fn main() {
     let cli = Cli::parse();
     rootbeer_core::package::progress::observe(progress::report);
+    rootbeer_core::package::newer::observe(newer::relaunch);
+    if cli.command.can_relaunch() {
+        newer::allow();
+    }
     if cli.command.needs_store() {
         if let Err(error) = bootstrap::ensure() {
             eprintln!("error: {error}");
