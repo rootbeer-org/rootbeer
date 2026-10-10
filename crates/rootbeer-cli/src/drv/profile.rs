@@ -49,7 +49,7 @@ pub(super) fn add(args: &UseArgs) -> Result<(), String> {
 
     if requests.is_empty() {
         eprintln!("{USER} already has everything asked for");
-        return Ok(());
+        return link_apps(&profile);
     }
 
     let (mut store, is_root) = install::open_store()?;
@@ -58,6 +58,7 @@ pub(super) fn add(args: &UseArgs) -> Result<(), String> {
     let cache = args.source.cache();
     let platform = this_platform()?;
 
+    let mut members = Vec::new();
     for (name, version) in requests {
         let (resolved, output) = install::select(signed.package(name)?, version, platform)?;
         let member = Member {
@@ -66,9 +67,21 @@ pub(super) fn add(args: &UseArgs) -> Result<(), String> {
             key: output.key.clone(),
             manifest: output.manifest.clone(),
             bins: output.bins.clone(),
+            apps: output.apps.clone(),
             extra: BTreeMap::new(),
         };
 
+        members.push((name, member));
+    }
+
+    if let Some(applications) = applications() {
+        let apps = members.iter().flat_map(|(_, member)| member.apps.keys());
+        profile
+            .check_apps(&applications, apps.map(String::as_str))
+            .map_err(profile_error)?;
+    }
+
+    for (name, member) in members {
         cache::install_into(
             &cache,
             &mut store,
@@ -103,7 +116,7 @@ pub(super) fn rollback() -> Result<(), String> {
     let profile = Profile::open(&directory, USER).map_err(profile_error)?;
     let number = profile.rollback().map_err(profile_error)?;
     eprintln!("{USER} is now generation {number}");
-    Ok(())
+    link_apps(&profile)
 }
 
 pub(super) fn generations() -> Result<(), String> {
@@ -152,7 +165,31 @@ fn switch(profile: &Profile, store: &Store, generation: Generation) -> Result<()
 
     let number = profile.create(generation, locate).map_err(profile_error)?;
     eprintln!("{USER} is now generation {number}");
+    link_apps(profile)
+}
+
+fn link_apps(profile: &Profile) -> Result<(), String> {
+    let Some(applications) = applications() else {
+        return Ok(());
+    };
+
+    for problem in profile.link_apps(&applications).map_err(profile_error)? {
+        eprintln!("warning: {problem}");
+    }
+
     Ok(())
+}
+
+/// None under sudo with HOME kept, so root never writes into a user's home.
+fn applications() -> Option<PathBuf> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+
+    let home = PathBuf::from(std::env::var_os("HOME")?);
+    let is_own = home.is_absolute()
+        && fs::metadata(&home).is_ok_and(|metadata| metadata.uid() == getuid().as_raw());
+    is_own.then(|| home.join("Applications"))
 }
 
 fn current(profile: &Profile) -> Result<Generation, String> {

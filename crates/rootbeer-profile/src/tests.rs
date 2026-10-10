@@ -41,8 +41,17 @@ fn output(store: &Path, digit: char, bins: &[&str]) -> Member {
         key,
         manifest: format!("sha256:{}", "0".repeat(64)),
         bins: bins.iter().map(|name| name.to_string()).collect(),
+        apps: BTreeMap::new(),
         extra: BTreeMap::new(),
     }
+}
+
+fn with_app(store: &Path, mut member: Member, app: &str) -> Member {
+    let path = format!("Contents/{app}");
+    let bundle = store.join(member.key.as_str()).join(&path);
+    fs::create_dir_all(bundle.join("Contents/MacOS")).unwrap();
+    member.apps.insert(app.into(), path);
+    member
 }
 
 fn holding(packages: &BTreeMap<String, Member>) -> Generation {
@@ -251,4 +260,195 @@ impl PartialEq for Error {
     fn eq(&self, other: &Self) -> bool {
         self.to_string() == other.to_string()
     }
+}
+
+#[test]
+fn apps_link_through_the_profile_and_follow_every_switch() {
+    let fixture = fixture();
+    let applications = fixture.profiles.join("../Applications");
+    let profile = Profile::open(&fixture.profiles, "user").unwrap();
+    let store = locate(&fixture.store);
+
+    fs::create_dir_all(applications.join("Notes.app")).unwrap();
+    std::os::unix::fs::symlink("/elsewhere/Other.app", applications.join("Other.app")).unwrap();
+
+    let slack = with_app(
+        &fixture.store,
+        output(&fixture.store, 'a', &[]),
+        "Slack.app",
+    );
+    let packages = BTreeMap::from([("slack".to_string(), slack)]);
+    profile.create(holding(&packages), &store).unwrap();
+    assert!(profile.link_apps(&applications).unwrap().is_empty());
+
+    let farm = fixture.profiles.join("user/Applications/Slack.app");
+    let link = applications.join("Slack.app");
+    assert_eq!(fs::read_link(&link).unwrap(), farm);
+    let bundle = fixture
+        .store
+        .join(key('a').as_str())
+        .join("Contents/Slack.app");
+    assert_eq!(fs::read_link(&farm).unwrap(), bundle);
+
+    profile.create(Generation::default(), &store).unwrap();
+    assert!(profile.link_apps(&applications).unwrap().is_empty());
+    assert!(fs::symlink_metadata(&link).is_err());
+    assert!(applications.join("Notes.app").is_dir());
+    assert!(fs::symlink_metadata(applications.join("Other.app")).is_ok());
+
+    profile.rollback().unwrap();
+    assert!(profile.link_apps(&applications).unwrap().is_empty());
+    assert_eq!(fs::read_link(&link).unwrap(), farm);
+    assert!(profile.link_apps(&applications).unwrap().is_empty());
+    assert_eq!(fs::read_link(&link).unwrap(), farm);
+
+    fs::remove_dir(fixture.profiles.join("user-2/Applications")).unwrap();
+    std::os::unix::fs::symlink("user-2", fixture.profiles.join(".user.link")).unwrap();
+    fs::rename(
+        fixture.profiles.join(".user.link"),
+        fixture.profiles.join("user"),
+    )
+    .unwrap();
+    assert!(profile.link_apps(&applications).unwrap().is_empty());
+    assert!(fs::symlink_metadata(&link).is_err());
+}
+
+#[test]
+fn a_link_to_an_app_under_another_name_is_replaced() {
+    let fixture = fixture();
+    let applications = fixture.profiles.join("../Applications");
+    let profile = Profile::open(&fixture.profiles, "user").unwrap();
+    let slack = with_app(
+        &fixture.store,
+        output(&fixture.store, 'a', &[]),
+        "Slack.app",
+    );
+    let packages = BTreeMap::from([("slack".to_string(), slack)]);
+    profile
+        .create(holding(&packages), locate(&fixture.store))
+        .unwrap();
+
+    let farm = fixture.profiles.join("user/Applications");
+    fs::create_dir_all(&applications).unwrap();
+    std::os::unix::fs::symlink(farm.join("slack.app"), applications.join("slack.app")).unwrap();
+    std::os::unix::fs::symlink(farm.join("Slack.app"), applications.join("Chat.app")).unwrap();
+    profile
+        .check_apps(&applications, ["slack.app", "Chat.app"])
+        .unwrap();
+
+    assert!(profile.link_apps(&applications).unwrap().is_empty());
+    let mut names = fs::read_dir(&applications)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect::<Vec<_>>();
+    names.sort();
+    assert_eq!(names, ["Slack.app"]);
+}
+
+#[test]
+fn an_app_something_else_holds_is_reported_and_left_alone() {
+    let fixture = fixture();
+    let applications = fixture.profiles.join("../Applications");
+    let profile = Profile::open(&fixture.profiles, "user").unwrap();
+
+    fs::create_dir_all(applications.join("Slack.app")).unwrap();
+    let other = fixture.profiles.join("default/Applications/Zed.app");
+    std::os::unix::fs::symlink(&other, applications.join("Zed.app")).unwrap();
+
+    let taken = |path: &str| {
+        Error::Refused(format!(
+            "{} already exists",
+            applications.join(path).display()
+        ))
+    };
+    assert_eq!(
+        profile.check_apps(&applications, ["Free.app", "Slack.app"]),
+        Err(taken("Slack.app"))
+    );
+    assert_eq!(
+        profile.check_apps(&applications, ["Zed.app"]),
+        Err(taken("Zed.app"))
+    );
+    assert_eq!(profile.check_apps(&applications, ["Free.app"]), Ok(()));
+
+    let slack = with_app(
+        &fixture.store,
+        output(&fixture.store, 'a', &[]),
+        "Slack.app",
+    );
+    let packages = BTreeMap::from([("slack".to_string(), slack)]);
+    profile
+        .create(holding(&packages), locate(&fixture.store))
+        .unwrap();
+
+    assert_eq!(
+        profile.link_apps(&applications).unwrap(),
+        [taken("Slack.app")]
+    );
+    assert!(applications.join("Slack.app").is_dir());
+    assert_eq!(fs::read_link(applications.join("Zed.app")).unwrap(), other);
+}
+
+#[test]
+fn an_app_must_be_a_bundle_inside_its_output_and_provided_once() {
+    let fixture = fixture();
+    let profile = Profile::open(&fixture.profiles, "user").unwrap();
+    let store = locate(&fixture.store);
+    let slack = with_app(
+        &fixture.store,
+        output(&fixture.store, 'a', &[]),
+        "Slack.app",
+    );
+
+    let refuse = |member: Member, reason: &str| {
+        let packages = BTreeMap::from([("slack".to_string(), member)]);
+        let error = profile.create(holding(&packages), &store).unwrap_err();
+        assert_eq!(error, Error::Refused(reason.into()));
+    };
+
+    let mut renamed = slack.clone();
+    renamed.apps = BTreeMap::from([("Slack".into(), "Contents/Slack.app".into())]);
+    refuse(
+        renamed,
+        r#"slack has an app "Slack" that isn't a bundle name"#,
+    );
+
+    let mut escaping = slack.clone();
+    escaping.apps = BTreeMap::from([("Slack.app".into(), "../Slack.app".into())]);
+    refuse(
+        escaping,
+        r#"slack has an app at "../Slack.app" outside its output"#,
+    );
+
+    let output_path = fixture.store.join(key('a').as_str());
+    fs::write(output_path.join("File.app"), "").unwrap();
+    let mut file = slack.clone();
+    file.apps = BTreeMap::from([("File.app".into(), "File.app".into())]);
+    refuse(
+        file,
+        &format!(
+            "slack's {} isn't a directory",
+            output_path.join("File.app").display()
+        ),
+    );
+
+    let mut hidden = slack.clone();
+    hidden.apps = BTreeMap::from([(".Slack.app".into(), "Contents/Slack.app".into())]);
+    refuse(
+        hidden,
+        r#"slack has an app ".Slack.app" that isn't a bundle name"#,
+    );
+
+    let fork = with_app(
+        &fixture.store,
+        output(&fixture.store, 'b', &[]),
+        "slack.app",
+    );
+    let packages = BTreeMap::from([("fork".to_string(), fork), ("slack".to_string(), slack)]);
+    let error = profile.create(holding(&packages), &store).unwrap_err();
+    assert_eq!(
+        error,
+        Error::Refused("fork and slack both provide Slack.app".into())
+    );
+    assert!(profile.generations().unwrap().is_empty());
 }

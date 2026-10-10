@@ -7,7 +7,7 @@ mod transport;
 #[cfg(test)]
 mod tests;
 
-use rootbeer_drv::{Key, Platform, Sha256, is_file_name, is_package_name};
+use rootbeer_drv::{Key, Platform, Sha256, is_app_name, is_file_name, is_inside, is_package_name};
 use serde::{Deserialize, Serialize};
 pub use sign::sign;
 use std::collections::{BTreeMap, BTreeSet};
@@ -15,7 +15,7 @@ use std::fmt;
 use std::fs::{self, DirBuilder};
 use std::io;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt};
-use std::path::{Component, Path};
+use std::path::Path;
 use tough::schema::{Root, Signed};
 use tough::{IntoVec, Repository, RepositoryLoader, TargetName};
 use url::Url;
@@ -215,9 +215,12 @@ impl TryFrom<RawOutput> for Output {
             return Err(format!("{:?} isn't a sha256 digest", raw.manifest));
         }
 
-        let names = raw.bins.iter().chain(raw.apps.keys());
-        if let Some(name) = names.into_iter().find(|name| !is_file_name(name)) {
+        if let Some(name) = raw.bins.iter().find(|name| !is_file_name(name)) {
             return Err(format!("{name:?} isn't a plain name"));
+        }
+
+        if let Some(name) = raw.apps.keys().find(|name| !is_app_name(name)) {
+            return Err(format!("{name:?} isn't a bundle name"));
         }
 
         if let Some(path) = raw.apps.values().find(|path| !is_inside(path)) {
@@ -237,13 +240,6 @@ fn is_digest(manifest: &str) -> bool {
     manifest
         .strip_prefix("sha256:")
         .is_some_and(|digest| Sha256::try_from(digest.to_string()).is_ok())
-}
-
-fn is_inside(path: &str) -> bool {
-    let mut components = Path::new(path).components().peekable();
-    !path.contains(char::is_control)
-        && components.peek().is_some()
-        && components.all(|component| matches!(component, Component::Normal(_)))
 }
 
 fn open_datastore(path: &Path) -> Result<(), Error> {

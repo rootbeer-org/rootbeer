@@ -1,5 +1,6 @@
 use crate::{Build, Check, Dependency, Derivation, Error, Fetch};
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Component, Path};
 
 struct Pattern {
     reason: &'static str,
@@ -84,6 +85,19 @@ pub fn is_package_name(name: &str) -> bool {
 /// One path component, never `.` or `..`, without control characters.
 pub fn is_file_name(name: &str) -> bool {
     !matches!(name, "" | "." | "..") && !name.contains('/') && !name.contains(char::is_control)
+}
+
+/// A macOS bundle name, never hidden.
+pub fn is_app_name(name: &str) -> bool {
+    is_file_name(name) && !name.starts_with('.') && name.ends_with(".app")
+}
+
+/// A relative path that never leaves the directory it's joined to.
+pub fn is_inside(path: &str) -> bool {
+    let mut components = Path::new(path).components().peekable();
+    !path.contains(char::is_control)
+        && components.peek().is_some()
+        && components.all(|component| matches!(component, Component::Normal(_)))
 }
 
 impl Derivation {

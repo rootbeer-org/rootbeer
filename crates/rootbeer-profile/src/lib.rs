@@ -2,7 +2,7 @@
 //! a symlink to its current generation and each generation is a directory with
 //! symlinks into the store and a recorded manifest.
 
-use rootbeer_drv::{Key, is_file_name, is_package_name};
+use rootbeer_drv::{Key, is_app_name, is_file_name, is_inside, is_package_name};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -17,6 +17,7 @@ mod tests;
 
 pub const SCHEMA: u32 = 1;
 const RECORD: &str = "generation.json";
+const APPLICATIONS: &str = "Applications";
 
 pub struct Profile {
     directory: PathBuf,
@@ -41,6 +42,8 @@ pub struct Member {
     pub manifest: String,
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub bins: BTreeSet<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub apps: BTreeMap<String, String>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -128,18 +131,35 @@ impl Profile {
         for (name, member) in &packages {
             validate(name, member).map_err(Error::Refused)?;
             let output = locate(&member.key).map_err(Error::Refused)?;
-            for bin in &member.bins {
-                let target = output.join("bin").join(bin);
-                if fs::symlink_metadata(&target).is_err() {
+            let bins = member
+                .bins
+                .iter()
+                .map(|bin| ("bin", bin, output.join("bin").join(bin)));
+            let apps = member
+                .apps
+                .iter()
+                .map(|(app, path)| (APPLICATIONS, app, output.join(path)));
+
+            for (directory, export, target) in bins.chain(apps) {
+                let Ok(metadata) = fs::symlink_metadata(&target) else {
                     return Err(Error::Refused(format!(
                         "{name} has no {}",
                         target.display()
                     )));
+                };
+
+                if directory == APPLICATIONS && !metadata.is_dir() {
+                    return Err(Error::Refused(format!(
+                        "{name}'s {} isn't a directory",
+                        target.display()
+                    )));
                 }
 
-                if let Some((other, _)) = links.insert(bin, (name, target)) {
+                // Folded, since macOS file systems ignore case by default.
+                let folded = (directory, export.to_lowercase());
+                if let Some((other, ..)) = links.insert(folded, (name, export, target)) {
                     return Err(Error::Refused(format!(
-                        "{other} and {name} both provide {bin}"
+                        "{other} and {name} both provide {export}"
                     )));
                 }
             }
@@ -161,10 +181,13 @@ impl Profile {
         let root = staging.path();
         fs::set_permissions(root, fs::Permissions::from_mode(0o755)).map_err(io_at(root))?;
 
-        let bin = root.join("bin");
-        fs::create_dir(&bin).map_err(io_at(&bin))?;
-        for (name, (_, target)) in &links {
-            let link = bin.join(name);
+        let farm = [root.join("bin"), root.join(APPLICATIONS)];
+        for directory in &farm {
+            fs::create_dir(directory).map_err(io_at(directory))?;
+        }
+
+        for ((directory, _), (_, export, target)) in &links {
+            let link = root.join(directory).join(export);
             symlink(target, &link).map_err(io_at(&link))?;
         }
 
@@ -188,7 +211,7 @@ impl Profile {
         };
 
         write().map_err(io_at(&path))?;
-        for directory in [&bin, root] {
+        for directory in farm.iter().map(PathBuf::as_path).chain([root]) {
             sync(directory)?;
         }
 
@@ -231,6 +254,97 @@ impl Profile {
         symlink(self.generation(number), &staged).map_err(io_at(&staged))?;
         fs::rename(&staged, &link).map_err(io_at(&link))?;
         sync(&self.directory)
+    }
+
+    /// Links the current generation's apps into `applications` and removes
+    /// this profile's links to anything else. Returns what it couldn't do,
+    /// such as a path something else holds.
+    pub fn link_apps(&self, applications: &Path) -> Result<Vec<Error>, Error> {
+        self.writable()?;
+        let farm = self.farm();
+        let apps = match fs::read_dir(&farm) {
+            Ok(entries) => entries
+                .map(|entry| entry.map(|entry| entry.file_name()))
+                .collect::<Result<BTreeSet<_>, _>>()
+                .map_err(io_at(&farm))?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => BTreeSet::new(),
+            Err(error) => return Err(io_at(&farm)(error)),
+        };
+
+        // Removing first frees a name whose case changed between versions.
+        let mut problems = Vec::new();
+        match fs::read_dir(applications) {
+            Ok(entries) => {
+                for entry in entries {
+                    let path = match entry {
+                        Ok(entry) => entry.path(),
+                        Err(error) => {
+                            problems.push(io_at(applications)(error));
+                            continue;
+                        }
+                    };
+
+                    let Some(target) = self.target(&path) else {
+                        continue;
+                    };
+
+                    let is_current = target.file_name() == path.file_name()
+                        && target.file_name().is_some_and(|app| apps.contains(app));
+                    if !is_current {
+                        problems.extend(remove(&path).err());
+                    }
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => problems.push(io_at(applications)(error)),
+        }
+
+        if apps.is_empty() {
+            return Ok(problems);
+        }
+
+        if let Err(error) = fs::create_dir_all(applications) {
+            problems.push(io_at(applications)(error));
+            return Ok(problems);
+        }
+
+        for app in &apps {
+            let path = applications.join(app);
+            let linked = match fs::symlink_metadata(&path) {
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    symlink(farm.join(app), &path).map_err(io_at(&path))
+                }
+                Err(error) => Err(io_at(&path)(error)),
+                Ok(_) if self.target(&path).is_some() => Ok(()),
+                Ok(_) => Err(taken(&path)),
+            };
+
+            problems.extend(linked.err());
+        }
+
+        Ok(problems)
+    }
+
+    /// Refuses the first of `apps` something else holds.
+    pub fn check_apps<'a>(
+        &self,
+        applications: &Path,
+        apps: impl IntoIterator<Item = &'a str>,
+    ) -> Result<(), Error> {
+        let mut paths = apps.into_iter().map(|app| applications.join(app));
+        match paths.find(|path| fs::symlink_metadata(path).is_ok() && self.target(path).is_none()) {
+            Some(path) => Err(taken(&path)),
+            None => Ok(()),
+        }
+    }
+
+    fn target(&self, path: &Path) -> Option<PathBuf> {
+        let target = fs::read_link(path).ok()?;
+        (target.parent() == Some(self.farm().as_path())).then_some(target)
+    }
+
+    fn farm(&self) -> PathBuf {
+        self.directory.join(&self.name).join(APPLICATIONS)
     }
 
     pub fn current_number(&self) -> Result<Option<u64>, Error> {
@@ -371,10 +485,24 @@ fn validate(name: &str, member: &Member) -> Result<(), String> {
         return Err(format!("{name:?} isn't a package name"));
     }
 
-    match member.bins.iter().find(|bin| !is_file_name(bin)) {
-        Some(bin) => Err(format!("{name} has a bin {bin:?} that isn't a plain name")),
+    if let Some(bin) = member.bins.iter().find(|bin| !is_file_name(bin)) {
+        return Err(format!("{name} has a bin {bin:?} that isn't a plain name"));
+    }
+
+    if let Some(app) = member.apps.keys().find(|app| !is_app_name(app)) {
+        return Err(format!(
+            "{name} has an app {app:?} that isn't a bundle name"
+        ));
+    }
+
+    match member.apps.values().find(|path| !is_inside(path)) {
+        Some(path) => Err(format!("{name} has an app at {path:?} outside its output")),
         None => Ok(()),
     }
+}
+
+fn taken(path: &Path) -> Error {
+    Error::Refused(format!("{} already exists", path.display()))
 }
 
 fn sync(directory: &Path) -> Result<(), Error> {

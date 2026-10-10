@@ -303,3 +303,23 @@ script: |-
         assert!(view.ends_with(expected), "{view}");
     }
 }
+
+#[test]
+fn names_and_paths_never_leave_the_directory_they_are_joined_to() {
+    for path in ["bin", "Contents/Slack.app", "a/b/c", "a/./b"] {
+        assert!(is_inside(path), "{path:?}");
+    }
+
+    for path in ["", "/abs", "..", "a/../..", "./a", "a\nb"] {
+        assert!(!is_inside(path), "{path:?}");
+    }
+
+    for name in ["", ".", "..", "a/b", "a\0b"] {
+        assert!(!is_file_name(name), "{name:?}");
+    }
+
+    assert!(is_app_name("Slack.app"));
+    for name in ["Slack", ".app", ".Slack.app", "a/Slack.app"] {
+        assert!(!is_app_name(name), "{name:?}");
+    }
+}

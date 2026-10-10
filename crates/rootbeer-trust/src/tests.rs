@@ -294,13 +294,21 @@ fn unknown_platforms_are_dropped_and_digests_checked() {
     assert!(escapes(|output| {
         output
             .apps
-            .insert("Zstd".into(), "/Applications/Zstd.app".into());
+            .insert("Zstd.app".into(), "/Applications/Zstd.app".into());
     }));
 
     assert!(escapes(|output| {
         output
             .apps
-            .insert("Zstd".into(), "Contents/../../Zstd.app".into());
+            .insert("Zstd.app".into(), "Contents/../../Zstd.app".into());
+    }));
+
+    assert!(escapes(|output| {
+        output.apps.insert("Zstd".into(), "Zstd.app".into());
+    }));
+
+    assert!(escapes(|output| {
+        output.apps.insert(".Zstd.app".into(), "Zstd.app".into());
     }));
 
     assert!(escapes(|output| {
@@ -318,7 +326,7 @@ fn unknown_platforms_are_dropped_and_digests_checked() {
     assert!(!escapes(|output| {
         output
             .apps
-            .insert("Zstd".into(), "Applications/Zstd.app".into());
+            .insert("Zstd.app".into(), "Applications/Zstd.app".into());
     }));
 }
 
