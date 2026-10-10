@@ -1,9 +1,10 @@
 use super::cache::{self, Signed};
 use super::{store_error, this_platform};
 use data_encoding::HEXLOWER;
+use rootbeer_cache::Cache;
 use rootbeer_drv::{is_package_name, Key, Platform, STORE_ROOT};
 use rootbeer_store::{Store, ROOT};
-use rootbeer_trust::{Index, Package};
+use rootbeer_trust::{Index, Output, Package};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -23,6 +24,12 @@ pub(super) struct Args {
     /// Required with `--key`, since only the registry vouches for the output
     #[arg(long = "unverified", requires = "key")]
     is_unverified: bool,
+    #[command(flatten)]
+    source: Source,
+}
+
+#[derive(clap::Args, Debug)]
+pub(super) struct Source {
     /// A TUF repository to install from instead of rootbeer's own
     #[arg(long, requires = "root")]
     index: Option<String>,
@@ -37,19 +44,15 @@ pub(super) struct Args {
     is_http_allowed: bool,
 }
 
+impl Source {
+    pub(super) fn cache(&self) -> Cache {
+        cache::open(&self.registry, &self.namespace, self.is_http_allowed)
+    }
+}
+
 pub(super) fn install(args: &Args) -> Result<(), String> {
-    let is_root = rustix::process::geteuid().is_root();
-    if is_root {
-        fs::create_dir_all(STORE_ROOT).map_err(|error| format!("{STORE_ROOT}: {error}"))?;
-    }
-
-    let mut store = match is_root {
-        true => Store::open(Path::new(ROOT)),
-        false => Store::open_read_only(Path::new(ROOT)),
-    }
-    .map_err(store_error)?;
-
-    let cache = cache::open(&args.registry, &args.namespace, args.is_http_allowed);
+    let (mut store, is_root) = open_store()?;
+    let cache = args.source.cache();
     let key = match &args.key {
         Some(key) => {
             if !is_package_name(&args.package) {
@@ -64,15 +67,12 @@ pub(super) fn install(args: &Args) -> Result<(), String> {
             key.clone()
         }
         None => {
-            let index = open_index(args, is_root)?;
+            let index = open_index(&args.source, is_root)?;
             let mut signed =
                 Signed::new(|name| index.package(name).map_err(|error| error.to_string()));
-            let (name, version) = match args.package.split_once('@') {
-                Some((name, version)) => (name, Some(version)),
-                None => (args.package.as_str(), None),
-            };
-
-            let key = select(signed.package(name)?, version, this_platform()?)?;
+            let (name, version) = request(&args.package);
+            let (_, output) = select(signed.package(name)?, version, this_platform()?)?;
+            let key = output.key.clone();
             cache::install_into(&cache, &mut store, is_root, name, &key, Some(&mut signed))?;
             key
         }
@@ -87,7 +87,33 @@ pub(super) fn install(args: &Args) -> Result<(), String> {
     Ok(())
 }
 
-fn select(package: &Package, version: Option<&str>, platform: Platform) -> Result<Key, String> {
+pub(super) fn open_store() -> Result<(Store, bool), String> {
+    let is_root = rustix::process::geteuid().is_root();
+    if is_root {
+        fs::create_dir_all(STORE_ROOT).map_err(|error| format!("{STORE_ROOT}: {error}"))?;
+    }
+
+    let store = match is_root {
+        true => Store::open(Path::new(ROOT)),
+        false => Store::open_read_only(Path::new(ROOT)),
+    }
+    .map_err(store_error)?;
+
+    Ok((store, is_root))
+}
+
+pub(super) fn request(package: &str) -> (&str, Option<&str>) {
+    match package.split_once('@') {
+        Some((name, version)) => (name, Some(version)),
+        None => (package, None),
+    }
+}
+
+pub(super) fn select<'a>(
+    package: &'a Package,
+    version: Option<&str>,
+    platform: Platform,
+) -> Result<(String, &'a Output), String> {
     let name = &package.name;
     let version = match version {
         Some(version) => version,
@@ -106,18 +132,19 @@ fn select(package: &Package, version: Option<&str>, platform: Platform) -> Resul
         .get(&platform)
         .ok_or_else(|| format!("{name}@{version} isn't built for {platform}"))?;
 
-    Ok(output.key.clone())
+    Ok((version.to_string(), output))
 }
 
-fn open_index(args: &Args, is_root: bool) -> Result<Index, String> {
-    let root = match &args.root {
+pub(super) fn open_index(source: &Source, is_root: bool) -> Result<Index, String> {
+    let root = match &source.root {
         Some(path) => fs::read(path).map_err(|error| format!("{}: {error}", path.display()))?,
         None => TRUSTED_ROOT.to_vec(),
     };
 
-    let url = args.index.as_deref().unwrap_or(INDEX);
+    let url = source.index.as_deref().unwrap_or(INDEX);
     let datastore = datastore(&root, is_root)?;
-    Index::refresh(&root, url, &datastore, args.is_http_allowed).map_err(|error| error.to_string())
+    Index::refresh(&root, url, &datastore, source.is_http_allowed)
+        .map_err(|error| error.to_string())
 }
 
 /// Each trusted root keeps its own metadata, so another index's newer root
@@ -146,7 +173,6 @@ fn datastore(root: &[u8], is_root: bool) -> Result<PathBuf, String> {
 mod tests {
     use super::*;
     use clap::Parser;
-    use rootbeer_trust::Output;
     use std::collections::{BTreeMap, BTreeSet};
 
     #[derive(Parser)]
@@ -162,8 +188,8 @@ mod tests {
         };
 
         let args = parse(&[]).unwrap();
-        assert_eq!(args.registry, "https://ghcr.io");
-        assert!(args.key.is_none() && args.index.is_none());
+        assert_eq!(args.source.registry, "https://ghcr.io");
+        assert!(args.key.is_none() && args.source.index.is_none());
 
         let key = "a".repeat(32);
         assert!(parse(&["--key", &key, "--unverified"]).is_ok());
@@ -211,9 +237,11 @@ mod tests {
             retired: BTreeMap::new(),
         };
 
-        let key = |digit: char| Ok(output(digit).key);
-        assert_eq!(select(&package, None, linux), key('b'));
-        assert_eq!(select(&package, Some("1.5.6"), linux), key('a'));
+        let key = |version: Option<&str>| {
+            select(&package, version, linux).map(|(version, output)| (version, output.key.clone()))
+        };
+        assert_eq!(key(None), Ok(("1.5.7".into(), output('b').key)));
+        assert_eq!(key(Some("1.5.6")), Ok(("1.5.6".into(), output('a').key)));
 
         let missing = [
             (None, macos, "zstd has no default version on aarch64-macos"),

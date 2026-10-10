@@ -4,17 +4,19 @@
 
 use rootbeer_drv::Key;
 use rootbeer_store::{ROOT, Store};
-use rustix::fs::{Access, Mode};
-use rustix::process::getuid;
+use rustix::fs::{Access, Mode, OFlags};
+use rustix::process::{getgid, getuid};
 use std::collections::BTreeSet;
 use std::fs;
 use std::io::{self, Write};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt, chown, fchown};
+use std::os::unix::fs::{
+    DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt, chown, fchown,
+};
 use std::path::Path;
 
 const SHARED: [&str; 3] = ["store", "var/build", "var/log"];
 const USAGE: &str = "usage: rb-helper setup <group> | seal <key> <entry> [reference...] | \
-                     pull <key> <entry> <digest> [reference...] < archive";
+                     pull <key> <entry> <digest> [reference...] < archive | profile";
 
 fn main() {
     for (name, _) in std::env::vars_os() {
@@ -63,6 +65,10 @@ fn run() -> Result<String, String> {
 
             Ok(path.display().to_string())
         }
+        [command] if command == "profile" => {
+            authorize(root)?;
+            profile(root)
+        }
         _ => Err(USAGE.into()),
     }
 }
@@ -90,6 +96,56 @@ fn parse(key: &str, references: &[String]) -> Result<(Key, BTreeSet<Key>), Strin
     Ok((key, references))
 }
 
+fn profile(root: &Path) -> Result<String, String> {
+    let (uid, gid) = (getuid().as_raw(), getgid().as_raw());
+    let profiles = root.join("profiles");
+    let directory = profiles.join(uid.to_string());
+    let at = |path: &Path| {
+        let path = path.to_path_buf();
+        move |error: io::Error| format!("{}: {error}", path.display())
+    };
+
+    let is_root_owned = fs::symlink_metadata(&profiles)
+        .is_ok_and(|metadata| metadata.is_dir() && metadata.uid() == 0);
+
+    if !is_root_owned {
+        return Err(format!(
+            "{} isn't root's directory, so run `rb-helper setup` again",
+            profiles.display()
+        ));
+    }
+
+    match fs::symlink_metadata(&directory) {
+        Ok(metadata) if metadata.is_dir() && metadata.uid() == uid => {
+            return Ok(directory.display().to_string());
+        }
+        Ok(_) => return Err(format!("{} isn't your directory", directory.display())),
+        Err(error) if error.kind() != io::ErrorKind::NotFound => {
+            return Err(at(&directory)(error));
+        }
+        Err(_) => {}
+    }
+
+    let staged = profiles.join(format!(".{uid}"));
+    match fs::remove_dir_all(&staged) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(at(&staged)(error)),
+        _ => {}
+    }
+
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&staged)
+        .map_err(at(&staged))?;
+
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let opened = rustix::fs::open(&staged, flags, Mode::empty())
+        .map_err(|error| at(&staged)(error.into()))?;
+
+    fchown(&opened, Some(uid), Some(gid)).map_err(at(&staged))?;
+    fs::rename(&staged, &directory).map_err(at(&directory))?;
+    Ok(directory.display().to_string())
+}
+
 /// Creates the store for `group` and installs this binary setuid in it. Run
 /// once with sudo.
 fn setup(root: &Path, group: &str) -> Result<String, String> {
@@ -101,7 +157,13 @@ fn setup(root: &Path, group: &str) -> Result<String, String> {
 
     // Parents first, so once one is root's nobody else can swap what's in it.
     let trusted = group_id(group)?;
-    let private = [root.to_path_buf(), root.join("var"), root.join("libexec")];
+    let private = [
+        root.to_path_buf(),
+        root.join("var"),
+        root.join("libexec"),
+        root.join("profiles"),
+    ];
+
     let directories = private
         .map(|path| (path, 0, 0o755))
         .into_iter()

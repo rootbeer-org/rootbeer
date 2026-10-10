@@ -3,6 +3,7 @@ mod cache;
 mod index;
 mod install;
 mod plan;
+mod profile;
 
 use rootbeer_cache::Cache;
 use rootbeer_drv::{
@@ -79,6 +80,20 @@ enum Command {
     },
     /// Install a package from the signed index, after what it references
     Install(install::Args),
+    /// Install packages from the signed index into a new generation of your
+    /// profile
+    Use(profile::UseArgs),
+    /// Make a new generation of your profile without these packages
+    Unuse {
+        #[arg(required = true)]
+        names: Vec<String>,
+    },
+    /// Switch your profile back to its previous generation
+    Rollback,
+    /// List your profile's generations, marking the current one
+    Generations,
+    /// Print shell code that puts your profiles on PATH
+    Env,
     /// Print, as JSON levels, the packages CI must build because no cache has them
     Plan {
         /// Each `name` or `name@version`; versions default to the platform's
@@ -169,6 +184,11 @@ pub fn run(args: Args) {
             entries,
         } => index::sign(&repository, &key, entries.as_deref()),
         Command::Install(args) => install::install(&args),
+        Command::Use(args) => profile::add(&args),
+        Command::Unuse { names } => profile::remove(&names),
+        Command::Rollback => profile::rollback(),
+        Command::Generations => profile::generations(),
+        Command::Env => profile::env(),
     };
 
     if let Err(error) = result {

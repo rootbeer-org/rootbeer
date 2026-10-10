@@ -16,7 +16,7 @@ use std::path::PathBuf;
 
 pub use error::Error;
 pub use key::{Key, Sha256};
-pub use validate::is_package_name;
+pub use validate::{is_file_name, is_package_name};
 
 /// The store root (fixed by the encoding version and embedded in every output)
 pub const STORE_ROOT: &str = "/opt/rb/store";

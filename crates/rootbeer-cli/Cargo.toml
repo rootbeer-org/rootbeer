@@ -24,6 +24,7 @@ rootbeer-drv = { path = "../rootbeer-drv" }
 rootbeer-eval = { path = "../rootbeer-eval" }
 rootbeer-sandbox = { path = "../rootbeer-sandbox" }
 rootbeer-cache = { path = "../rootbeer-cache" }
+rootbeer-profile = { path = "../rootbeer-profile" }
 rootbeer-store = { path = "../rootbeer-store" }
 rootbeer-trust = { path = "../rootbeer-trust" }
 rustix = { version = "1", features = ["process"] }

@@ -81,6 +81,11 @@ pub fn is_package_name(name: &str) -> bool {
     PACKAGE_NAME.is_match(name)
 }
 
+/// One path component, never `.` or `..`, without control characters.
+pub fn is_file_name(name: &str) -> bool {
+    !matches!(name, "" | "." | "..") && !name.contains('/') && !name.contains(char::is_control)
+}
+
 impl Derivation {
     pub(crate) fn validate(&self) -> Result<(), Error> {
         match self {

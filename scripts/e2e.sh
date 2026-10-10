@@ -3,7 +3,8 @@
 # exports its closure, publishes it to a store namespace on a local registry,
 # then installs it by key into one empty store and imports the export into
 # another. Last it signs a throwaway index of the namespace and installs
-# through it into a third. Each must match the build exactly.
+# through it into a third, then uses it in a profile there. Each must match the
+# build exactly.
 #
 #   scripts/e2e.sh [package]
 #
@@ -57,6 +58,9 @@ RB_STORE_VOLUME=$imported "$linux" import /artifacts
 RB_STORE_VOLUME=$verified "$linux" install "$package" \
     --index file:///artifacts/index --root /artifacts/index/metadata/1.root.json \
     --registry "$url" --namespace "$store" --allow-http
+RB_STORE_VOLUME=$verified "$linux" use "$package" \
+    --index file:///artifacts/index --root /artifacts/index/metadata/1.root.json \
+    --registry "$url" --namespace "$store" --allow-http
 
 # Every tree, as tar with times and owners normalized, must be identical.
 # Each tar must succeed, so two missing trees can't compare equal.
@@ -74,6 +78,8 @@ docker run --rm --platform "$platform" \
         cmp /tmp/built.tar /tmp/installed.tar
         cmp /tmp/built.tar /tmp/imported.tar
         cmp /tmp/built.tar /tmp/verified.tar
+        test \"\$(readlink /verified/profiles/0/user)\" = user-1
+        test \"\$(readlink /verified/profiles/0/user/bin/$name)\" = /opt/rb/store/$entry/bin/$name
     "
 
 echo "$entry went through the store, an export, and a signed index, and matches the build"

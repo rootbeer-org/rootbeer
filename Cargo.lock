@@ -2128,6 +2128,7 @@ dependencies = [
  "rootbeer-core",
  "rootbeer-drv",
  "rootbeer-eval",
+ "rootbeer-profile",
  "rootbeer-sandbox",
  "rootbeer-store",
  "rootbeer-trust",
@@ -2237,6 +2238,16 @@ dependencies = [
  "tar",
  "tempfile",
  "ureq",
+]
+
+[[package]]
+name = "rootbeer-profile"
+version = "0.1.0"
+dependencies = [
+ "rootbeer-drv",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

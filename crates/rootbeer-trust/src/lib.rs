@@ -7,7 +7,7 @@ mod transport;
 #[cfg(test)]
 mod tests;
 
-use rootbeer_drv::{Key, Platform, Sha256, is_package_name};
+use rootbeer_drv::{Key, Platform, Sha256, is_file_name, is_package_name};
 use serde::{Deserialize, Serialize};
 pub use sign::sign;
 use std::collections::{BTreeMap, BTreeSet};
@@ -237,10 +237,6 @@ fn is_digest(manifest: &str) -> bool {
     manifest
         .strip_prefix("sha256:")
         .is_some_and(|digest| Sha256::try_from(digest.to_string()).is_ok())
-}
-
-fn is_file_name(name: &str) -> bool {
-    !matches!(name, "" | "." | "..") && !name.contains('/') && !name.contains(char::is_control)
 }
 
 fn is_inside(path: &str) -> bool {
