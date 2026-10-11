@@ -159,6 +159,7 @@ impl Pipeline {
             package_repository,
             local_catalog,
             ops,
+            is_packages_taken: false,
         })
     }
 }
@@ -172,11 +173,36 @@ pub struct PlannedPipeline {
     local_catalog: Option<PackageCatalog>,
     opts: Options,
     ops: Vec<Op>,
+    is_packages_taken: bool,
 }
 
 impl PlannedPipeline {
     pub fn ops(&self) -> &[Op] {
         &self.ops
+    }
+
+    /// Whether the script called `rb.package_catalog` or
+    /// `rb.package_repository`.
+    pub fn has_package_sources(&self) -> bool {
+        self.package_repository.is_some() || self.local_catalog.is_some()
+    }
+
+    /// Removes the package ops from the plan. Execution then leaves
+    /// `rootbeer.lock` and the legacy store to the caller.
+    pub fn take_packages(&mut self) -> Vec<PackageIntent> {
+        self.is_packages_taken = true;
+        let (packages, ops) = std::mem::take(&mut self.ops)
+            .into_iter()
+            .partition::<Vec<_>, _>(|op| matches!(op, Op::Package { .. }));
+
+        self.ops = ops;
+        packages
+            .into_iter()
+            .filter_map(|op| match op {
+                Op::Package { intent } => Some(intent),
+                _ => None,
+            })
+            .collect()
     }
 
     pub fn mode(&self) -> Mode {
@@ -199,6 +225,7 @@ impl PlannedPipeline {
                     handler,
                     ApplyOptions {
                         package_offline: self.opts.package_lock.is_offline,
+                        is_packages_taken: self.is_packages_taken,
                     },
                 )?
             }
@@ -210,6 +237,10 @@ impl PlannedPipeline {
 
     fn locked_ops_for_apply(&self, notice: &mut dyn FnMut(&str)) -> Result<Vec<Op>, Error> {
         let path = self.opts.script_dir.join("rootbeer.lock");
+        if self.is_packages_taken {
+            return Ok(self.ops.clone());
+        }
+
         if !crate::package::lockfile::has_package_ops(&self.ops) && !path.exists() {
             return Ok(self.ops.clone());
         }
@@ -420,6 +451,7 @@ mod tests {
             ops: vec![Op::Package {
                 intent: PackageIntent::Locked(package()),
             }],
+            is_packages_taken: false,
         };
 
         let err = planned.execute(&mut Recorder).unwrap_err();
@@ -445,6 +477,7 @@ mod tests {
             ops: vec![Op::Package {
                 intent: PackageIntent::Locked(package()),
             }],
+            is_packages_taken: false,
         };
 
         let ops = planned.locked_ops_for_apply(&mut |_| {}).unwrap();
@@ -475,6 +508,7 @@ mod tests {
             ops: vec![Op::Package {
                 intent: PackageIntent::Locked(planned_package),
             }],
+            is_packages_taken: false,
         };
 
         let err = planned.locked_ops_for_apply(&mut |_| {}).unwrap_err();
@@ -499,6 +533,7 @@ mod tests {
             ops: vec![Op::Package {
                 intent: PackageIntent::Locked(package()),
             }],
+            is_packages_taken: false,
         };
 
         let err = planned.locked_ops_for_apply(&mut |_| {}).unwrap_err();
@@ -533,12 +568,41 @@ mod tests {
             ops: vec![Op::Package {
                 intent: PackageIntent::Locked(package()),
             }],
+            is_packages_taken: false,
         };
 
         let err = planned.locked_ops_for_apply(&mut |_| {}).unwrap_err();
 
         assert!(matches!(err, Error::Lock(LockError::StaleLockfile { .. })));
     }
+
+    #[test]
+    fn taken_packages_leave_rootbeer_lock_unread() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("rootbeer.lock"), r#"{"schema": 4}"#).unwrap();
+        let mut planned = plan_script(
+            root.path(),
+            r#"local rb = require("rootbeer")
+rb.package("jq")
+rb.package("fd@10.2.0")"#,
+        );
+
+        let taken = planned.take_packages();
+        let names = taken
+            .iter()
+            .map(|intent| match intent {
+                PackageIntent::Request(request) => request.name.as_str(),
+                PackageIntent::Locked(package) => package.name.as_str(),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["jq", "fd"]);
+        assert!(planned.ops().is_empty());
+        assert!(planned
+            .locked_ops_for_apply(&mut |_| {})
+            .unwrap()
+            .is_empty());
+    }
+
     fn plan_script(directory: &Path, source: &str) -> PlannedPipeline {
         let script = directory.join("init.lua");
         fs::write(&script, source).unwrap();
@@ -769,6 +833,7 @@ mod tests {
             local_catalog: None,
             opts: options,
             ops: vec![],
+            is_packages_taken: false,
         };
         assert!(planned.locked_ops_for_apply(&mut |_| {}).is_err());
         assert_eq!(fs::read(&path).unwrap(), original);
@@ -801,6 +866,7 @@ mod tests {
                 local_catalog: None,
                 opts: options,
                 ops: vec![],
+                is_packages_taken: false,
             };
             let mut notices = Vec::new();
             let result =
@@ -851,6 +917,7 @@ mod tests {
                 local_catalog: None,
                 opts: options,
                 ops: vec![],
+                is_packages_taken: false,
             };
             assert!(planned
                 .locked_ops_for_apply(&mut |_| {})

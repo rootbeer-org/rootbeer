@@ -452,3 +452,93 @@ fn an_app_must_be_a_bundle_inside_its_output_and_provided_once() {
     );
     assert!(profile.generations().unwrap().is_empty());
 }
+
+mod lock {
+    use crate::{Error, LOCK_SCHEMA, Lock, Locked};
+    use std::collections::BTreeMap;
+    use std::fs;
+
+    fn locked() -> Locked {
+        Locked {
+            version: "1.8.2".into(),
+            key: "a".repeat(32).parse().unwrap(),
+            manifest: format!("sha256:{}", "0".repeat(64)),
+            bins: ["jq".to_string()].into(),
+            apps: BTreeMap::new(),
+            extra: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn a_lock_round_trips_and_keeps_what_a_newer_rb_added() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("rootbeer.lock");
+        assert_eq!(Lock::read(&path).unwrap(), None);
+
+        let mut lock = Lock::default();
+        lock.insert("jq", "aarch64-macos", locked());
+        lock.write(&path).unwrap();
+        assert_eq!(Lock::read(&path).unwrap(), Some(lock.clone()));
+
+        let mut json: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        json["comment"] = "later".into();
+        json["packages"]["jq"]["riscv64-linux"] = json["packages"]["jq"]["aarch64-macos"].clone();
+        json["packages"]["jq"]["aarch64-macos"]["origin"] = "cache".into();
+        fs::write(&path, json.to_string()).unwrap();
+
+        let read = Lock::read(&path).unwrap().unwrap();
+        read.write(&path).unwrap();
+        let written: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(written["schema"], LOCK_SCHEMA);
+        assert_eq!(written["comment"], "later");
+        assert_eq!(
+            written["packages"]["jq"]["aarch64-macos"]["origin"],
+            "cache"
+        );
+        assert!(written["packages"]["jq"]["riscv64-linux"].is_object());
+    }
+
+    #[test]
+    fn older_and_newer_locks_are_told_apart_before_decoding() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("rootbeer.lock");
+
+        fs::write(
+            &path,
+            r#"{"schema": 3, "inputs": {}, "packages": {"jq@1": {}}}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            Lock::read(&path),
+            Err(Error::Older { schema: 3, .. })
+        ));
+
+        fs::write(&path, r#"{"schema": 5, "packages": []}"#).unwrap();
+        assert!(matches!(
+            Lock::read(&path),
+            Err(Error::Newer { schema: 5, .. })
+        ));
+
+        let escaping = format!(
+            r#"{{"schema": 4, "packages": {{"jq": {{"aarch64-macos": {{"version": "1", "key": "{}", "manifest": "x", "bins": ["../sh"]}}}}}}}}"#,
+            "a".repeat(32)
+        );
+        fs::write(&path, escaping).unwrap();
+        assert!(matches!(Lock::read(&path), Err(Error::Invalid { .. })));
+    }
+
+    #[test]
+    fn writing_the_same_lock_leaves_the_file_alone() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("rootbeer.lock");
+        let mut lock = Lock::default();
+        lock.insert("jq", "aarch64-macos", locked());
+        lock.write(&path).unwrap();
+
+        let before = fs::metadata(&path).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        lock.write(&path).unwrap();
+        assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), before);
+    }
+}

@@ -160,6 +160,7 @@ mod tests {
             &mut Handler,
             crate::executor::ApplyOptions {
                 package_offline: true,
+                ..Default::default()
             },
         )
         .unwrap();

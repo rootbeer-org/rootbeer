@@ -41,6 +41,9 @@ fn resolve_source(source: &WriteSource, tools: &crate::tools::ToolRuntime) -> io
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ApplyOptions {
     pub package_offline: bool,
+    /// Leaves the legacy store, its bins, and its apps alone, because the
+    /// caller installed packages elsewhere.
+    pub is_packages_taken: bool,
 }
 
 #[cfg(test)]
@@ -89,7 +92,7 @@ pub fn apply_with_options(
     #[cfg(not(test))]
     let bin_dir = package_profile::bin_dir();
 
-    apply_with_package_realizer(
+    apply_ops(
         tools,
         ops,
         force,
@@ -97,9 +100,11 @@ pub fn apply_with_options(
         &package_realizer,
         &bin_dir,
         &applications,
+        !options.is_packages_taken,
     )
 }
 
+#[cfg(test)]
 fn apply_with_package_realizer(
     tools: &crate::tools::ToolRuntime,
     ops: &[Op],
@@ -108,6 +113,29 @@ fn apply_with_package_realizer(
     package_realizer: &PackageRealizer,
     package_bin_dir: &Path,
     applications: &Applications,
+) -> io::Result<ExecutionReport> {
+    apply_ops(
+        tools,
+        ops,
+        force,
+        handler,
+        package_realizer,
+        package_bin_dir,
+        applications,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_ops(
+    tools: &crate::tools::ToolRuntime,
+    ops: &[Op],
+    force: bool,
+    handler: &mut impl ExecutionHandler,
+    package_realizer: &PackageRealizer,
+    package_bin_dir: &Path,
+    applications: &Applications,
+    should_sync_packages: bool,
 ) -> io::Result<ExecutionReport> {
     let mut report = ExecutionReport::default();
     let mut desired_apps = BTreeMap::new();
@@ -363,6 +391,10 @@ fn apply_with_package_realizer(
                 ));
             }
         }
+    }
+
+    if !should_sync_packages {
+        return Ok(report);
     }
 
     if !report

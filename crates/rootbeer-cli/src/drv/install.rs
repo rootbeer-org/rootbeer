@@ -44,6 +44,18 @@ pub(super) struct Source {
     is_http_allowed: bool,
 }
 
+impl Default for Source {
+    fn default() -> Source {
+        Source {
+            index: None,
+            root: None,
+            registry: "https://ghcr.io".into(),
+            namespace: "rootbeer-org/store".into(),
+            is_http_allowed: false,
+        }
+    }
+}
+
 impl Source {
     pub(super) fn cache(&self) -> Cache {
         cache::open(&self.registry, &self.namespace, self.is_http_allowed)
@@ -189,6 +201,15 @@ mod tests {
 
         let args = parse(&[]).unwrap();
         assert_eq!(args.source.registry, "https://ghcr.io");
+        let default = Source::default();
+        assert_eq!(
+            (
+                &default.registry,
+                &default.namespace,
+                default.is_http_allowed
+            ),
+            (&args.source.registry, &args.source.namespace, false)
+        );
         assert!(args.key.is_none() && args.source.index.is_none());
 
         let key = "a".repeat(32);

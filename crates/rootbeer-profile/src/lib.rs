@@ -12,8 +12,11 @@ use std::io::{self, Write};
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 
+mod lock;
 #[cfg(test)]
 mod tests;
+
+pub use lock::{LOCK_SCHEMA, Lock, Locked};
 
 pub const SCHEMA: u32 = 1;
 const RECORD: &str = "generation.json";
@@ -66,6 +69,7 @@ pub enum Error {
     Io { path: PathBuf, source: io::Error },
     Invalid { path: PathBuf, reason: String },
     Newer { path: PathBuf, schema: u32 },
+    Older { path: PathBuf, schema: u32 },
     Refused(String),
 }
 
@@ -473,6 +477,11 @@ impl fmt::Display for Error {
                 "{} was written by a newer rb (schema {schema})",
                 path.display()
             ),
+            Error::Older { path, schema } => write!(
+                f,
+                "{} was written by an older rb (schema {schema})",
+                path.display()
+            ),
             Error::Refused(reason) => f.write_str(reason),
         }
     }
@@ -485,17 +494,25 @@ fn validate(name: &str, member: &Member) -> Result<(), String> {
         return Err(format!("{name:?} isn't a package name"));
     }
 
-    if let Some(bin) = member.bins.iter().find(|bin| !is_file_name(bin)) {
+    validate_exports(name, &member.bins, &member.apps)
+}
+
+pub(crate) fn validate_exports(
+    name: &str,
+    bins: &BTreeSet<String>,
+    apps: &BTreeMap<String, String>,
+) -> Result<(), String> {
+    if let Some(bin) = bins.iter().find(|bin| !is_file_name(bin)) {
         return Err(format!("{name} has a bin {bin:?} that isn't a plain name"));
     }
 
-    if let Some(app) = member.apps.keys().find(|app| !is_app_name(app)) {
+    if let Some(app) = apps.keys().find(|app| !is_app_name(app)) {
         return Err(format!(
             "{name} has an app {app:?} that isn't a bundle name"
         ));
     }
 
-    match member.apps.values().find(|path| !is_inside(path)) {
+    match apps.values().find(|path| !is_inside(path)) {
         Some(path) => Err(format!("{name} has an app at {path:?} outside its output")),
         None => Ok(()),
     }
@@ -518,7 +535,7 @@ fn remove(path: &Path) -> Result<(), Error> {
     }
 }
 
-fn io_at(path: &Path) -> impl Fn(io::Error) -> Error {
+pub(crate) fn io_at(path: &Path) -> impl Fn(io::Error) -> Error {
     let path = path.to_path_buf();
     move |source| Error::Io {
         path: path.clone(),

@@ -93,7 +93,8 @@ pub(super) fn add(args: &UseArgs) -> Result<(), String> {
         generation.packages.insert(name.to_string(), member);
     }
 
-    switch(&profile, &store, generation)
+    switch(&profile, USER, &store, generation)?;
+    link_apps(&profile)
 }
 
 pub(super) fn remove(names: &[String]) -> Result<(), String> {
@@ -108,7 +109,8 @@ pub(super) fn remove(names: &[String]) -> Result<(), String> {
     }
 
     let (store, _) = install::open_store()?;
-    switch(&profile, &store, generation)
+    switch(&profile, USER, &store, generation)?;
+    link_apps(&profile)
 }
 
 pub(super) fn rollback() -> Result<(), String> {
@@ -155,7 +157,12 @@ pub(super) fn env() -> Result<(), String> {
     Ok(())
 }
 
-fn switch(profile: &Profile, store: &Store, generation: Generation) -> Result<(), String> {
+pub(super) fn switch(
+    profile: &Profile,
+    name: &str,
+    store: &Store,
+    generation: Generation,
+) -> Result<(), String> {
     let locate = |key: &_| {
         store
             .path(key)
@@ -164,11 +171,11 @@ fn switch(profile: &Profile, store: &Store, generation: Generation) -> Result<()
     };
 
     let number = profile.create(generation, locate).map_err(profile_error)?;
-    eprintln!("{USER} is now generation {number}");
-    link_apps(profile)
+    eprintln!("{name} is now generation {number}");
+    Ok(())
 }
 
-fn link_apps(profile: &Profile) -> Result<(), String> {
+pub(super) fn link_apps(profile: &Profile) -> Result<(), String> {
     let Some(applications) = applications() else {
         return Ok(());
     };
@@ -181,7 +188,7 @@ fn link_apps(profile: &Profile) -> Result<(), String> {
 }
 
 /// None under sudo with HOME kept, so root never writes into a user's home.
-fn applications() -> Option<PathBuf> {
+pub(super) fn applications() -> Option<PathBuf> {
     if !cfg!(target_os = "macos") {
         return None;
     }
@@ -192,12 +199,12 @@ fn applications() -> Option<PathBuf> {
     is_own.then(|| home.join("Applications"))
 }
 
-fn current(profile: &Profile) -> Result<Generation, String> {
+pub(super) fn current(profile: &Profile) -> Result<Generation, String> {
     let current = profile.current().map_err(profile_error)?;
     Ok(current.unwrap_or_default())
 }
 
-fn directory(should_create: bool) -> Result<PathBuf, String> {
+pub(super) fn directory(should_create: bool) -> Result<PathBuf, String> {
     let directory = profiles();
     let uid = getuid();
     let at = |error: io::Error| format!("{}: {error}", directory.display());
@@ -231,13 +238,13 @@ fn directory(should_create: bool) -> Result<PathBuf, String> {
     Ok(directory)
 }
 
-fn profiles() -> PathBuf {
+pub(super) fn profiles() -> PathBuf {
     Path::new(ROOT)
         .join("profiles")
         .join(getuid().as_raw().to_string())
 }
 
-fn profile_error(error: rootbeer_profile::Error) -> String {
+pub(super) fn profile_error(error: rootbeer_profile::Error) -> String {
     let reason = error.to_string();
     if let rootbeer_profile::Error::Newer { .. } = error {
         crate::newer::relaunch(&reason);

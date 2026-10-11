@@ -1,9 +1,12 @@
 mod artifact;
 mod cache;
+mod configuration;
 mod index;
 mod install;
 mod plan;
 mod profile;
+
+pub(crate) use configuration::{configure, link_default_apps};
 
 use rootbeer_cache::Cache;
 use rootbeer_drv::{

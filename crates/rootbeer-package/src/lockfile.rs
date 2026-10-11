@@ -112,7 +112,12 @@ impl std::error::Error for LockError {}
 /// A newer rb's lock may not decode at all, so its schema is read first.
 fn check_schema(value: &serde_json::Value) -> io::Result<()> {
     let schema = value.get("schema").and_then(serde_json::Value::as_u64);
-    if schema.is_some_and(|schema| schema > 3) {
+    if schema == Some(4) {
+        let reason = "rootbeer.lock is for the /opt/rb store, so apply with --drv";
+        return Err(io::Error::new(io::ErrorKind::InvalidData, reason));
+    }
+
+    if schema.is_some_and(|schema| schema > 4) {
         let reason = "unsupported package lock schema; update Rootbeer";
         crate::newer::reached(reason);
         return Err(io::Error::new(io::ErrorKind::InvalidData, reason));
@@ -459,7 +464,7 @@ mod tests {
         let path = root.path().join("rootbeer.lock");
         fs::write(
             &path,
-            r#"{"schema":4,"packages":{"jq":{"aarch64-macos":"k"}}}"#,
+            r#"{"schema":5,"packages":{"jq":{"aarch64-macos":"k"}}}"#,
         )
         .unwrap();
 
@@ -467,5 +472,9 @@ mod tests {
         assert!(error.to_string().contains("update Rootbeer"), "{error}");
         let error = RootbeerLock::read_compatible(&path).unwrap_err();
         assert!(error.to_string().contains("update Rootbeer"), "{error}");
+
+        fs::write(&path, r#"{"schema":4,"packages":{}}"#).unwrap();
+        let error = RootbeerLock::read_compatible(&path).unwrap_err();
+        assert!(error.to_string().contains("--drv"), "{error}");
     }
 }

@@ -35,6 +35,10 @@ pub struct Args {
     /// strategies that call `ctx.cli()`.
     #[arg(short = 'p', long)]
     pub profile: Option<String>,
+
+    /// Install packages into the /opt/rb store through the signed index
+    #[arg(long = "drv", hide = true)]
+    pub is_drv: bool,
 }
 
 struct CliHandler {
@@ -180,6 +184,8 @@ pub fn run(args: Args, lua_dir: Option<&PathBuf>) {
         is_locked: args.locked,
         is_offline: args.offline,
     };
+    let package_lock = opts.package_lock;
+    let script_dir = opts.script_dir.clone();
 
     if let Some(lua_dir) = lua_dir {
         opts.lua_dir = lua_dir.clone();
@@ -198,7 +204,8 @@ pub fn run(args: Args, lua_dir: Option<&PathBuf>) {
         let _progress = crate::progress::Progress::new("evaluating configuration");
         pipeline.plan()
     };
-    let planned = plan_result.unwrap_or_else(|e| {
+
+    let mut planned = plan_result.unwrap_or_else(|e| {
         match &e {
             rootbeer_core::Error::Profile(pe) => {
                 eprintln!("{} {pe}", "✗".red().bold());
@@ -211,6 +218,23 @@ pub fn run(args: Args, lua_dir: Option<&PathBuf>) {
         std::process::exit(1);
     });
 
+    if args.is_drv && planned.has_package_sources() {
+        eprintln!(
+            "{} error: --drv installs only from the signed index, so it can't use rb.package_catalog or rb.package_repository",
+            "✗".red().bold()
+        );
+        std::process::exit(1);
+    }
+
+    // Before the rest, so commands the configuration runs can use them.
+    let should_link_apps = args.is_drv
+        && !args.dry_run
+        && crate::drv::configure(planned.take_packages(), &script_dir, &package_lock)
+            .unwrap_or_else(|e| {
+                eprintln!("{} error: {e}", "✗".red().bold());
+                std::process::exit(1);
+            });
+
     let mut handler = CliHandler {
         progress: (!args.dry_run).then(|| crate::progress::Progress::new("resolving packages")),
     };
@@ -220,6 +244,21 @@ pub fn run(args: Args, lua_dir: Option<&PathBuf>) {
 
     match result {
         Ok(report) => {
+            let has_failed = report.results.iter().any(
+                |result| matches!(result, OpResult::CommandRan { status, .. } if *status != 0),
+            );
+
+            if should_link_apps && has_failed {
+                eprintln!("warning: a command failed, so apps weren't linked");
+            }
+
+            if should_link_apps && !has_failed {
+                if let Err(e) = crate::drv::link_default_apps() {
+                    eprintln!("{} error: {e}", "✗".red().bold());
+                    std::process::exit(1);
+                }
+            }
+
             eprintln!(
                 "{} done ({} operations)",
                 "✓".green().bold(),
