@@ -20,8 +20,11 @@ pub(super) const ON_PATH: [&str; 2] = ["default", USER];
 pub(super) struct UseArgs {
     /// Each `name` or `name@version`. A version pins the package, and
     /// otherwise it follows the platform's default
-    #[arg(required = true)]
+    #[arg(required_unless_present = "should_update")]
     packages: Vec<String>,
+    /// Move these packages, or every package, to what the index has now
+    #[arg(long = "update")]
+    should_update: bool,
     #[command(flatten)]
     source: Source,
 }
@@ -30,8 +33,8 @@ pub(super) fn add(args: &UseArgs) -> Result<(), String> {
     let mut requests = BTreeMap::new();
     for request in &args.packages {
         let (name, version) = install::request(request);
-        let asked = requests.insert(name, version);
-        if asked.is_some_and(|asked| asked != version) {
+        let asked = requests.insert(name.to_string(), version.map(str::to_string));
+        if asked.is_some_and(|asked| asked.as_deref() != version) {
             return Err(format!("{name} is asked for at two versions"));
         }
     }
@@ -39,14 +42,7 @@ pub(super) fn add(args: &UseArgs) -> Result<(), String> {
     let directory = directory(true)?;
     let profile = Profile::open(&directory, USER).map_err(profile_error)?;
     let mut generation = current(&profile)?;
-    requests.retain(|name, version| {
-        let member = generation.packages.get(*name);
-        !member.is_some_and(|member| match version {
-            Some(version) => member.is_pinned && member.version == *version,
-            None => !member.is_pinned,
-        })
-    });
-
+    let requests = planned(&generation.packages, requests, args.should_update);
     if requests.is_empty() {
         eprintln!("{USER} already has everything asked for");
         return link_apps(&profile);
@@ -61,7 +57,8 @@ pub(super) fn add(args: &UseArgs) -> Result<(), String> {
 
     let mut members = Vec::new();
     for (name, version) in requests {
-        let (resolved, output) = install::select(signed.package(name)?, version, platform)?;
+        let (resolved, output) =
+            install::select(signed.package(&name)?, version.as_deref(), platform)?;
         let member = Member {
             version: resolved,
             is_pinned: version.is_some(),
@@ -72,7 +69,15 @@ pub(super) fn add(args: &UseArgs) -> Result<(), String> {
             extra: BTreeMap::new(),
         };
 
-        members.push((name, member));
+        let existing = generation.packages.get(&name);
+        if !existing.is_some_and(|existing| is_same(existing, &member)) {
+            members.push((name, member));
+        }
+    }
+
+    if members.is_empty() {
+        eprintln!("{USER} already has what the index has now");
+        return link_apps(&profile);
     }
 
     if let Some(applications) = applications() {
@@ -87,15 +92,56 @@ pub(super) fn add(args: &UseArgs) -> Result<(), String> {
             &cache,
             &mut store,
             is_root,
-            name,
+            &name,
             &member.key,
             Some(&mut signed),
         )?;
-        generation.packages.insert(name.to_string(), member);
+        generation.packages.insert(name, member);
     }
 
     switch(&profile, USER, &store, generation)?;
     link_apps(&profile)
+}
+
+/// Drops what the generation already has, unless updating. An update keeps a
+/// pin when the request names no version, and with nothing named it updates
+/// everything.
+fn planned(
+    packages: &BTreeMap<String, Member>,
+    mut requests: BTreeMap<String, Option<String>>,
+    should_update: bool,
+) -> BTreeMap<String, Option<String>> {
+    if should_update && requests.is_empty() {
+        requests = packages.keys().map(|name| (name.clone(), None)).collect();
+    }
+
+    for (name, version) in &mut requests {
+        let pinned = packages.get(name).filter(|member| member.is_pinned);
+        if let (true, None, Some(member)) = (should_update, &version, pinned) {
+            *version = Some(member.version.clone());
+        }
+    }
+
+    requests.retain(|name, version| {
+        let member = packages.get(name);
+        should_update
+            || !member.is_some_and(|member| match version {
+                Some(version) => member.is_pinned && member.version == *version,
+                None => !member.is_pinned,
+            })
+    });
+
+    requests
+}
+
+/// Ignores fields a newer rb added, which never change what's linked.
+pub(super) fn is_same(a: &Member, b: &Member) -> bool {
+    let strip = |member: &Member| Member {
+        extra: BTreeMap::new(),
+        ..member.clone()
+    };
+
+    strip(a) == strip(b)
 }
 
 pub(super) fn remove(names: &[String]) -> Result<(), String> {
@@ -252,4 +298,55 @@ pub(super) fn profile_error(error: rootbeer_profile::Error) -> String {
     }
 
     reason
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn member(version: &str, is_pinned: bool) -> Member {
+        Member {
+            version: version.into(),
+            is_pinned,
+            key: "a".repeat(32).parse().unwrap(),
+            manifest: format!("sha256:{}", "0".repeat(64)),
+            bins: Default::default(),
+            apps: Default::default(),
+            extra: Default::default(),
+        }
+    }
+
+    #[test]
+    fn an_update_keeps_pins_and_a_plain_use_skips_what_is_there() {
+        let packages = BTreeMap::from([
+            ("jj".to_string(), member("0.30", true)),
+            ("fd".to_string(), member("10.2.0", false)),
+        ]);
+        let ask = |requests: &[(&str, Option<&str>)]| {
+            requests
+                .iter()
+                .map(|(name, version)| (name.to_string(), version.map(str::to_string)))
+                .collect::<BTreeMap<_, _>>()
+        };
+
+        let everything = planned(&packages, BTreeMap::new(), true);
+        assert_eq!(everything, ask(&[("fd", None), ("jj", Some("0.30"))]));
+
+        let named = planned(&packages, ask(&[("jj", None)]), true);
+        assert_eq!(named, ask(&[("jj", Some("0.30"))]));
+
+        let plain = planned(&packages, ask(&[("fd", None), ("jj", Some("0.30"))]), false);
+        assert!(plain.is_empty());
+
+        let unpinned = planned(&packages, ask(&[("jj", None), ("rg", None)]), false);
+        assert_eq!(unpinned, ask(&[("jj", None), ("rg", None)]));
+    }
+
+    #[test]
+    fn fields_from_a_newer_rb_never_make_a_member_differ() {
+        let mut newer = member("0.30", true);
+        newer.extra.insert("signed".into(), true.into());
+        assert!(is_same(&newer, &member("0.30", true)));
+        assert!(!is_same(&newer, &member("0.31", true)));
+    }
 }

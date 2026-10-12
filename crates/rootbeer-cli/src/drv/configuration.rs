@@ -1,7 +1,7 @@
 use super::cache::{self, Signed};
 use super::install::{self, Source};
 use super::profile::{
-    applications, current, directory, link_apps, profile_error, profiles, switch,
+    applications, current, directory, is_same, link_apps, profile_error, profiles, switch,
 };
 use super::this_platform;
 use rootbeer_core::package::PackageIntent;
@@ -302,22 +302,12 @@ fn installed(store: &Store, package: &str, locked: &Locked) -> Result<(), String
     Ok(())
 }
 
-/// Ignores fields a newer rb added, which never change what's linked.
 fn same(current: &BTreeMap<String, Member>, members: &BTreeMap<String, Member>) -> bool {
-    let strip = |packages: &BTreeMap<String, Member>| {
-        packages
+    current.len() == members.len()
+        && current
             .iter()
-            .map(|(name, member)| {
-                let member = Member {
-                    extra: BTreeMap::new(),
-                    ..member.clone()
-                };
-                (name.clone(), member)
-            })
-            .collect::<BTreeMap<_, _>>()
-    };
-
-    strip(current) == strip(members)
+            .zip(members)
+            .all(|((name, a), (other, b))| name == other && is_same(a, b))
 }
 
 #[cfg(test)]
