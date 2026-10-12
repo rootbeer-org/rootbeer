@@ -28,8 +28,9 @@ const EXECUTABLES: [&str; 7] = [
     "/Applications/Xcode.app",
 ];
 
-// Test suites resolve hosts, users, and time zones.
-const SYSTEM: [&str; 11] = [
+// Test suites resolve hosts, users, and time zones. System libcurl reads the
+// LibreSSL config at startup, even for cargo --version.
+const SYSTEM: [&str; 12] = [
     "/System",
     "/private/var/db/dyld",
     "/private/var/db/xcode_select_link",
@@ -41,6 +42,7 @@ const SYSTEM: [&str; 11] = [
     "/private/etc/protocols",
     "/private/etc/passwd",
     "/private/etc/group",
+    "/private/etc/ssl",
 ];
 
 const DEVICES: [&str; 4] = ["/dev/null", "/dev/zero", "/dev/random", "/dev/urandom"];
@@ -52,7 +54,7 @@ const LINKS: [&str; 3] = ["/etc", "/tmp", "/var"];
 const NETWORK: &str = "(allow network-outbound (remote ip \"*:443\") (remote ip \"*:80\"))
 (allow network-outbound (remote unix-socket (path-literal \"/private/var/run/mDNSResponder\")))
 (allow mach-lookup (global-name \"com.apple.dnssd.service\" \"com.apple.SystemConfiguration.configd\" \"com.apple.trustd\" \"com.apple.trustd.agent\"))
-(allow file-read* (subpath \"/private/etc/ssl\") (literal \"/private/etc/resolv.conf\") (literal \"/private/var/run/resolv.conf\"))
+(allow file-read* (literal \"/private/etc/resolv.conf\") (literal \"/private/var/run/resolv.conf\"))
 ";
 
 /// `sandbox-exec` with a profile that reads only the host toolchain and
