@@ -64,6 +64,7 @@ impl Source {
 
 pub(super) fn install(args: &Args) -> Result<(), String> {
     let (mut store, is_root) = open_store()?;
+    let _held = store.hold().map_err(|error| error.to_string())?;
     let cache = args.source.cache();
     let key = match &args.key {
         Some(key) => {

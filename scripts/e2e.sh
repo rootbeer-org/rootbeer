@@ -3,8 +3,8 @@
 # exports its closure, publishes it to a store namespace on a local registry,
 # then installs it by key into one empty store and imports the export into
 # another. Last it signs a throwaway index of the namespace and installs
-# through it into a third, then uses it in a profile there. Each must match the
-# build exactly.
+# through it into a third, then uses it in a profile there and collects
+# garbage, which must keep it. Each must match the build exactly.
 #
 #   scripts/e2e.sh [package]
 #
@@ -61,6 +61,7 @@ RB_STORE_VOLUME=$verified "$linux" install "$package" \
 RB_STORE_VOLUME=$verified "$linux" use "$package" \
     --index file:///artifacts/index --root /artifacts/index/metadata/1.root.json \
     --registry "$url" --namespace "$store" --allow-http
+RB_STORE_VOLUME=$verified "$linux" gc --older-than 0d
 
 # Every tree, as tar with times and owners normalized, must be identical.
 # Each tar must succeed, so two missing trees can't compare equal.

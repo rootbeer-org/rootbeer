@@ -542,3 +542,80 @@ mod lock {
         assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), before);
     }
 }
+
+#[test]
+fn roots_are_every_generation_of_every_profile_and_never_through_a_link() {
+    let fixture = fixture();
+    let store = locate(&fixture.store);
+    let jq = output(&fixture.store, 'a', &["jq"]);
+    let fd = output(&fixture.store, 'b', &["fd"]);
+    let user = Profile::open(&fixture.profiles, "user").unwrap();
+    user.create(holding(&BTreeMap::from([("jq".into(), jq)])), &store)
+        .unwrap();
+    user.create(holding(&BTreeMap::from([("fd".into(), fd)])), &store)
+        .unwrap();
+
+    drop(user);
+    let zstd = output(&fixture.store, 'c', &["zstd"]);
+    let default = Profile::open(&fixture.profiles, "default").unwrap();
+    default
+        .create(holding(&BTreeMap::from([("zstd".into(), zstd)])), &store)
+        .unwrap();
+
+    drop(default);
+    let elsewhere = tempfile::tempdir().unwrap();
+    fs::create_dir(elsewhere.path().join("user-9")).unwrap();
+    std::os::unix::fs::symlink(
+        elsewhere.path().join("user-9"),
+        fixture.profiles.join("user-9"),
+    )
+    .unwrap();
+    fs::create_dir(fixture.profiles.join(".tmp-user-4")).unwrap();
+
+    let root = fixture.profiles.parent().unwrap();
+    let roots = crate::roots(root).unwrap();
+    assert_eq!(roots, [key('a'), key('b'), key('c')].into());
+    assert!(matches!(
+        crate::roots(&root.join("missing")),
+        Err(Error::Refused(_))
+    ));
+
+    let record = fixture.profiles.join("user-1/generation.json");
+    let moved = elsewhere.path().join("generation.json");
+    fs::rename(&record, &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, &record).unwrap();
+    assert!(crate::roots(root).is_err());
+
+    fs::remove_file(&record).unwrap();
+    fs::write(&record, r#"{"schema": 2, "packages": {}}"#).unwrap();
+    assert!(matches!(crate::roots(root), Err(Error::Newer { .. })));
+}
+
+#[test]
+fn pruning_keeps_the_current_generation_and_recent_ones() {
+    let fixture = fixture();
+    let store = locate(&fixture.store);
+    let profile = Profile::open(&fixture.profiles, "user").unwrap();
+    for _ in 0..3 {
+        profile.create(Generation::default(), &store).unwrap();
+    }
+
+    let day = std::time::Duration::from_secs(24 * 60 * 60);
+    let old = std::time::SystemTime::now() - day * 2;
+    for number in [1, 3] {
+        let directory = fs::File::open(fixture.profiles.join(format!("user-{number}"))).unwrap();
+        directory.set_modified(old).unwrap();
+    }
+
+    assert_eq!(profile.prune(day).unwrap(), [1]);
+    assert_eq!(profile.generations().unwrap(), [2, 3]);
+    let names = fs::read_dir(&fixture.profiles)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap());
+    assert!(names.filter(|name| name.starts_with(".tmp-")).count() == 0);
+    assert_eq!(profile.current_number().unwrap(), Some(3));
+
+    drop(profile);
+    let reader = Profile::open_shared(&fixture.profiles, "default").unwrap();
+    assert!(matches!(reader.prune(day), Err(Error::Refused(_))));
+}

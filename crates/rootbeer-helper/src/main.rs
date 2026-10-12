@@ -1,6 +1,6 @@
 //! rb-helper is used to allow trusted users to write into the shared store.
-//! It seals what is build in place and pulls archives from stdin. It's pretty
-//! much a root helper.
+//! It seals what is built in place, pulls archives from stdin, and routes
+//! garbage collection operations. It's pretty much a root helper.
 
 use rootbeer_drv::Key;
 use rootbeer_store::{ROOT, Store};
@@ -16,7 +16,7 @@ use std::path::Path;
 
 const SHARED: [&str; 3] = ["store", "var/build", "var/log"];
 const USAGE: &str = "usage: rb-helper setup <group> | seal <key> <entry> [reference...] | \
-                     pull <key> <entry> <digest> [reference...] < archive | profile";
+                     pull <key> <entry> <digest> [reference...] < archive | profile | gc";
 
 fn main() {
     for (name, _) in std::env::vars_os() {
@@ -69,15 +69,42 @@ fn run() -> Result<String, String> {
             authorize(root)?;
             profile(root)
         }
+        [command] if command == "gc" => {
+            authorize(root)?;
+            collect(root)
+        }
         _ => Err(USAGE.into()),
     }
+}
+
+fn collect(root: &Path) -> Result<String, String> {
+    let profiles = root.join("profiles");
+    let roots = || {
+        rootbeer_profile::roots(&profiles).map_err(|error| match error {
+            rootbeer_profile::Error::Newer { .. } => {
+                format!("{error}, so run `rb-helper setup` from a newer rb")
+            }
+            error => error.to_string(),
+        })
+    };
+
+    let mut store = Store::open(root).map_err(|error| error.to_string())?;
+    let removed = store
+        .collect(roots, || {
+            eprintln!("waiting for installs and builds to finish")
+        })
+        .map_err(|error| error.to_string())?;
+
+    let count = format!("removed {} store entries", removed.len());
+    let lines = removed.iter().map(|entry| entry.escape_debug().to_string());
+    Ok(lines.chain([count]).collect::<Vec<_>>().join("\n"))
 }
 
 fn authorize(root: &Path) -> Result<(), String> {
     let store = root.join("store");
     rustix::fs::access(&store, Access::WRITE_OK).map_err(|_| {
         format!(
-            "only users who may write to {} may add to it",
+            "only users who may write to {} may change it",
             store.display()
         )
     })
@@ -146,16 +173,11 @@ fn profile(root: &Path) -> Result<String, String> {
     Ok(directory.display().to_string())
 }
 
-/// Creates the store for `group` and installs this binary setuid in it. Run
-/// once with sudo.
 fn setup(root: &Path, group: &str) -> Result<String, String> {
-    // The real id, since anyone running the installed copy has root's
-    // effective id.
     if !getuid().is_root() {
         return Err("setup must run as root".into());
     }
 
-    // Parents first, so once one is root's nobody else can swap what's in it.
     let trusted = group_id(group)?;
     let private = [
         root.to_path_buf(),
@@ -180,7 +202,8 @@ fn setup(root: &Path, group: &str) -> Result<String, String> {
         fs::set_permissions(&path, fs::Permissions::from_mode(mode)).map_err(at)?;
     }
 
-    Store::open(root).map_err(|error| error.to_string())?;
+    let store = Store::open(root).map_err(|error| error.to_string())?;
+    drop(store.hold().map_err(|error| error.to_string())?);
     let database = root.join("var/db.sqlite");
     let at = |error: io::Error| format!("{}: {error}", database.display());
     chown(&database, Some(0), Some(trusted)).map_err(at)?;
@@ -201,10 +224,12 @@ fn setup(root: &Path, group: &str) -> Result<String, String> {
             .create_new(true)
             .mode(0o700)
             .open(&staged)?;
+
         io::copy(&mut fs::File::open(&source)?, &mut file)?;
         fchown(&file, Some(0), Some(0))?;
         file.set_permissions(fs::Permissions::from_mode(0o4755))?;
         file.sync_all()?;
+
         fs::rename(&staged, &helper)
     };
 
@@ -215,7 +240,8 @@ fn setup(root: &Path, group: &str) -> Result<String, String> {
     ))
 }
 
-/// The id of `name` in `/etc/group`, which setup reads once as root.
+// TODO: This /etc/group parsing is safe across both macOS and Linux but we
+// should probably consider switching to a libc call in the future.
 fn group_id(name: &str) -> Result<u32, String> {
     let groups = fs::read_to_string("/etc/group").map_err(|error| error.to_string())?;
     groups

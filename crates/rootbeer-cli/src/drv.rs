@@ -1,6 +1,7 @@
 mod artifact;
 mod cache;
 mod configuration;
+mod gc;
 mod index;
 mod install;
 mod plan;
@@ -97,6 +98,8 @@ enum Command {
     Generations,
     /// Print shell code that puts your profiles on PATH
     Env,
+    /// Remove store outputs no generation of any profile on this machine holds
+    Gc(gc::Args),
     /// Print, as JSON levels, the packages CI must build because no cache has them
     Plan {
         /// Each `name` or `name@version`; versions default to the platform's
@@ -192,6 +195,7 @@ pub fn run(args: Args) {
         Command::Rollback => profile::rollback(),
         Command::Generations => profile::generations(),
         Command::Env => profile::env(),
+        Command::Gc(args) => gc::run(&args),
     };
 
     if let Err(error) = result {
@@ -250,6 +254,7 @@ fn build(
         false => Store::open_read_only(root),
     }
     .map_err(store_error)?;
+    let _held = store.hold().map_err(|error| error.to_string())?;
 
     let caches = caches.open();
     let mut resolver = Resolver {

@@ -14,7 +14,7 @@ use std::process::{Command, Stdio};
 const USER: &str = "user";
 
 /// Later ones take precedence on PATH.
-const ON_PATH: [&str; 2] = ["default", USER];
+pub(super) const ON_PATH: [&str; 2] = ["default", USER];
 
 #[derive(clap::Args, Debug)]
 pub(super) struct UseArgs {
@@ -53,6 +53,7 @@ pub(super) fn add(args: &UseArgs) -> Result<(), String> {
     }
 
     let (mut store, is_root) = install::open_store()?;
+    let _held = store.hold().map_err(|error| error.to_string())?;
     let index = install::open_index(&args.source, is_root)?;
     let mut signed = Signed::new(|name| index.package(name).map_err(|error| error.to_string()));
     let cache = args.source.cache();

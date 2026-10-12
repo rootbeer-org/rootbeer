@@ -184,6 +184,16 @@ fn registered_outputs_persist_and_cannot_be_replaced() {
     assert_eq!(store.path(&key).unwrap(), None);
     store
         .register(
+            &"b".repeat(32).parse().unwrap(),
+            "referenced",
+            Origin::Pulled,
+            None,
+            &BTreeSet::new(),
+        )
+        .unwrap();
+
+    store
+        .register(
             &key,
             "first",
             Origin::Pulled,
@@ -371,4 +381,78 @@ fn pulling_replaces_leftovers_and_registers_only_the_expected_archive() {
     let reader = Store::open_read_only(root.path()).unwrap();
     assert_eq!(reader.path(&key).unwrap(), Some(path.clone()));
     writable(&path);
+}
+
+#[test]
+fn collecting_keeps_what_roots_reach_and_waits_for_holders() {
+    let source = tempfile::tempdir().unwrap();
+    tree(source.path());
+    let bytes = packed(source.path());
+    let digest = format!(
+        "sha256:{}",
+        data_encoding::HEXLOWER.encode(&sha2::Sha256::digest(&bytes))
+    );
+
+    let root = store_root();
+    let mut store = Store::open(root.path()).unwrap();
+    let key = |digit: &str| -> Key { digit.repeat(32).parse().unwrap() };
+    let pull = |store: &mut Store, digit: &str, references: &[Key]| {
+        let entry = format!("{}-tool-1.0", key(digit));
+        let references = references.iter().cloned().collect();
+        store.pull(&key(digit), &entry, &digest, &references, bytes.as_slice())
+    };
+
+    let error = pull(&mut store, "a", &[key("b")]).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "{} references {}, which isn't in the store",
+            key("a"),
+            key("b")
+        )
+    );
+
+    for (digit, references) in [("b", vec![]), ("a", vec![key("b")]), ("c", vec![])] {
+        pull(&mut store, digit, &references).unwrap();
+    }
+
+    let store_directory = root.path().join("store");
+    let orphan = format!("{}-tool-1.0", key("d"));
+    fs::create_dir(store_directory.join(&orphan)).unwrap();
+    fs::create_dir(store_directory.join(".hidden")).unwrap();
+    writable(&store_directory);
+
+    let held = store.hold().unwrap();
+    let (waited, waiting) = std::sync::mpsc::channel();
+    let collecting = std::thread::spawn(move || {
+        let roots = || Ok(BTreeSet::from([key("a")]));
+        let removed = store.collect(roots, || waited.send(()).unwrap());
+        (store, removed)
+    });
+
+    waiting.recv().unwrap();
+    drop(held);
+    let (mut store, removed) = collecting.join().unwrap();
+    let expected = [format!("{}-tool-1.0", key("c")), orphan];
+
+    assert_eq!(
+        BTreeSet::from_iter(removed.unwrap()),
+        BTreeSet::from(expected)
+    );
+    assert!(store.path(&key("a")).unwrap().is_some());
+    assert!(store.path(&key("b")).unwrap().is_some());
+    assert_eq!(store.path(&key("c")).unwrap(), None);
+    assert!(store_directory.join(".hidden").exists());
+
+    let error = store
+        .collect(|| Err("unreadable".into()), || {})
+        .unwrap_err();
+
+    assert_eq!(error.to_string(), "unreadable");
+    assert!(store.path(&key("a")).unwrap().is_some());
+
+    fs::remove_dir_all(store_directory.join(format!("{}-tool-1.0", key("b")))).unwrap();
+    let removed = store.collect(|| Ok(BTreeSet::new()), || {}).unwrap();
+    assert_eq!(removed, [format!("{}-tool-1.0", key("a"))]);
+    assert_eq!(store.path(&key("b")).unwrap(), None);
 }

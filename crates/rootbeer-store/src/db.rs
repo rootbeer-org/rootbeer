@@ -1,7 +1,7 @@
 use crate::{Error, Origin};
 use rootbeer_drv::Key;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 const SCHEMA: &str = "
@@ -79,4 +79,35 @@ pub(crate) fn references(connection: &Connection, key: &Key) -> Result<BTreeSet<
             .map_err(|error: rootbeer_drv::Error| Error::Database(error.to_string()))
     })
     .collect()
+}
+
+pub(crate) fn outputs(connection: &Connection) -> Result<BTreeMap<Key, String>, Error> {
+    let mut statement = connection.prepare("SELECT key, entry FROM outputs")?;
+    let rows = statement.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+
+    rows.map(|row| {
+        let (key, entry) = row?;
+        let key = key
+            .parse()
+            .map_err(|error: rootbeer_drv::Error| Error::Database(error.to_string()))?;
+
+        Ok((key, entry))
+    })
+    .collect()
+}
+
+pub(crate) fn unregister<'a>(
+    connection: &mut Connection,
+    keys: impl IntoIterator<Item = &'a Key>,
+) -> Result<(), Error> {
+    let transaction = connection.transaction()?;
+    for key in keys {
+        transaction.execute("DELETE FROM refs WHERE referrer = ?1", [key.as_str()])?;
+        transaction.execute("DELETE FROM outputs WHERE key = ?1", [key.as_str()])?;
+    }
+
+    transaction.commit()?;
+    Ok(())
 }

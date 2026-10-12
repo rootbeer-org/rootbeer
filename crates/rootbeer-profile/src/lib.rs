@@ -11,15 +11,18 @@ use std::fs::{self, File};
 use std::io::{self, Write};
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 mod lock;
+mod roots;
 #[cfg(test)]
 mod tests;
 
 pub use lock::{LOCK_SCHEMA, Lock, Locked};
+pub use roots::roots;
 
 pub const SCHEMA: u32 = 1;
-const RECORD: &str = "generation.json";
+pub(crate) const RECORD: &str = "generation.json";
 const APPLICATIONS: &str = "Applications";
 
 pub struct Profile {
@@ -260,9 +263,6 @@ impl Profile {
         sync(&self.directory)
     }
 
-    /// Links the current generation's apps into `applications` and removes
-    /// this profile's links to anything else. Returns what it couldn't do,
-    /// such as a path something else holds.
     pub fn link_apps(&self, applications: &Path) -> Result<Vec<Error>, Error> {
         self.writable()?;
         let farm = self.farm();
@@ -275,7 +275,8 @@ impl Profile {
             Err(error) => return Err(io_at(&farm)(error)),
         };
 
-        // Removing first frees a name whose case changed between versions.
+        // We can't remove first because it frees up a name where the casing
+        // might've changed rather than a real name that was removed.
         let mut problems = Vec::new();
         match fs::read_dir(applications) {
             Ok(entries) => {
@@ -329,7 +330,6 @@ impl Profile {
         Ok(problems)
     }
 
-    /// Refuses the first of `apps` something else holds.
     pub fn check_apps<'a>(
         &self,
         applications: &Path,
@@ -383,36 +383,40 @@ impl Profile {
     pub fn read(&self, number: u64) -> Result<Generation, Error> {
         let path = self.directory.join(self.generation(number)).join(RECORD);
         let bytes = fs::read(&path).map_err(io_at(&path))?;
-        let invalid = |error: serde_json::Error| Error::Invalid {
-            path: path.clone(),
-            reason: error.to_string(),
+        parse(&path, &bytes, number)
+    }
+
+    // Removes anything older than age AND not the current generation.
+    pub fn prune(&self, age: Duration) -> Result<Vec<u64>, Error> {
+        self.writable()?;
+        let Some(current) = self.current_number()? else {
+            return Ok(Vec::new());
         };
 
-        let Schema { schema } = serde_json::from_slice(&bytes).map_err(invalid)?;
-        if schema > SCHEMA {
-            return Err(Error::Newer { path, schema });
+        let cutoff = SystemTime::now()
+            .checked_sub(age)
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+
+        let mut removed = Vec::new();
+        for number in self.generations()? {
+            let path = self.directory.join(self.generation(number));
+            let metadata = fs::symlink_metadata(&path).map_err(io_at(&path))?;
+            let modified = metadata.modified().map_err(io_at(&path))?;
+            if number == current || modified > cutoff {
+                continue;
+            }
+
+            let staged = self
+                .directory
+                .join(format!(".tmp-{}", self.generation(number)));
+
+            fs::rename(&path, &staged).map_err(io_at(&path))?;
+            removed.push(number);
         }
 
-        if schema != SCHEMA {
-            return Err(Error::Invalid {
-                path,
-                reason: format!("no rb writes schema {schema}"),
-            });
-        }
-
-        let record: Record = serde_json::from_slice(&bytes).map_err(invalid)?;
-        for (name, member) in &record.packages {
-            validate(name, member).map_err(|reason| Error::Invalid {
-                path: path.clone(),
-                reason,
-            })?;
-        }
-
-        Ok(Generation {
-            number,
-            packages: record.packages,
-            extra: record.extra,
-        })
+        sync(&self.directory)?;
+        self.clean()?;
+        Ok(removed)
     }
 
     pub fn generations(&self) -> Result<Vec<u64>, Error> {
@@ -488,6 +492,42 @@ impl fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
+
+fn parse(path: &Path, bytes: &[u8], number: u64) -> Result<Generation, Error> {
+    let invalid = |error: serde_json::Error| Error::Invalid {
+        path: path.to_path_buf(),
+        reason: error.to_string(),
+    };
+
+    let Schema { schema } = serde_json::from_slice(bytes).map_err(invalid)?;
+    if schema > SCHEMA {
+        return Err(Error::Newer {
+            path: path.to_path_buf(),
+            schema,
+        });
+    }
+
+    if schema != SCHEMA {
+        return Err(Error::Invalid {
+            path: path.to_path_buf(),
+            reason: format!("no rb writes schema {schema}"),
+        });
+    }
+
+    let record: Record = serde_json::from_slice(bytes).map_err(invalid)?;
+    for (name, member) in &record.packages {
+        validate(name, member).map_err(|reason| Error::Invalid {
+            path: path.to_path_buf(),
+            reason,
+        })?;
+    }
+
+    Ok(Generation {
+        number,
+        packages: record.packages,
+        extra: record.extra,
+    })
+}
 
 fn validate(name: &str, member: &Member) -> Result<(), String> {
     if !is_package_name(name) {

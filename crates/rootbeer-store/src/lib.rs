@@ -5,6 +5,7 @@
 mod add;
 mod archive;
 mod db;
+mod gc;
 
 pub use archive::pack;
 use archive::{seal, unpack};

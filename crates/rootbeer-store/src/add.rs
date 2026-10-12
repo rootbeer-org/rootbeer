@@ -37,6 +37,8 @@ impl Store {
             return Ok(path);
         }
 
+        self.closed(key, references)?;
+
         let path = self.entry(key, entry)?;
         let store_path = self.root.join("store");
         let store = rustix::fs::open(
@@ -84,6 +86,8 @@ impl Store {
             return Ok(path);
         }
 
+        self.closed(key, references)?;
+
         // Anything already there was interrupted, since it isn't registered.
         let path = self.entry(key, entry)?;
         remove(&path)?;
@@ -113,7 +117,19 @@ impl Store {
         Ok(path)
     }
 
-    fn exclusive(&self) -> Result<fs::File, Error> {
+    fn closed(&self, key: &Key, references: &BTreeSet<Key>) -> Result<(), Error> {
+        for reference in references.iter().filter(|reference| *reference != key) {
+            if self.path(reference)?.is_none() {
+                return Err(Error::Refused(format!(
+                    "{key} references {reference}, which isn't in the store"
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
+    pub(crate) fn exclusive(&self) -> Result<fs::File, Error> {
         let path = self.root.join("var/lock");
         let lock = fs::OpenOptions::new()
             .create(true)
@@ -302,7 +318,7 @@ fn errno_at(path: &Path) -> impl Fn(Errno) -> Error {
     move |error| at(error.into())
 }
 
-fn remove(path: &Path) -> Result<(), Error> {
+pub(crate) fn remove(path: &Path) -> Result<(), Error> {
     let result = match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.is_dir() => fs::remove_dir_all(path),
         Ok(_) => fs::remove_file(path),

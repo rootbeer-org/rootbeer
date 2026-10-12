@@ -2197,6 +2197,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rootbeer-helper"
+version = "0.1.0"
+dependencies = [
+ "rootbeer-drv",
+ "rootbeer-profile",
+ "rootbeer-store",
+ "rustix",
+]
+
+[[package]]
 name = "rootbeer-package"
 version = "0.1.0"
 dependencies = [
@@ -2245,6 +2255,7 @@ name = "rootbeer-profile"
 version = "0.1.0"
 dependencies = [
  "rootbeer-drv",
+ "rustix",
  "serde",
  "serde_json",
  "tempfile",

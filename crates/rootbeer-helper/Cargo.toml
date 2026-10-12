@@ -1,0 +1,27 @@
+[package]
+name = "rootbeer-helper"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+
+[[bin]]
+name = "rb-helper"
+path = "src/main.rs"
+
+[dependencies]
+rootbeer-drv = { path = "../rootbeer-drv" }
+rootbeer-profile = { path = "../rootbeer-profile" }
+rootbeer-store = { path = "../rootbeer-store" }
+rustix = { version = "1", features = ["fs", "process"] }
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+unreachable = "deny"
+todo = "deny"
+unimplemented = "deny"
+indexing_slicing = "deny"
+arithmetic_side_effects = "deny"
+cast_possible_truncation = "deny"
+cast_sign_loss = "deny"

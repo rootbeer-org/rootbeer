@@ -52,6 +52,7 @@ pub(crate) fn configure(
     }
 
     let (mut store, is_root) = install::open_store()?;
+    let _held = store.hold().map_err(|error| error.to_string())?;
     let source = Source::default();
     let cache = source.cache();
     let is_index_open = Cell::new(false);

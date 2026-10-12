@@ -124,6 +124,7 @@ pub(super) fn import(directory: &Path) -> Result<(), String> {
         false => Store::open_read_only(root),
     }
     .map_err(store_error)?;
+    let _held = store.hold().map_err(|error| error.to_string())?;
 
     let is_present = |store: &Store, key: &Key| {
         store
