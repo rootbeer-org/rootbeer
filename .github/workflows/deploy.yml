@@ -37,10 +37,6 @@ jobs:
         id: diff
         shell: bash
         run: |
-          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
-            echo "source=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
           base='${{ steps.nightly.outputs.sha }}'
 
           if [[ -z "$base" ]]; then
@@ -56,9 +52,9 @@ jobs:
       - name: Generate build timestamp
         id: timestamp
         run: |
-          now=$(date -u +%s)
-          echo "value=$(date -u -d "@$now" '+%Y-%m-%d %H:%M UTC')" >> "$GITHUB_OUTPUT"
-          echo "serial=$(date -u -d "@$now" '+%Y%m%d%H%M%S')" >> "$GITHUB_OUTPUT"
+          export TZ=UTC
+          echo "value=$(git log -1 --date='format-local:%Y-%m-%d %H:%M UTC' --format=%cd)" >> "$GITHUB_OUTPUT"
+          echo "serial=$(git log -1 --date=format-local:%Y%m%d%H%M%S --format=%cd)" >> "$GITHUB_OUTPUT"
 
   build:
     name: Build (${{ matrix.name }})
@@ -117,16 +113,72 @@ jobs:
             target/${{ matrix.target }}/release/rb
             target/${{ matrix.target }}/release/rb-store
 
-  # Signs apart from deploy, whose pnpm dependencies never see the key.
+  release:
+    name: Release (${{ matrix.platform }})
+    strategy:
+      matrix:
+        include:
+          - platform: x86_64-linux
+            runner: ubuntu-24.04
+          - platform: aarch64-linux
+            runner: ubuntu-24.04-arm
+          - platform: aarch64-macos
+            runner: macos-15
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Find the newest published rb
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh run list --repo "$GITHUB_REPOSITORY" --workflow build.yml --branch main \
+            --event push --status success --limit 1 --json headSha --jq '.[0].headSha' \
+            > "$RUNNER_TEMP/rb-revision"
+
+      - uses: rootbeer-org/setup-rb@bf50460fdf9e1b17508117150b26b624b840d08c
+        with:
+          revision-file: ${{ runner.temp }}/rb-revision
+
+      - name: Install rootbeer from the signed index
+        run: |
+          sudo "$(command -v rb-helper)" setup "$(id -gn)"
+          output=$(rb drv install rootbeer)
+          mkdir release
+          cp "$output/bin/rb" "$output/bin/rb-store" release/
+          echo "${output##*-rootbeer-}" > release/version
+
+          if grep -Eqa '/opt/rb/store/[0-9a-z]{32}-' release/rb release/rb-store; then
+            echo "::error::$output references the store"
+            exit 1
+          fi
+
+          reported=$(release/rb --version)
+          if ! [[ $reported =~ ^rb\ [^\ ]+\ \(([0-9a-f]{12}),\ serial\ ([0-9]+)\)$ ]]; then
+            echo "::error::$output says $reported, with no revision and serial"
+            exit 1
+          fi
+
+          echo "${BASH_REMATCH[1]}" > release/revision
+          echo "${BASH_REMATCH[2]}" > release/serial
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-${{ matrix.platform }}
+          path: release/
+
   sign:
     name: Sign bootstrap releases
-    needs: [changes, build]
-    if: needs.changes.outputs.source == 'true'
+    needs: release
     runs-on: ubuntu-latest
     permissions:
       contents: read
     environment:
       name: release
+    outputs:
+      is_released: ${{ steps.check.outputs.is_released }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -136,37 +188,62 @@ jobs:
       - name: Download artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          pattern: rb-*
+          pattern: release-*
           path: artifacts
 
       - name: Check the release is newer
+        id: check
         run: |
-          served=$(curl -fsSL https://rbpkg.com/nightly/source-sha.txt || true)
-          if [[ $served =~ ^[0-9a-f]{40}$ ]] && ! git merge-base --is-ancestor "$served" "$GITHUB_SHA"; then
-            echo "::error::$GITHUB_SHA doesn't descend from the served $served"
+          release=artifacts/release-x86_64-linux
+          version=$(cat "$release/version")
+          serial=$(cat "$release/serial")
+          short=$(cat "$release/revision")
+          for platform in aarch64-linux aarch64-macos; do
+            for field in version serial revision; do
+              if ! cmp -s "$release/$field" "artifacts/release-$platform/$field"; then
+                echo "::error::$platform's rootbeer has another $field than x86_64-linux's"
+                exit 1
+              fi
+            done
+          done
+
+          if ! [[ $serial =~ ^[0-9]{14}$ && $short =~ ^[0-9a-f]{12}$ ]]; then
+            echo "::error::rootbeer $version has serial $serial and revision $short"
+            exit 1
+          fi
+
+          revision=$(git rev-parse --verify "$short^{commit}")
+          if ! git merge-base --is-ancestor "$revision" HEAD; then
+            echo "::error::rootbeer $version is from $revision, which isn't on main"
             exit 1
           fi
 
           scripts/bootstrap-served.sh "$RUNNER_TEMP/served"
           for document in "$RUNNER_TEMP"/served/*.json; do
             [[ -e $document ]] || continue
-            previous=$(jq -r '.payload | @base64d | fromjson | .serial' "$document")
-            if (( RB_SERIAL <= previous )); then
-              echo "::error::serial $RB_SERIAL isn't above the served $previous"
+            payload=$(jq '.payload | @base64d | fromjson' "$document")
+            if (( serial <= $(jq .serial <<< "$payload") )); then
+              echo "rootbeer $version (serial $serial) isn't newer than what's served"
+              echo 'is_released=false' >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            previous=$(jq -r .revision <<< "$payload")
+            if ! git merge-base --is-ancestor "$previous" "$revision"; then
+              echo "::error::$revision doesn't descend from the served $previous"
               exit 1
             fi
           done
 
-          chmod +x artifacts/rb-linux-x86_64/rb
-          version=$(artifacts/rb-linux-x86_64/rb --version)
-          if [[ $version != *"serial $RB_SERIAL)" ]]; then
-            echo "::error::the build says $version, not serial $RB_SERIAL"
-            exit 1
-          fi
-        env:
-          RB_SERIAL: ${{ needs.changes.outputs.serial }}
+          {
+            echo 'is_released=true'
+            echo "version=$version"
+            echo "serial=$serial"
+            echo "revision=$revision"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Sign
+        if: steps.check.outputs.is_released == 'true'
         run: |
           if [[ -z $RB_BOOTSTRAP_KEY ]]; then
             echo "::error::the release environment has no RB_BOOTSTRAP_KEY"
@@ -177,19 +254,20 @@ jobs:
           key="$RUNNER_TEMP/bootstrap.pem"
           trap 'rm -f "$key"' EXIT
           printf '%s\n' "$RB_BOOTSTRAP_KEY" > "$key"
-          for pair in linux-x86_64:x86_64-linux linux-aarch64:aarch64-linux macos-aarch64:aarch64-macos; do
-            name=${pair%%:*}
-            platform=${pair#*:}
-            chmod +x "artifacts/rb-${name}/rb" "artifacts/rb-${name}/rb-store"
-            tar -czf "$RUNNER_TEMP/${platform}.tar.gz" -C "artifacts/rb-${name}" rb rb-store
+          for platform in x86_64-linux aarch64-linux aarch64-macos; do
+            chmod +x "artifacts/release-$platform/rb" "artifacts/release-$platform/rb-store"
+            tar -czf "$RUNNER_TEMP/$platform.tar.gz" -C "artifacts/release-$platform" rb rb-store
             scripts/bootstrap-sign.sh "$key" bootstrap "$platform" "$RB_SERIAL" \
-              "nightly-${GITHUB_SHA::12}" "$GITHUB_SHA" "$RUNNER_TEMP/${platform}.tar.gz"
+              "$VERSION" "$REVISION" "$RUNNER_TEMP/$platform.tar.gz"
           done
         env:
           RB_BOOTSTRAP_KEY: ${{ secrets.RB_BOOTSTRAP_KEY }}
-          RB_SERIAL: ${{ needs.changes.outputs.serial }}
+          RB_SERIAL: ${{ steps.check.outputs.serial }}
+          VERSION: ${{ steps.check.outputs.version }}
+          REVISION: ${{ steps.check.outputs.revision }}
 
       - name: Upload signed releases
+        if: steps.check.outputs.is_released == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: bootstrap
@@ -198,7 +276,7 @@ jobs:
   deploy:
     name: Deploy
     needs: [changes, build, sign]
-    if: always() && !failure() && !cancelled()
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -220,13 +298,12 @@ jobs:
         run: pnpm build
 
       - name: Download artifacts
-        if: needs.changes.outputs.source == 'true'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: artifacts
 
       - name: Package nightly binaries
-        if: needs.changes.outputs.source == 'true'
+        if: needs.build.result == 'success'
         run: |
           mkdir -p .vitepress/dist/nightly
           for name in linux-x86_64 linux-aarch64 macos-aarch64; do
@@ -237,12 +314,8 @@ jobs:
           echo '${{ needs.changes.outputs.timestamp }}' > .vitepress/dist/nightly/version.txt
           echo '${{ github.sha }}' > .vitepress/dist/nightly/source-sha.txt
 
-          # Pages caches documents for minutes, so the previous archives stay.
-          scripts/bootstrap-served.sh .vitepress/dist/bootstrap/v1
-          cp -R artifacts/bootstrap/. .vitepress/dist/bootstrap/v1/
-
       - name: Preserve existing nightly binaries
-        if: needs.changes.outputs.source != 'true'
+        if: needs.build.result != 'success'
         run: |
           mkdir -p .vitepress/dist/nightly
           for name in linux-x86_64 linux-aarch64 macos-aarch64; do
@@ -256,7 +329,12 @@ jobs:
           curl -fsSL "https://rbpkg.com/nightly/source-sha.txt" \
             -o ".vitepress/dist/nightly/source-sha.txt" || true
 
+      - name: Bootstrap releases
+        run: |
           scripts/bootstrap-served.sh .vitepress/dist/bootstrap/v1
+          if [[ -d artifacts/bootstrap ]]; then
+            cp -R artifacts/bootstrap/. .vitepress/dist/bootstrap/v1/
+          fi
 
       - name: Upload pages artifact
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
