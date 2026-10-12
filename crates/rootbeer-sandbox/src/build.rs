@@ -28,6 +28,9 @@ const FIXED: [(&str, &str); 8] = [
 
 const HOST_PATH: [&str; 4] = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"];
 
+// The profile suffix that lets a build fetch locked dependencies.
+const NETWORK: &str = "-net";
+
 #[derive(Clone, Copy)]
 enum Profile {
     Darwin,
@@ -36,6 +39,7 @@ enum Profile {
 
 struct Sandbox {
     profile: Profile,
+    has_network: bool,
     allow: BTreeSet<Allow>,
     closure: BTreeSet<Key>,
     variables: BTreeMap<String, String>,
@@ -67,7 +71,8 @@ pub(crate) fn build(request: &mut Request, build: &Build) -> Result<BTreeSet<Key
     sandbox.variables.insert("out".into(), out_path.clone());
     sandbox.out = Some(out_path);
 
-    // Outputs might reference runtime dependencies
+    // Outputs might reference runtime dependencies, but never what was
+    // fetched with network, which is scanned only as an input.
     let mut allowed = sandbox.closure.clone();
     allowed.extend(
         build
@@ -76,6 +81,10 @@ pub(crate) fn build(request: &mut Request, build: &Build) -> Result<BTreeSet<Key
             .filter(|dependency| dependency.kind == DependencyKind::Runtime)
             .map(|dependency| dependency.key.clone()),
     );
+    allowed.retain(|key| {
+        let derivation = request.graph.get(key);
+        !matches!(derivation, Some(Derivation::Build(build)) if build.sandbox.ends_with(NETWORK))
+    });
 
     let built = sandbox.run(request, &build.script).and_then(|()| {
         if !out.exists() {
@@ -90,12 +99,25 @@ pub(crate) fn build(request: &mut Request, build: &Build) -> Result<BTreeSet<Key
         return Err(error);
     }
 
-    let references = scan::scan(request.key, &out, &allowed, &mut *request.log)?;
+    let references = scan::scan(
+        request.key,
+        &out,
+        &allowed,
+        !sandbox.has_network,
+        &mut *request.log,
+    )?;
     read_only(&out)?;
     Ok(references)
 }
 
 pub(crate) fn check(request: &mut Request, check: &Check) -> Result<(), Error> {
+    if check.sandbox.ends_with(NETWORK) {
+        return Err(failure(
+            request.key,
+            "asks for network, which only a fetching build may have",
+        ));
+    }
+
     let mut sandbox = Sandbox::new(request, &check.sandbox, check.platform, &check.env)?;
     sandbox.dependencies(request, &check.dependencies)?;
 
@@ -113,7 +135,12 @@ impl Sandbox {
         env: &BTreeMap<String, String>,
     ) -> Result<Sandbox, Error> {
         let is_host = platform.to_string() == format!("{ARCH}-{OS}");
-        let runnable = match (profile, platform) {
+        let (base, has_network) = match profile.strip_suffix(NETWORK) {
+            Some(base) => (base, true),
+            None => (profile, false),
+        };
+
+        let runnable = match (base, platform) {
             _ if !is_host => None,
             (darwin::PROFILE, Platform::Aarch64Macos) => Some(Profile::Darwin),
             (linux::PROFILE, Platform::Aarch64Linux | Platform::X86_64Linux) => {
@@ -161,6 +188,7 @@ impl Sandbox {
 
         Ok(Sandbox {
             profile: runnable,
+            has_network,
             allow: BTreeSet::new(),
             closure: BTreeSet::new(),
             variables,
@@ -289,8 +317,9 @@ impl Sandbox {
                     .iter()
                     .cloned()
                     .chain([directory.display().to_string()]);
+                let writes = writes.collect::<Vec<_>>();
                 let mut command =
-                    darwin::command(&self.reads, &writes.collect::<Vec<_>>(), &self.allow);
+                    darwin::command(&self.reads, &writes, &self.allow, self.has_network);
 
                 command.current_dir(&source);
                 (directory.clone(), command)
@@ -298,7 +327,7 @@ impl Sandbox {
             Profile::Linux => {
                 let staging = linux::staging(&directory);
                 fs::create_dir(&staging).map_err(io_at(&staging))?;
-                let command = linux::command(&self.reads, &directory);
+                let command = linux::command(&self.reads, &directory, self.has_network);
                 (PathBuf::from(linux::WORKSPACE), command)
             }
         };

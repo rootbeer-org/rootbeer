@@ -47,9 +47,23 @@ const DEVICES: [&str; 4] = ["/dev/null", "/dev/zero", "/dev/random", "/dev/urand
 const ANCESTORS: [&str; 5] = ["/", "/opt", "/opt/rb", "/opt/rb/var", "/opt/rb/var/build"];
 const LINKS: [&str; 3] = ["/etc", "/tmp", "/var"];
 
+// This is basically a convoluted way of saying HTTP(S) and DNS are allowed. No
+// Unix sockets except for mDNS.
+const NETWORK: &str = "(allow network-outbound (remote ip \"*:443\") (remote ip \"*:80\"))
+(allow network-outbound (remote unix-socket (path-literal \"/private/var/run/mDNSResponder\")))
+(allow mach-lookup (global-name \"com.apple.dnssd.service\" \"com.apple.SystemConfiguration.configd\" \"com.apple.trustd\" \"com.apple.trustd.agent\"))
+(allow file-read* (subpath \"/private/etc/ssl\") (literal \"/private/etc/resolv.conf\") (literal \"/private/var/run/resolv.conf\"))
+";
+
 /// `sandbox-exec` with a profile that reads only the host toolchain and
-/// `reads`, writes only `writes`, and has no network unless allowed loopback.
-pub(crate) fn command(reads: &[String], writes: &[String], allow: &BTreeSet<Allow>) -> Command {
+/// `reads`, writes only `writes`, and has no network unless `has_network` or
+/// allowed loopback.
+pub(crate) fn command(
+    reads: &[String],
+    writes: &[String],
+    allow: &BTreeSet<Allow>,
+    has_network: bool,
+) -> Command {
     let parents = HOST
         .into_iter()
         .chain(SYSTEM)
@@ -114,6 +128,10 @@ pub(crate) fn command(reads: &[String], writes: &[String], allow: &BTreeSet<Allo
         profile.push_str(&rule);
     }
 
+    if has_network {
+        profile.push_str(NETWORK);
+    }
+
     let mut command = Command::new("/usr/bin/sandbox-exec");
     command.arg("-p").arg(profile);
     command
@@ -153,4 +171,17 @@ fn output(program: &str, args: &[&str]) -> Result<String, String> {
     }
 
     String::from_utf8(output.stdout).map_err(|error| format!("{program}: {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn only_a_fetching_build_reaches_the_network() {
+        for has_network in [false, true] {
+            let command = super::command(&[], &[], &Default::default(), has_network);
+            let profile = command.get_args().nth(1).unwrap().to_str().unwrap();
+            assert_eq!(profile.contains("network-outbound"), has_network);
+            assert_eq!(profile.contains(super::NETWORK), has_network);
+        }
+    }
 }

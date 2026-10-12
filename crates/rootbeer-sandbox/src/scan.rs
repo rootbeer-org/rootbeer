@@ -42,14 +42,11 @@ const RUNTIME: [&str; 12] = [
 const METADATA: [&str; 2] = [".pc", ".la"];
 const PACKAGE_CONFIGS: [&str; 3] = ["lib/cmake/", "lib64/cmake/", "share/cmake/"];
 
-/// The store keys `out` references. Fails when one is outside `allowed`, when a
-/// symlink or build metadata names a host path, when an executable script's
-/// interpreter or a binary's library is outside the store. Host paths anywhere
-/// else (binaries' built-in defaults, docs, script comments) are only logged.
 pub(crate) fn scan(
     key: &Key,
     out: &Path,
     allowed: &BTreeSet<Key>,
+    is_runnable: bool,
     log: &mut dyn Write,
 ) -> Result<BTreeSet<Key>, Error> {
     let mut references = BTreeSet::new();
@@ -71,6 +68,9 @@ pub(crate) fn scan(
 
         let name = path.strip_prefix(out).unwrap_or(path).display().to_string();
         references.extend(keys(&bytes));
+        if !is_runnable {
+            continue;
+        }
 
         // A shebang only matters on a file that can run
         let mode = entry
@@ -315,7 +315,14 @@ mod tests {
         symlink("/usr/local/bin/tool", out.path().join("link")).unwrap();
 
         let mut log = Vec::new();
-        let error = scan(&own, out.path(), &BTreeSet::from([allowed]), &mut log).unwrap_err();
+        let error = scan(
+            &own,
+            out.path(),
+            &BTreeSet::from([allowed.clone()]),
+            true,
+            &mut log,
+        )
+        .unwrap_err();
 
         let Error::Scan { problems, .. } = error else {
             panic!("{error}");
@@ -335,6 +342,26 @@ mod tests {
             "scan warning: FindY.cmake mentions /usr/local/\nscan warning: README mentions /usr/local/\n\
              scan warning: env-script mentions /usr/local/\n"
         );
+
+        let mut log = Vec::new();
+        let error = scan(
+            &own,
+            out.path(),
+            &BTreeSet::from([allowed]),
+            false,
+            &mut log,
+        )
+        .unwrap_err();
+        let Error::Scan { problems, .. } = error else {
+            panic!("{error}");
+        };
+        assert_eq!(
+            problems,
+            [format!(
+                "references {foreign}, which is not in its build closure"
+            )]
+        );
+        assert!(log.is_empty());
     }
 
     #[test]

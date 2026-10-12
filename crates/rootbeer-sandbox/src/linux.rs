@@ -22,17 +22,31 @@ const ETC: [&str; 9] = [
     "/etc/group",
 ];
 
+// DNS and the CA bundle, for steps that fetch locked dependencies.
+const NETWORK: [&str; 4] = [
+    "/etc/resolv.conf",
+    "/etc/ssl",
+    "/etc/pki",
+    "/etc/ca-certificates",
+];
+
 pub(crate) fn staging(directory: &Path) -> PathBuf {
     directory.join("store")
 }
 
-/// `bwrap` with fresh namespaces for everything, so the network is loopback
-/// only. It sees the host toolchain and `reads` read-only and writes only the
-/// build directory and staged outputs.
-pub(crate) fn command(reads: &[String], directory: &Path) -> Command {
+/// `bwrap` with fresh namespaces allow us to isolate network access and FS
+/// access. Also locks down write access to the build directory and outputs.
+pub(crate) fn command(reads: &[String], directory: &Path, has_network: bool) -> Command {
     let mut command = Command::new("/usr/bin/bwrap");
+    command.arg("--unshare-all");
+    if has_network {
+        command.arg("--share-net");
+        for path in NETWORK {
+            command.args(["--ro-bind-try", path, path]);
+        }
+    }
+
     command.args([
-        "--unshare-all",
         "--die-with-parent",
         "--new-session",
         "--hostname",
@@ -78,4 +92,19 @@ pub(crate) fn command(reads: &[String], directory: &Path) -> Command {
 pub(crate) fn system() -> Result<String, String> {
     std::env::var("RB_HOST_SYSTEM")
         .map_err(|_| "RB_HOST_SYSTEM is unset outside the builder image".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn only_a_fetching_build_shares_the_network() {
+        let directory = std::path::Path::new("/opt/rb/var/build/k");
+        for has_network in [false, true] {
+            let command = super::command(&[], directory, has_network);
+            let args = command.get_args().collect::<Vec<_>>();
+            assert_eq!(args.first().copied(), Some("--unshare-all".as_ref()));
+            assert_eq!(args.contains(&"--share-net".as_ref()), has_network);
+            assert_eq!(args.contains(&"/etc/resolv.conf".as_ref()), has_network);
+        }
+    }
 }
