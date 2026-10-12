@@ -1,0 +1,25 @@
+---
+source: crates/rootbeer-eval/tests/eval.rs
+---
+
+# 6vykcwbhsgvdnrneswu3zqf6snsrh2jd
+kind: fetch
+sha256: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+urls:
+  - https://example.com/cargo-1.98.1
+
+# hw7u6b42hvazyfw2agvewmtbcklbjezj
+kind: build
+name: rust
+version: 1.98.1
+platform: aarch64-macos
+sandbox: darwin-v1
+inputs:
+  source: 6vykcwbhsgvdnrneswu3zqf6snsrh2jd
+outputs:
+  - out
+script: |
+  set -eu
+  mkdir -p "${out}/bin"
+  cp "${source}" "${out}/bin/cargo"
+  chmod 755 "${out}/bin/cargo"

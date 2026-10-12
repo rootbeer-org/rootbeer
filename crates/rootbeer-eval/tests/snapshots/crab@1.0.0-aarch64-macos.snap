@@ -8,7 +8,7 @@ sha256: 2222222222222222222222222222222222222222222222222222222222222222
 urls:
   - https://example.com/crab-1.0.0.zip
 
-# jt7l2n3wzzwt4edwbgkc57wi6cesb4ng
+# yyspcrjg73r7w5chjsq6np7r4hnovrw2
 kind: build
 name: crab-vendor
 version: 1.0.0
@@ -16,8 +16,8 @@ platform: aarch64-macos
 sandbox: darwin-v1-net
 inputs:
   source: sveyo4w2yfdhkddym2vqexv7zu6qbq5w
-env:
-  RB_RUST: 1.98.1
+dependencies:
+  - rust (build) hw7u6b42hvazyfw2agvewmtbcklbjezj
 outputs:
   - out
 script: |
@@ -28,7 +28,7 @@ script: |
   mkdir -p "${out}"
   cargo vendor --locked --versioned-dirs "${out}/vendor" > "${out}/config.toml"
 
-# p3mmfmnidphv2plniyj6tpxlvj33njkr
+# e22ykao3svn6hjwckyxum5koeza4eqby
 kind: build
 name: crab
 version: 1.0.0
@@ -36,11 +36,12 @@ platform: aarch64-macos
 sandbox: darwin-v1
 inputs:
   source: sveyo4w2yfdhkddym2vqexv7zu6qbq5w
-  vendor: jt7l2n3wzzwt4edwbgkc57wi6cesb4ng
+  vendor: yyspcrjg73r7w5chjsq6np7r4hnovrw2
+dependencies:
+  - rust (build) hw7u6b42hvazyfw2agvewmtbcklbjezj
 env:
   CARGO_INCREMENTAL: 0
   CRAB_VERSION: 1.0.0
-  RB_RUST: 1.98.1
   RB_SYSTEM: builder-sha256:0000
 outputs:
   - out
@@ -48,6 +49,9 @@ script: |
   set -eu
   unzip -q "${source}" -d .
   export CARGO_HOME="${TMPDIR}/cargo-home" CARGO_TARGET_DIR="${TMPDIR}/cargo-target"
+  export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }--remap-path-prefix=${vendor}=/vendor"
+  export CFLAGS="${CFLAGS:+$CFLAGS }-ffile-prefix-map=${vendor}=/vendor"
+  export CXXFLAGS="${CXXFLAGS:+$CXXFLAGS }-ffile-prefix-map=${vendor}=/vendor"
   cargo build --frozen --release --jobs "${jobs}" --config "${vendor}/config.toml" --package crab-cli --features fast,pretty --no-default-features --bin crab --bin crabd
   mkdir -p "${out}/bin"
   cp "${CARGO_TARGET_DIR}/release/crab" "${out}/bin/crab"

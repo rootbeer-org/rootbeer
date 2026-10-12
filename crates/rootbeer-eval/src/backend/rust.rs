@@ -1,18 +1,12 @@
 use super::{Script, env, lines};
-use crate::Host;
 use crate::recipe::{Bins, Build};
 use crate::template::{Values, path};
 use std::collections::BTreeMap;
 
 // The host toolchain stand-in, set by eval alone.
-const RESERVED_ENV: [&str; 2] = ["RB_RUST", "RB_SYSTEM"];
+const RESERVED_ENV: [&str; 1] = ["RB_SYSTEM"];
 
-pub(super) fn build(
-    values: &Values,
-    build: &Build,
-    bins: Option<&Bins>,
-    host: &Host,
-) -> Result<Script, String> {
+pub(super) fn build(values: &Values, build: &Build, bins: Option<&Bins>) -> Result<Script, String> {
     let rust = build
         .rust
         .as_ref()
@@ -37,8 +31,7 @@ pub(super) fn build(
         .map(|(name, value)| Ok((name.clone(), values.literal(value)?)))
         .collect::<Result<BTreeMap<_, _>, String>>()?;
 
-    // TODO: Depend on a catalog rust by key instead of the host
-    variables.extend(env(&[("CARGO_INCREMENTAL", "0"), ("RB_RUST", &host.rust)]));
+    variables.extend(env(&[("CARGO_INCREMENTAL", "0")]));
     let mut selection = rust
         .packages
         .iter()
@@ -61,6 +54,9 @@ pub(super) fn build(
 
     let mut script = lines(&[
         r#"export CARGO_HOME="${TMPDIR}/cargo-home" CARGO_TARGET_DIR="${TMPDIR}/cargo-target""#,
+        r#"export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }--remap-path-prefix=${vendor}=/vendor""#,
+        r#"export CFLAGS="${CFLAGS:+$CFLAGS }-ffile-prefix-map=${vendor}=/vendor""#,
+        r#"export CXXFLAGS="${CXXFLAGS:+$CXXFLAGS }-ffile-prefix-map=${vendor}=/vendor""#,
     ]);
 
     script.push(format!(
@@ -83,9 +79,9 @@ pub(super) fn build(
     })
 }
 
-pub(super) fn vendor(host: &Host) -> Script {
+pub(super) fn vendor() -> Script {
     Script {
-        env: env(&[("RB_RUST", &host.rust)]),
+        env: BTreeMap::new(),
         lines: lines(&[
             r#"export CARGO_HOME="${TMPDIR}/cargo-home""#,
             "test -f Cargo.lock",

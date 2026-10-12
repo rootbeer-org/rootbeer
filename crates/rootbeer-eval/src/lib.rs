@@ -36,7 +36,6 @@ pub struct Host {
     /// The Linux builder image or the macOS Xcode and SDK versions.
     /// This isn't ideal, but we'll be getting rid of this soon.
     pub system: String,
-    pub rust: String,
 }
 
 #[derive(Debug, Default)]

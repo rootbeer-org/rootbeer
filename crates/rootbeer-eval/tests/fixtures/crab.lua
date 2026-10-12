@@ -9,6 +9,9 @@ return {
 	},
 	build = {
 		backend = "rust",
+		dependencies = {
+			{ package = "rust", version = "1.98.1", kind = "build" },
+		},
 		rust = {
 			packages = { "crab-cli" },
 			features = { "fast", "pretty" },

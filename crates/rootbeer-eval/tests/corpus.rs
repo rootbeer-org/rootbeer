@@ -29,7 +29,6 @@ fn every_declared_target_evaluates() {
 
     let host = Host {
         system: "builder".to_string(),
-        rust: "1".to_string(),
     };
 
     let hosts = [

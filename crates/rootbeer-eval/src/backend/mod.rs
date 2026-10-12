@@ -43,20 +43,26 @@ impl Package<'_> {
         source_key: &Key,
         dependencies: &[Dependency],
     ) -> Result<Option<Build>, String> {
-        let script = match backend {
-            Backend::Go => go::vendor(),
-            Backend::Rust => rust::vendor(self.host),
+        let (toolchain, script) = match backend {
+            Backend::Go => ("go", go::vendor()),
+            Backend::Rust => ("rust", rust::vendor()),
             Backend::Autotools | Backend::Custom | Backend::Zig => return Ok(None),
         };
 
         let mut lines = self.prepare(source)?;
         lines.extend(script.lines);
-
         let tools = dependencies
             .iter()
             .filter(|dependency| dependency.kind == DependencyKind::Build)
+            .filter(|dependency| dependency.name == toolchain)
             .cloned()
-            .collect();
+            .collect::<Vec<_>>();
+
+        if tools.is_empty() {
+            return Err(format!(
+                "a {toolchain} build needs {toolchain} as a build dependency"
+            ));
+        }
 
         let build = self.build(
             format!("{}-vendor", self.name),
@@ -86,7 +92,7 @@ impl Package<'_> {
             Backend::Autotools => autotools::build(values, build)?,
             Backend::Custom => custom::build(values, build)?,
             Backend::Go => go::build(values, build, bins)?,
-            Backend::Rust => rust::build(values, build, bins, self.host)?,
+            Backend::Rust => rust::build(values, build, bins)?,
             Backend::Zig => zig::build(values, build)?,
         };
 

@@ -4,13 +4,14 @@ use rootbeer_drv::Platform;
 use rootbeer_eval::{Catalog, Error, Host, Target};
 use std::collections::BTreeMap;
 
-const FIXTURES: [(&str, &str); 9] = [
+const FIXTURES: [(&str, &str); 10] = [
     ("auto.lua", include_str!("fixtures/auto.lua")),
     ("crab.lua", include_str!("fixtures/crab.lua")),
     ("finder.lua", include_str!("fixtures/finder.lua")),
     ("go.lua", include_str!("fixtures/go.lua")),
     ("gopher.lua", include_str!("fixtures/gopher.lua")),
     ("libz.lua", include_str!("fixtures/libz.lua")),
+    ("rust.lua", include_str!("fixtures/rust.lua")),
     ("tool.lua", include_str!("fixtures/tool.lua")),
     ("viewer.lua", include_str!("fixtures/viewer.lua")),
     ("ziggy.lua", include_str!("fixtures/ziggy.lua")),
@@ -19,7 +20,6 @@ const FIXTURES: [(&str, &str); 9] = [
 fn hosts(system: &str) -> BTreeMap<Platform, Host> {
     let host = Host {
         system: system.to_string(),
-        rust: "1.98.1".to_string(),
     };
 
     [
@@ -110,7 +110,34 @@ fn host_system_rekeys_source_builds_but_not_prebuilts() {
         .map(|(target, _)| target.split('@').next().unwrap())
         .collect::<Vec<_>>();
 
-    assert_eq!(unchanged, ["finder", "go", "tool", "tool", "viewer"]);
+    assert_eq!(
+        unchanged,
+        ["finder", "go", "rust", "tool", "tool", "viewer"]
+    );
+}
+
+#[test]
+fn rust_and_go_builds_need_their_toolchain_to_vendor_with() {
+    let gopher = FIXTURES[4].1.replace(
+        r#"package = "go", version = "1.27.1""#,
+        r#"package = "libz", version = "1.3.2""#,
+    );
+    let mut fixtures = FIXTURES;
+    fixtures[4].1 = &gopher;
+    let catalog = Catalog::parse(fixtures).unwrap();
+    let target = Target {
+        name: "gopher".to_string(),
+        version: "0.4.0".to_string(),
+        platform: Platform::X86_64Linux,
+    };
+
+    let error = catalog.evaluate(&hosts("a"), &[target]).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .ends_with("a go build needs go as a build dependency"),
+        "{error}"
+    );
 }
 
 #[test]
