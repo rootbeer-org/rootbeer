@@ -88,7 +88,7 @@ pub(super) fn vendor() -> Script {
     Script {
         env: variables,
         lines: lines(&[
-            r#"export GOPATH="${TMPDIR}/go" GOMODCACHE="${TMPDIR}/go-modules""#,
+            r#"export GOPATH="${TMPDIR}/go" GOMODCACHE="${TMPDIR}/go-modules" GOCACHE="${TMPDIR}/go-cache""#,
             r#"cp go.mod go.sum "${TMPDIR}""#,
             "mkdir -p vendor",
             "go mod vendor",
