@@ -85,6 +85,7 @@ pub(crate) fn command(reads: &[String], directory: &Path, has_network: bool) -> 
         command.args(["--ro-bind", path, path]);
     }
 
+    command.args(["--remount-ro", "/"]);
     command.args(["--chdir", &format!("{WORKSPACE}/src"), "--"]);
     command
 }
@@ -106,5 +107,16 @@ mod tests {
             assert_eq!(args.contains(&"--share-net".as_ref()), has_network);
             assert_eq!(args.contains(&"/etc/resolv.conf".as_ref()), has_network);
         }
+    }
+
+    #[test]
+    fn root_is_remounted_read_only_last() {
+        let directory = std::path::Path::new("/opt/rb/var/build/k");
+        let reads = ["/opt/rb/store/dep".to_string()];
+        let command = super::command(&reads, directory, false);
+        let args = command.get_args().collect::<Vec<_>>();
+        let tail = ["--remount-ro", "/", "--chdir", "/build/src", "--"];
+        let tail = tail.map(std::ffi::OsStr::new);
+        assert!(args.ends_with(&tail));
     }
 }
