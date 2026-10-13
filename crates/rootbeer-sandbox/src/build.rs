@@ -316,14 +316,13 @@ impl Sandbox {
         // The workspace is what the script sees as the build directory
         let (workspace, mut command) = match self.profile {
             Profile::Darwin => {
-                let writes = self
-                    .out
-                    .iter()
-                    .cloned()
-                    .chain([directory.display().to_string()]);
-                let writes = writes.collect::<Vec<_>>();
-                let mut command =
-                    darwin::command(&self.reads, &writes, &self.allow, self.has_network);
+                let mut command = darwin::command(
+                    &self.reads,
+                    self.out.as_deref(),
+                    &directory.display().to_string(),
+                    &self.allow,
+                    self.has_network,
+                );
 
                 command.current_dir(&source);
                 (directory.clone(), command)

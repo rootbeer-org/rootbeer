@@ -57,21 +57,30 @@ const NETWORK: &str = "(allow network-outbound (remote ip \"*:443\") (remote ip 
 (allow file-read* (literal \"/private/etc/resolv.conf\") (literal \"/private/var/run/resolv.conf\"))
 ";
 
+// More cursed stuff but hidutil hands off to private macOS frameworks that need
+// to be allowed to run for this to work correctly.
+const DISK_IMAGES: &str = "(allow mach-lookup (global-name \"com.apple.system.hdiejectd.xpc\" \"com.apple.DiskArbitration.diskarbitrationd\"))
+(allow process-exec (literal \"/System/Library/PrivateFrameworks/DiskImages.framework/Versions/A/Resources/diskimages-helper\"))
+(allow iokit-open-user-client (iokit-user-client-class \"IOHDIXControllerUserClient\" \"IOHDIXHDDriveOutKernelUserClient\"))
+";
+
 /// `sandbox-exec` with a profile that reads only the host toolchain and
-/// `reads`, writes only `writes`, and has no network unless `has_network` or
-/// allowed loopback.
+/// `reads`, writes only `out` and `directory`, and has no network unless
+/// `has_network` or allowed loopback.
 pub(crate) fn command(
     reads: &[String],
-    writes: &[String],
+    out: Option<&str>,
+    directory: &str,
     allow: &BTreeSet<Allow>,
     has_network: bool,
 ) -> Command {
+    let writes = out.into_iter().chain([directory]).collect::<Vec<_>>();
     let parents = HOST
         .into_iter()
         .chain(SYSTEM)
         .chain(DEVICES)
         .chain(reads.iter().map(String::as_str))
-        .chain(writes.iter().map(String::as_str))
+        .chain(writes.iter().copied())
         .flat_map(|path| Path::new(path).ancestors().skip(1))
         .map(|path| path.display().to_string())
         .chain(LINKS.map(String::from))
@@ -96,7 +105,7 @@ pub(crate) fn command(
         .collect::<Vec<_>>()
         .join(" ");
 
-    let writes = rules(writes.iter().map(String::as_str));
+    let writes = rules(writes);
     let ancestors = ANCESTORS
         .map(|path| format!("(literal {path:?})"))
         .join(" ");
@@ -124,6 +133,9 @@ pub(crate) fn command(
             Allow::Ipc => "(allow ipc-sysv* ipc-posix*)\n".to_string(),
             Allow::Tmp => {
                 "(allow file-read* file-write* file-ioctl (subpath \"/private/tmp\"))\n".to_string()
+            }
+            Allow::DiskImages => {
+                format!("{DISK_IMAGES}(allow file-mount (subpath {directory:?}))\n")
             }
         };
 
@@ -177,13 +189,52 @@ fn output(program: &str, args: &[&str]) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
+    use rootbeer_drv::Allow;
+    use std::collections::BTreeSet;
+
     #[test]
     fn only_a_fetching_build_reaches_the_network() {
         for has_network in [false, true] {
-            let command = super::command(&[], &[], &Default::default(), has_network);
+            let command = super::command(&[], None, "/build", &Default::default(), has_network);
             let profile = command.get_args().nth(1).unwrap().to_str().unwrap();
             assert_eq!(profile.contains("network-outbound"), has_network);
             assert_eq!(profile.contains(super::NETWORK), has_network);
+        }
+    }
+
+    #[test]
+    fn only_disk_images_mount_and_only_in_the_build_directory() {
+        let mount = r#"(allow file-mount (subpath "/build"))"#;
+        let cases = [
+            (vec![], None),
+            (vec![Allow::LocalNetwork, Allow::Ipc, Allow::Tmp], None),
+            (vec![Allow::DiskImages], Some(mount)),
+            (
+                vec![
+                    Allow::LocalNetwork,
+                    Allow::Ipc,
+                    Allow::Tmp,
+                    Allow::DiskImages,
+                ],
+                Some(mount),
+            ),
+        ];
+
+        for (allow, expected) in cases {
+            let allow = allow.into_iter().collect::<BTreeSet<_>>();
+            let command = super::command(&[], Some("/out"), "/build", &allow, false);
+            let profile = command.get_args().nth(1).unwrap().to_str().unwrap();
+
+            let mounts = profile
+                .lines()
+                .filter(|line| line.contains("file-mount"))
+                .collect::<Vec<_>>();
+            assert_eq!(mounts, Vec::from_iter(expected), "{allow:?}");
+
+            let has_disk_images = expected.is_some();
+            assert_eq!(profile.contains(super::DISK_IMAGES), has_disk_images);
+            assert_eq!(profile.contains("IOHDIX"), has_disk_images);
+            assert_eq!(profile.contains("diskarbitrationd"), has_disk_images);
         }
     }
 }

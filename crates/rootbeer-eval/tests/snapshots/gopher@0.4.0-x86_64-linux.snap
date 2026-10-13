@@ -8,7 +8,7 @@ sha256: 5555555555555555555555555555555555555555555555555555555555555555
 urls:
   - https://example.com/gopher/archive/v0.4.0.tar.gz
 
-# zcov5gjuslmn3q4kaqffzjk6lhsjjdx5
+# wopyaeajhnwtcdrd456si2has7ihdn6h
 kind: build
 name: gopher-vendor
 version: 0.4.0
@@ -17,7 +17,7 @@ sandbox: linux-v1-net
 inputs:
   source: oxwds6bv5rm75pxp65ffbezfkvw2swoo
 dependencies:
-  - go (build) zny7lluton2szdexdko53y5iqjnd4xup
+  - go (build) 4yst5ce3baxqc5tgf5rvfi6ctpcnpr7h
 env:
   GO111MODULE: on
   GOENV: off
@@ -32,7 +32,7 @@ script: |
   set -eu
   tar -xzf "${source}" -C .
   cd gopher-0.4.0
-  export GOPATH="${TMPDIR}/go" GOMODCACHE="${TMPDIR}/go-modules"
+  export GOPATH="${TMPDIR}/go" GOMODCACHE="${TMPDIR}/go-modules" GOCACHE="${TMPDIR}/go-cache"
   cp go.mod go.sum "${TMPDIR}"
   mkdir -p vendor
   go mod vendor
@@ -41,7 +41,7 @@ script: |
   go mod verify
   cp -R vendor "${out}"
 
-# tdbdvfgi7w4nezd2ffndjrea2leoghry
+# bkznofgbrssizkk7vq6hltqxgxepegwf
 kind: build
 name: gopher
 version: 0.4.0
@@ -49,9 +49,9 @@ platform: x86_64-linux
 sandbox: linux-v1
 inputs:
   source: oxwds6bv5rm75pxp65ffbezfkvw2swoo
-  vendor: zcov5gjuslmn3q4kaqffzjk6lhsjjdx5
+  vendor: wopyaeajhnwtcdrd456si2has7ihdn6h
 dependencies:
-  - go (build) zny7lluton2szdexdko53y5iqjnd4xup
+  - go (build) 4yst5ce3baxqc5tgf5rvfi6ctpcnpr7h
 env:
   CGO_ENABLED: 0
   GO111MODULE: on

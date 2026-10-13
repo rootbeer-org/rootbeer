@@ -8,7 +8,7 @@ mod zig;
 use crate::Host;
 use crate::recipe::{ArchiveFormat, Backend, Bins, Resolved, Source};
 use crate::template::{path, quote};
-use rootbeer_drv::{Build, Check, Dependency, DependencyKind, Fetch, Key, Platform};
+use rootbeer_drv::{Allow, Build, Check, Dependency, DependencyKind, Fetch, Key, Platform};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
@@ -87,6 +87,11 @@ impl Package<'_> {
     ) -> Result<Build, String> {
         let values = &self.resolved.values;
         let bins = self.resolved.spec.outputs.bins.as_ref();
+
+        // A build script holding it could mount or eject images it doesn't own.
+        if build.allow.contains(&Allow::DiskImages) {
+            return Err("build.allow can't take `disk-images`, only a DMG prebuilt can".into());
+        }
 
         let script = match build.backend {
             Backend::Autotools => autotools::build(values, build)?,

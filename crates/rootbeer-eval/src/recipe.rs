@@ -76,9 +76,40 @@ pub(crate) struct Prebuilt {
     pub tag: Option<String>,
     pub asset: Option<String>,
     pub install: Option<Install>,
+    #[serde(default)]
+    pub remove: Vec<Removal>,
+    #[serde(default)]
+    pub allow: BTreeSet<Allow>,
     // We don't care about mirrors because we have a pinned digest
     #[serde(rename = "mirror")]
     _mirror: Option<IgnoredAny>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(try_from = "String")]
+pub(crate) struct Removal(pub String);
+
+impl TryFrom<String> for Removal {
+    type Error = String;
+
+    fn try_from(pattern: String) -> Result<Self, String> {
+        let is_plain = |c: char| c.is_ascii_alphanumeric() || "._+-*".contains(c);
+        let is_valid = |segment: &str| {
+            !matches!(segment, "" | "." | "..")
+                && segment.chars().all(is_plain)
+                && !(segment.starts_with('.') && segment.contains('*'))
+        };
+
+        if !pattern.split('/').all(is_valid) {
+            return Err(format!(
+                "remove `{pattern}` must be a relative path whose segments use only \
+                 ASCII letters, digits, `._+-` and `*`, without `.` or `..` \
+                 segments, and a segment that starts with a dot can't contain `*`"
+            ));
+        }
+
+        Ok(Removal(pattern))
+    }
 }
 
 #[derive(Clone, Deserialize)]

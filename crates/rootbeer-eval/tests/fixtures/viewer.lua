@@ -5,6 +5,7 @@ return {
 	default_license = "Proprietary",
 	prebuilt = {
 		url = "https://example.com/Viewer-{version}.dmg",
+		allow = { "disk-images" },
 	},
 	outputs = {
 		apps = { ["Viewer.app"] = "Viewer.app" },

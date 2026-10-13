@@ -8,6 +8,7 @@ return {
 		install = {
 			Archive = { format = "TarGz", strip_prefix = "go" },
 		},
+		remove = { "src/*.bash", "lib/time/update.bash" },
 	},
 	outputs = {
 		bins = { go = "bin/go" },

@@ -1,8 +1,8 @@
 use super::{Package, extract, link};
-use crate::recipe::{ArchiveFormat, Bins, Install, Prebuilt};
+use crate::recipe::{ArchiveFormat, Bins, Install, Prebuilt, Removal};
 use crate::template::{Values, path, quote};
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
-use rootbeer_drv::{Build, Fetch, Key};
+use rootbeer_drv::{Allow, Build, Fetch, Key};
 use std::collections::BTreeMap;
 
 // RFC 3986 unreserved characters stay original in URL encoding
@@ -62,12 +62,41 @@ impl Package<'_> {
         Ok((self.fetch(url), install))
     }
 
-    /// Unpacks a prebuilt into `$out`. TODO: Take tar and unzip from catalog
-    /// packages by key instead of relying on the host system.
-    pub(crate) fn unpack(&self, install: Option<Install>, source: Key) -> Result<Build, String> {
+    pub(crate) fn unpack(
+        &self,
+        install: Option<Install>,
+        prebuilt: &Prebuilt,
+        source: Key,
+    ) -> Result<Build, String> {
         let values = &self.resolved.values;
         let outputs = &self.resolved.spec.outputs;
         let is_discovered = install.is_some();
+        let is_archive = matches!(install, Some(Install::Archive { .. }));
+        let is_dmg = matches!(install, Some(Install::Dmg));
+        let has_disk_images = prebuilt.allow.contains(&Allow::DiskImages);
+
+        if prebuilt
+            .allow
+            .iter()
+            .any(|allow| *allow != Allow::DiskImages)
+        {
+            return Err("prebuilt.allow accepts only `disk-images`".into());
+        }
+
+        if has_disk_images && !is_dmg {
+            return Err("prebuilt.allow `disk-images` needs a DMG install".into());
+        }
+
+        if is_dmg && !has_disk_images {
+            return Err(
+                r#"a DMG install needs prebuilt.allow = { "disk-images" } to attach it"#.into(),
+            );
+        }
+
+        if !prebuilt.remove.is_empty() && !is_archive {
+            return Err("prebuilt.remove applies only to an archive install".into());
+        }
+
         let mut lines = Vec::new();
         match install {
             Some(Install::Archive {
@@ -91,6 +120,10 @@ impl Package<'_> {
                 let apps = apps.ok_or("a DMG needs outputs.apps")?;
 
                 lines.push(r#"mkdir -p "${out}""#.into());
+                lines.push(
+                    r#"trap 'hdiutil detach -force "${TMPDIR}/dmg" >/dev/null 2>&1 || :' EXIT"#
+                        .into(),
+                );
                 lines.push(r#"hdiutil attach -nobrowse -readonly -noautoopen -mountpoint "${TMPDIR}/dmg" "${source}""#.into());
                 lines.extend(apps.values().map(|app| {
                     format!(
@@ -101,6 +134,7 @@ impl Package<'_> {
                 }));
 
                 lines.push(r#"hdiutil detach "${TMPDIR}/dmg""#.into());
+                lines.push("trap - EXIT".into());
             }
             None => {
                 let names = outputs.bins.as_ref().map(Bins::names).unwrap_or_default();
@@ -115,18 +149,30 @@ impl Package<'_> {
             }
         }
 
+        lines.extend(
+            prebuilt
+                .remove
+                .iter()
+                .map(|Removal(pattern)| format!(r#"rm -rf "${{out}}"/{pattern}"#)),
+        );
+
         lines.extend(link(outputs.bins.as_ref()));
         if is_discovered {
             lines.extend(discover(outputs.bins.as_ref()));
         }
 
-        Ok(self.build(
+        let unpacked = self.build(
             self.name.to_string(),
             BTreeMap::from([("source".into(), source)]),
             Vec::new(),
             BTreeMap::new(),
             lines,
-        ))
+        );
+
+        Ok(Build {
+            allow: prebuilt.allow.clone(),
+            ..unpacked
+        })
     }
 }
 

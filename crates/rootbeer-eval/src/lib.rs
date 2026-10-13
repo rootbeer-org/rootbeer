@@ -321,7 +321,7 @@ impl<'a> Evaluation<'a> {
             (Some(prebuilt), None, _) => {
                 let (fetch, install) = package.download(prebuilt)?;
                 let source = self.insert(Derivation::Fetch(fetch))?;
-                package.unpack(install, source)?
+                package.unpack(install, prebuilt, source)?
             }
             (None, Some(source), Some(build)) => {
                 let source_key = self.insert(Derivation::Fetch(package.source(source)?))?;

@@ -178,3 +178,88 @@ fn recipes_are_sandboxed_declarative_tables() {
     assert!(parse_error("local s = 'x' for _ = 1, 40 do s = s .. s end").contains("memory error"));
     assert!(parse_error("return os.getenv('HOME')").contains("attempt to index nil with 'getenv'"));
 }
+
+#[test]
+fn removals_stay_inside_the_output() {
+    let go = FIXTURES[3].1;
+    for pattern in [
+        "/etc",
+        "src/../..",
+        "./src",
+        "src/",
+        "src//a",
+        "src/.*",
+        "$(id)",
+        "a b",
+        "src/?",
+    ] {
+        let source = go.replace("\"lib/time/update.bash\"", &format!("{pattern:?}"));
+        assert!(
+            parse_error(&source).contains("must be a relative path"),
+            "{pattern} parsed"
+        );
+    }
+}
+
+#[test]
+fn disk_images_and_removals_fit_only_their_installs() {
+    let (go, libz, tool, viewer) = (3, 5, 7, 8);
+    let allow = r#"allow = { "disk-images" },"#;
+    let cases = [
+        (
+            viewer,
+            allow,
+            "",
+            r#"needs prebuilt.allow = { "disk-images" }"#,
+        ),
+        (
+            viewer,
+            allow,
+            r#"allow = { "tmp" },"#,
+            "accepts only `disk-images`",
+        ),
+        (
+            viewer,
+            allow,
+            r#"remove = { "a" }, allow = { "disk-images" },"#,
+            "only to an archive",
+        ),
+        (
+            tool,
+            "prebuilt = {",
+            r#"prebuilt = { remove = { "a" },"#,
+            "only to an archive",
+        ),
+        (
+            tool,
+            "prebuilt = {",
+            r#"prebuilt = { allow = { "disk-images" },"#,
+            "needs a DMG",
+        ),
+        (
+            go,
+            "install = {",
+            r#"allow = { "disk-images" }, install = {"#,
+            "needs a DMG",
+        ),
+        (
+            libz,
+            "build = {",
+            r#"build = { allow = { "disk-images" },"#,
+            "build.allow can't",
+        ),
+    ];
+
+    for (index, from, to, expected) in cases {
+        let edited = FIXTURES[index].1.replacen(from, to, 1);
+        let mut fixtures = FIXTURES;
+        fixtures[index].1 = &edited;
+
+        let catalog = Catalog::parse(fixtures).unwrap();
+        let error = catalog
+            .evaluate(&hosts("a"), &catalog.targets())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(expected), "{to}: {error}");
+    }
+}
