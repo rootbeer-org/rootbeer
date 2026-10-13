@@ -40,6 +40,7 @@ enum Profile {
 struct Sandbox {
     profile: Profile,
     has_network: bool,
+    has_home: bool,
     allow: BTreeSet<Allow>,
     closure: BTreeSet<Key>,
     variables: BTreeMap<String, String>,
@@ -118,7 +119,9 @@ pub(crate) fn check(request: &mut Request, check: &Check) -> Result<(), Error> {
         ));
     }
 
+    // Many CLIs create a cache or config under HOME even for --version.
     let mut sandbox = Sandbox::new(request, &check.sandbox, check.platform, &check.env)?;
+    sandbox.has_home = true;
     sandbox.dependencies(request, &check.dependencies)?;
 
     let target = sandbox.read(request, &check.target)?;
@@ -189,6 +192,7 @@ impl Sandbox {
         Ok(Sandbox {
             profile: runnable,
             has_network,
+            has_home: false,
             allow: BTreeSet::new(),
             closure: BTreeSet::new(),
             variables,
@@ -338,6 +342,13 @@ impl Sandbox {
 
         self.variables
             .insert("TMPDIR".into(), workspace.join("tmp").display().to_string());
+
+        if self.has_home {
+            let home = directory.join("home");
+            fs::create_dir(&home).map_err(io_at(&home))?;
+            self.variables
+                .insert("HOME".into(), workspace.join("home").display().to_string());
+        }
 
         command
             .arg("/bin/sh")
