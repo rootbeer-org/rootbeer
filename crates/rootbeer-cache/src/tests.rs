@@ -76,6 +76,11 @@ fn serve(
             };
 
             let (status, headers, body) = respond(&request);
+            let is_head = request.method == "HEAD";
+
+            // The client may return as soon as it reads the reply.
+            seen.lock().unwrap().push(request);
+
             write!(
                 stream,
                 "HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n{headers}\r\n",
@@ -83,11 +88,9 @@ fn serve(
             )
             .unwrap();
 
-            if request.method != "HEAD" {
+            if !is_head {
                 stream.write_all(&body).unwrap();
             }
-
-            seen.lock().unwrap().push(request);
         }
     });
 
