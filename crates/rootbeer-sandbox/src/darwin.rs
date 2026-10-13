@@ -49,6 +49,10 @@ const DEVICES: [&str; 4] = ["/dev/null", "/dev/zero", "/dev/random", "/dev/urand
 const ANCESTORS: [&str; 5] = ["/", "/opt", "/opt/rb", "/opt/rb/var", "/opt/rb/var/build"];
 const LINKS: [&str; 3] = ["/etc", "/tmp", "/var"];
 
+// Users missing from /etc/passwd, such as uid 501 or a CI runner, resolve
+// only through opendirectoryd, and Go's os/user asks even with cgo off.
+const USERS: &str = "(allow mach-lookup (global-name \"com.apple.system.opendirectoryd.libinfo\"))";
+
 // This is basically a convoluted way of saying HTTP(S) and DNS are allowed. No
 // Unix sockets except for mDNS.
 const NETWORK: &str = "(allow network-outbound (remote ip \"*:443\") (remote ip \"*:80\"))
@@ -122,6 +126,7 @@ pub(crate) fn command(
 (allow file-ioctl {host} {devices} {reads} {writes})
 (allow process-exec {executables} {reads} {writes})
 (allow file-write* {writes} (literal \"/dev/null\") (literal \"/dev/zero\") (subpath \"/dev/fd\"))
+{USERS}
 "
     );
 
