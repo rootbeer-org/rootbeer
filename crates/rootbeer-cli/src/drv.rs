@@ -119,6 +119,9 @@ enum Command {
         /// Show build output as it happens, as well as logging it
         #[arg(long = "verbose")]
         is_verbose: bool,
+        /// Fail instead of building a dependency the store and caches lack
+        #[arg(long = "require-dependencies")]
+        should_require_dependencies: bool,
         #[command(flatten)]
         caches: cache::Caches,
         #[command(flatten)]
@@ -166,9 +169,16 @@ pub fn run(args: Args) {
         Command::Build {
             package,
             is_verbose,
+            should_require_dependencies,
             caches,
             sources,
-        } => build(&sources, &package, is_verbose, &caches),
+        } => build(
+            &sources,
+            &package,
+            is_verbose,
+            should_require_dependencies,
+            &caches,
+        ),
         Command::Export {
             package,
             directory,
@@ -231,6 +241,7 @@ fn build(
     sources: &Sources,
     package: &str,
     is_verbose: bool,
+    should_require_dependencies: bool,
     caches: &cache::Caches,
 ) -> Result<(), String> {
     let (graph, target) = evaluate(sources, package, None)?;
@@ -275,7 +286,29 @@ fn build(
         resolver.resolve(key)?;
     }
 
-    let Resolver { order, seen, .. } = resolver;
+    let Resolver {
+        order,
+        seen,
+        published,
+        ..
+    } = resolver;
+    if should_require_dependencies {
+        let missing: Vec<_> = order
+            .iter()
+            .filter(|key| *key != &package.build && published.contains(key))
+            .filter_map(|key| match graph.derivations.get(key) {
+                Some(Derivation::Build(build)) => Some(format!("{}@{}", build.name, build.version)),
+                _ => None,
+            })
+            .collect();
+        if !missing.is_empty() {
+            return Err(format!(
+                "{target} needs dependencies the store and caches lack: {}",
+                missing.join(", ")
+            ));
+        }
+    }
+
     let mut references = BTreeMap::new();
     for key in &seen {
         present_references(&store, key, &mut references)?;
