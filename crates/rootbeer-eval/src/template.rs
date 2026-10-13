@@ -121,7 +121,7 @@ pub(crate) fn path(variable: &str, relative: &str) -> String {
     format!("\"${{{variable}}}/{}\"", escape(relative))
 }
 
-fn escape(text: &str) -> String {
+pub(crate) fn escape(text: &str) -> String {
     text.chars()
         .fold(String::with_capacity(text.len()), |mut escaped, c| {
             if matches!(c, '\\' | '"' | '$' | '`') {

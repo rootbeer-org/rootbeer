@@ -10,6 +10,7 @@ return {
 	build = {
 		backend = "rust",
 		dependencies = {
+			{ package = "7zip", version = "26.04", kind = "build" },
 			{ package = "rust", version = "1.98.1", kind = "build" },
 		},
 		rust = {

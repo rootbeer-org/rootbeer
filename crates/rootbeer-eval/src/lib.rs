@@ -269,8 +269,9 @@ impl<'a> Evaluation<'a> {
         platform: Platform,
     ) -> Result<(Vec<Dependency>, Vec<String>), Error> {
         let declared = match (&resolved.spec.prebuilt, &resolved.spec.build) {
+            (Some(prebuilt), _) => prebuilt.dependencies.as_slice(),
             (None, Some(build)) => build.dependencies.as_slice(),
-            _ => &[],
+            (None, None) => &[],
         };
 
         let mut dependencies = Vec::new();
@@ -325,7 +326,7 @@ impl<'a> Evaluation<'a> {
             (Some(prebuilt), None, _) => {
                 let (fetch, install) = package.download(prebuilt)?;
                 let source = self.insert(Derivation::Fetch(fetch))?;
-                package.unpack(install, prebuilt, source)?
+                package.unpack(install, prebuilt, source, dependencies)?
             }
             (None, Some(source), Some(build)) => {
                 let source_key = self.insert(Derivation::Fetch(package.source(source)?))?;

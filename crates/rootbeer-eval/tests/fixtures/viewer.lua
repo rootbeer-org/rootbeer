@@ -5,7 +5,9 @@ return {
 	default_license = "Proprietary",
 	prebuilt = {
 		url = "https://example.com/Viewer-{version}.dmg",
-		allow = { "disk-images" },
+		dependencies = {
+			{ package = "7zip", version = "26.04", kind = "build" },
+		},
 	},
 	outputs = {
 		apps = { ["Viewer.app"] = "Viewer.app" },

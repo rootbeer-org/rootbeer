@@ -1,0 +1,32 @@
+---
+source: crates/rootbeer-eval/tests/eval.rs
+---
+
+# ynxe2hclesy4silgjk66xilgqlscfptr
+kind: fetch
+sha256: dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+urls:
+  - https://example.com/lister-3.2.0-linux-amd64.zip
+
+# z6b45kot7hcujkg3nzsftpmfyrqa655c
+kind: build
+name: lister
+version: 3.2.0
+platform: x86_64-linux
+sandbox: linux-v1
+inputs:
+  source: ynxe2hclesy4silgjk66xilgqlscfptr
+dependencies:
+  - 7zip (build) 627vsva546vzy2c4d63obobfzdscxvrv
+outputs:
+  - out
+script: |
+  set -eu
+  mkdir "${TMPDIR}/unpack"
+  7zz x -y -bso0 -bsp0 -spod -sns- -snld20 -o"${TMPDIR}/unpack" "${source}"
+  cd "${TMPDIR}/unpack/lister-3.2.0"
+  rm -r completions
+  [ ! -e "${out}" ] || { echo "a step before install created ${out}, where the unpacked tree moves" >&2; exit 1; }
+  mv "${TMPDIR}/unpack/lister-3.2.0" "${out}"
+  cd "${out}"
+  chmod -R a-w doc

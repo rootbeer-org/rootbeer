@@ -8,7 +8,7 @@ sha256: 4444444444444444444444444444444444444444444444444444444444444444
 urls:
   - https://example.com/go1.27.1.linux-amd64.tar.gz
 
-# 4yst5ce3baxqc5tgf5rvfi6ctpcnpr7h
+# lyzroo6dvybks5qy55mjsbrs42iwranj
 kind: build
 name: go
 version: 1.27.1
@@ -23,5 +23,5 @@ script: |
   mkdir "${TMPDIR}/unpack"
   tar -xzf "${source}" -C "${TMPDIR}/unpack"
   mv "${TMPDIR}/unpack/go" "${out}"
-  rm -rf "${out}"/src/*.bash
-  rm -rf "${out}"/lib/time/update.bash
+  cd "${out}"
+  sh -c "rm -rf src/*.bash lib/time/update.bash"

@@ -14,6 +14,23 @@ return {
 		dependencies = {
 			{ package = "libz", version = "1.3.2", kind = "link_runtime" },
 		},
+		steps = {
+			prepare = {
+				{ "autoreconf", "-fi" },
+			},
+			configure = {
+				{ "touch", "configured" },
+			},
+			build = {
+				{ "make", "-C", "doc" },
+			},
+			check = {
+				{ "make", "installcheck" },
+			},
+			install = {
+				{ "rm", "-r", "{prefix}/share/info" },
+			},
+		},
 	},
 	outputs = {
 		bins = { "auto" },

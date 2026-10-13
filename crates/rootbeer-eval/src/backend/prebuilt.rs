@@ -1,8 +1,8 @@
-use super::{Package, extract, link};
-use crate::recipe::{ArchiveFormat, Bins, Install, Prebuilt, Removal};
-use crate::template::{Values, path, quote};
+use super::{Package, Phases, extract, link, seven_zip, unpacker};
+use crate::recipe::{ArchiveFormat, Bins, Install, Prebuilt};
+use crate::template::{Values, escape, path, quote};
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
-use rootbeer_drv::{Allow, Build, Fetch, Key};
+use rootbeer_drv::{Build, Dependency, Fetch, Key};
 use std::collections::BTreeMap;
 
 // RFC 3986 unreserved characters stay original in URL encoding
@@ -67,74 +67,65 @@ impl Package<'_> {
         install: Option<Install>,
         prebuilt: &Prebuilt,
         source: Key,
+        dependencies: Vec<Dependency>,
     ) -> Result<Build, String> {
         let values = &self.resolved.values;
         let outputs = &self.resolved.spec.outputs;
+        let steps = &prebuilt.steps;
         let is_discovered = install.is_some();
-        let is_archive = matches!(install, Some(Install::Archive { .. }));
-        let is_dmg = matches!(install, Some(Install::Dmg));
-        let has_disk_images = prebuilt.allow.contains(&Allow::DiskImages);
 
-        if prebuilt
-            .allow
-            .iter()
-            .any(|allow| *allow != Allow::DiskImages)
-        {
-            return Err("prebuilt.allow accepts only `disk-images`".into());
+        match install {
+            Some(Install::Dmg) => unpacker(&dependencies, "DMG prebuilt", "prebuilt.dependencies")?,
+            Some(Install::Archive {
+                format: ArchiveFormat::Zip,
+                ..
+            }) => unpacker(&dependencies, "zip prebuilt", "prebuilt.dependencies")?,
+            _ => {}
         }
 
-        if has_disk_images && !is_dmg {
-            return Err("prebuilt.allow `disk-images` needs a DMG install".into());
-        }
-
-        if is_dmg && !has_disk_images {
-            return Err(
-                r#"a DMG install needs prebuilt.allow = { "disk-images" } to attach it"#.into(),
-            );
-        }
-
-        if !prebuilt.remove.is_empty() && !is_archive {
-            return Err("prebuilt.remove applies only to an archive install".into());
-        }
-
-        let mut lines = Vec::new();
+        let mut phases = Phases::default();
         match install {
             Some(Install::Archive {
                 format,
-                strip_prefix: Some(prefix),
-            }) => {
-                let unpacked = path("TMPDIR", &format!("unpack/{}", values.literal(&prefix)?));
-                lines.push(r#"mkdir "${TMPDIR}/unpack""#.into());
-                lines.push(extract(format, r#""${TMPDIR}/unpack""#));
-                lines.push(format!(r#"mv {unpacked} "${{out}}""#));
+                strip_prefix: None,
+            }) if !steps.has_steps_before_install() => {
+                phases.install.push(r#"mkdir -p "${out}""#.into());
+                phases.install.push(extract(format, r#""${out}""#));
             }
+            // Steps before install run in the tree that becomes $out.
             Some(Install::Archive {
                 format,
-                strip_prefix: None,
+                strip_prefix,
             }) => {
-                lines.push(r#"mkdir -p "${out}""#.into());
-                lines.push(extract(format, r#""${out}""#));
+                let unpacked = match strip_prefix {
+                    Some(prefix) => format!("unpack/{}", values.literal(&prefix)?),
+                    None => "unpack".into(),
+                };
+
+                let unpacked = path("TMPDIR", &unpacked);
+                phases.prepare.push(r#"mkdir "${TMPDIR}/unpack""#.into());
+                phases
+                    .prepare
+                    .push(extract(format, r#""${TMPDIR}/unpack""#));
+                if steps.has_steps_before_install() {
+                    phases.prepare.push(format!("cd {unpacked}"));
+                    phases.install.push(
+                        r#"[ ! -e "${out}" ] || { echo "a step before install created ${out}, where the unpacked tree moves" >&2; exit 1; }"#
+                            .into(),
+                    );
+                }
+
+                phases.install.push(format!(r#"mv {unpacked} "${{out}}""#));
             }
             Some(Install::Dmg) => {
                 let apps = outputs.apps.as_ref().filter(|apps| !apps.is_empty());
                 let apps = apps.ok_or("a DMG needs outputs.apps")?;
 
-                lines.push(r#"mkdir -p "${out}""#.into());
-                lines.push(
-                    r#"trap 'hdiutil detach -force "${TMPDIR}/dmg" >/dev/null 2>&1 || :' EXIT"#
-                        .into(),
-                );
-                lines.push(r#"hdiutil attach -nobrowse -readonly -noautoopen -mountpoint "${TMPDIR}/dmg" "${source}""#.into());
-                lines.extend(apps.values().map(|app| {
-                    format!(
-                        "ditto {} {}",
-                        path("TMPDIR", &format!("dmg/{app}")),
-                        path("out", app)
-                    )
-                }));
-
-                lines.push(r#"hdiutil detach "${TMPDIR}/dmg""#.into());
-                lines.push("trap - EXIT".into());
+                phases.prepare.push(seven_zip(r#""${TMPDIR}/dmg""#));
+                phases.install.push(r#"mkdir -p "${out}""#.into());
+                for app in apps.values() {
+                    phases.install.extend(copy_app(app));
+                }
             }
             None => {
                 let names = outputs.bins.as_ref().map(Bins::names).unwrap_or_default();
@@ -143,36 +134,32 @@ impl Package<'_> {
                 };
 
                 let installed = path("out", &format!("bin/{name}"));
-                lines.push(r#"mkdir -p "${out}/bin""#.into());
-                lines.push(format!(r#"cp "${{source}}" {installed}"#));
-                lines.push(format!("chmod 755 {installed}"));
+                phases.install.push(r#"mkdir -p "${out}/bin""#.into());
+                phases
+                    .install
+                    .push(format!(r#"cp "${{source}}" {installed}"#));
+                phases.install.push(format!("chmod 755 {installed}"));
             }
         }
 
-        lines.extend(
-            prebuilt
-                .remove
-                .iter()
-                .map(|Removal(pattern)| format!(r#"rm -rf "${{out}}"/{pattern}"#)),
-        );
+        // Install steps run in $out, since the extracted tree has moved there.
+        if !steps.install.is_empty() {
+            phases.install.push(r#"cd "${out}""#.into());
+        }
 
+        let mut lines = phases.run(values, steps)?;
         lines.extend(link(outputs.bins.as_ref()));
         if is_discovered {
             lines.extend(discover(outputs.bins.as_ref()));
         }
 
-        let unpacked = self.build(
+        Ok(self.build(
             self.name.to_string(),
             BTreeMap::from([("source".into(), source)]),
-            Vec::new(),
+            dependencies,
             BTreeMap::new(),
             lines,
-        );
-
-        Ok(Build {
-            allow: prebuilt.allow.clone(),
-            ..unpacked
-        })
+        ))
     }
 }
 
@@ -198,6 +185,25 @@ fn infer_install(file: &str) -> Option<Install> {
         format,
         strip_prefix: None,
     })
+}
+
+// An HFS+ image extracts into a volume directory, whose name can carry a
+// version, while an APFS image extracts without one.
+fn copy_app(app: &str) -> Vec<String> {
+    let name = escape(app);
+    vec![
+        "set --".into(),
+        format!(r#"for app in "${{TMPDIR}}/dmg/{name}" "${{TMPDIR}}/dmg"/*/"{name}"; do"#),
+        r#"  if [ -e "$app" ] || [ -L "$app" ]; then set -- "$@" "$app"; fi"#.into(),
+        "done".into(),
+        format!(
+            r#"[ $# -eq 1 ] || {{ echo "expected one {name} in the DMG, found $#" >&2; exit 1; }}"#
+        ),
+        format!(
+            r#"[ ! -L "$1" ] || {{ echo "{name} in the DMG is a symlink, not an app bundle" >&2; exit 1; }}"#
+        ),
+        format!(r#"ditto "$1" {}"#, path("out", app)),
+    ]
 }
 
 /// Finds each command declared by name alone in an unpacked tree.

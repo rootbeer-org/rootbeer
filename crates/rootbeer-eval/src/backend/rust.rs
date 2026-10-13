@@ -1,4 +1,4 @@
-use super::{Script, env, lines};
+use super::{Phases, Script, env, lines};
 use crate::recipe::{Bins, Build};
 use crate::template::{Values, path};
 use std::collections::BTreeMap;
@@ -52,20 +52,20 @@ pub(super) fn build(values: &Values, build: &Build, bins: Option<&Bins>) -> Resu
             .flat_map(|name| ["--bin".to_string(), name.to_string()]),
     );
 
-    let mut script = lines(&[
+    let configure = lines(&[
         r#"export CARGO_HOME="${TMPDIR}/cargo-home" CARGO_TARGET_DIR="${TMPDIR}/cargo-target""#,
         r#"export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }--remap-path-prefix=${vendor}=/vendor""#,
         r#"export CFLAGS="${CFLAGS:+$CFLAGS }-ffile-prefix-map=${vendor}=/vendor""#,
         r#"export CXXFLAGS="${CXXFLAGS:+$CXXFLAGS }-ffile-prefix-map=${vendor}=/vendor""#,
     ]);
 
-    script.push(format!(
+    let build = vec![format!(
         r#"cargo build --frozen --release --jobs "${{jobs}}" --config "${{vendor}}/config.toml" {}"#,
         values.command(&selection)?
-    ));
+    )];
 
-    script.push(r#"mkdir -p "${out}/bin""#.into());
-    script.extend(names.iter().map(|name| {
+    let mut install = lines(&[r#"mkdir -p "${out}/bin""#]);
+    install.extend(names.iter().map(|name| {
         format!(
             "cp {} {}",
             path("CARGO_TARGET_DIR", &format!("release/{name}")),
@@ -75,18 +75,26 @@ pub(super) fn build(values: &Values, build: &Build, bins: Option<&Bins>) -> Resu
 
     Ok(Script {
         env: variables,
-        lines: script,
+        phases: Phases {
+            configure,
+            build,
+            install,
+            ..Phases::default()
+        },
     })
 }
 
 pub(super) fn vendor() -> Script {
     Script {
         env: BTreeMap::new(),
-        lines: lines(&[
-            r#"export CARGO_HOME="${TMPDIR}/cargo-home""#,
-            "test -f Cargo.lock",
-            r#"mkdir -p "${out}""#,
-            r#"cargo vendor --locked --versioned-dirs "${out}/vendor" > "${out}/config.toml""#,
-        ]),
+        phases: Phases {
+            build: lines(&[
+                r#"export CARGO_HOME="${TMPDIR}/cargo-home""#,
+                "test -f Cargo.lock",
+                r#"mkdir -p "${out}""#,
+                r#"cargo vendor --locked --versioned-dirs "${out}/vendor" > "${out}/config.toml""#,
+            ]),
+            ..Phases::default()
+        },
     }
 }

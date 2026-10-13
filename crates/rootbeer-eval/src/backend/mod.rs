@@ -6,13 +6,14 @@ mod rust;
 mod zig;
 
 use crate::Host;
-use crate::recipe::{ArchiveFormat, Backend, Bins, Resolved, Source};
-use crate::template::{path, quote};
-use rootbeer_drv::{Allow, Build, Check, Dependency, DependencyKind, Fetch, Key, Platform};
+use crate::recipe::{ArchiveFormat, Backend, Bins, Resolved, Source, Steps};
+use crate::template::{Values, path, quote};
+use rootbeer_drv::{Build, Check, Dependency, DependencyKind, Fetch, Key, Platform};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 const PATCH_END: &str = "RB_PATCH";
+const UNPACKER: &str = "7zip";
 
 /// A package is a recipe's resolved values and the target it builds for.
 pub(crate) struct Package<'a> {
@@ -23,9 +24,20 @@ pub(crate) struct Package<'a> {
 }
 
 /// What a backend emits to configure and build a package correctly.
+#[derive(Default)]
 struct Script {
     env: BTreeMap<String, String>,
-    lines: Vec<String>,
+    phases: Phases,
+}
+
+/// A backend's own commands for each phase, in the order the phases run.
+#[derive(Default)]
+struct Phases {
+    prepare: Vec<String>,
+    configure: Vec<String>,
+    build: Vec<String>,
+    check: Vec<String>,
+    install: Vec<String>,
 }
 
 impl Package<'_> {
@@ -43,22 +55,30 @@ impl Package<'_> {
         source_key: &Key,
         dependencies: &[Dependency],
     ) -> Result<Option<Build>, String> {
-        let (toolchain, script) = match backend {
+        let (toolchain, mut script) = match backend {
             Backend::Go => ("go", go::vendor()),
             Backend::Rust => ("rust", rust::vendor()),
             Backend::Autotools | Backend::Custom | Backend::Zig => return Ok(None),
         };
 
-        let mut lines = self.prepare(source)?;
-        lines.extend(script.lines);
+        script.phases.prepare = self.prepare(source, dependencies)?;
+        let lines = script
+            .phases
+            .run(&self.resolved.values, &Steps::default())?;
+
+        let is_tool = |dependency: &&Dependency| {
+            dependency.name == toolchain
+                || (dependency.name == UNPACKER && matches!(source.archive, ArchiveFormat::Zip))
+        };
+
         let tools = dependencies
             .iter()
             .filter(|dependency| dependency.kind == DependencyKind::Build)
-            .filter(|dependency| dependency.name == toolchain)
+            .filter(is_tool)
             .cloned()
             .collect::<Vec<_>>();
 
-        if tools.is_empty() {
+        if !tools.iter().any(|tool| tool.name == toolchain) {
             return Err(format!(
                 "a {toolchain} build needs {toolchain} as a build dependency"
             ));
@@ -87,15 +107,9 @@ impl Package<'_> {
     ) -> Result<Build, String> {
         let values = &self.resolved.values;
         let bins = self.resolved.spec.outputs.bins.as_ref();
-
-        // A build script holding it could mount or eject images it doesn't own.
-        if build.allow.contains(&Allow::DiskImages) {
-            return Err("build.allow can't take `disk-images`, only a DMG prebuilt can".into());
-        }
-
-        let script = match build.backend {
+        let mut script = match build.backend {
             Backend::Autotools => autotools::build(values, build)?,
-            Backend::Custom => custom::build(values, build)?,
+            Backend::Custom => custom::build(build)?,
             Backend::Go => go::build(values, build, bins)?,
             Backend::Rust => rust::build(values, build, bins)?,
             Backend::Zig => zig::build(values, build)?,
@@ -104,12 +118,16 @@ impl Package<'_> {
         let mut variables = env(&[("RB_SYSTEM", &self.host.system)]);
         variables.extend(script.env);
 
-        let mut lines = self.prepare(source)?;
+        let mut prepare = self.prepare(source, &dependencies)?;
         if matches!(build.backend, Backend::Autotools | Backend::Custom) {
-            lines.push(link_flags(&self.rpaths));
+            prepare.push(link_flags(&self.rpaths));
         }
 
-        lines.extend(script.lines);
+        prepare.append(&mut script.phases.prepare);
+        script.phases.prepare = prepare;
+
+        let steps = build.steps.clone().unwrap_or_default();
+        let mut lines = script.phases.run(values, &steps)?;
         lines.extend(link(bins));
 
         let compiled = self.build(
@@ -194,7 +212,11 @@ impl Package<'_> {
     }
 
     // Unpacks the source and applies patches
-    fn prepare(&self, source: &Source) -> Result<Vec<String>, String> {
+    fn prepare(&self, source: &Source, dependencies: &[Dependency]) -> Result<Vec<String>, String> {
+        if matches!(source.archive, ArchiveFormat::Zip) {
+            unpacker(dependencies, "zip source", "build.dependencies")?;
+        }
+
         let mut lines = vec![extract(source.archive, ".")];
         if let Some(prefix) = &source.strip_prefix {
             lines.push(format!(
@@ -241,12 +263,53 @@ impl Package<'_> {
     }
 }
 
+impl Phases {
+    /// Runs each phase's recipe steps after the backend's own commands.
+    fn run(self, values: &Values, steps: &Steps) -> Result<Vec<String>, String> {
+        let phases = [
+            (self.prepare, &steps.prepare),
+            (self.configure, &steps.configure),
+            (self.build, &steps.build),
+            (self.check, &steps.check),
+            (self.install, &steps.install),
+        ];
+
+        let mut lines = Vec::new();
+        for (commands, steps) in phases {
+            lines.extend(commands);
+            lines.extend(values.commands(steps)?);
+        }
+
+        Ok(lines)
+    }
+}
+
 fn extract(format: ArchiveFormat, directory: &str) -> String {
     match format {
         ArchiveFormat::TarGz => format!(r#"tar -xzf "${{source}}" -C {directory}"#),
         ArchiveFormat::TarXz => format!(r#"tar -xJf "${{source}}" -C {directory}"#),
-        ArchiveFormat::Zip => format!(r#"unzip -q "${{source}}" -d {directory}"#),
+        ArchiveFormat::Zip => seven_zip(directory),
     }
+}
+
+// -spod takes the output path literally, -sns- skips alternate streams, and
+// -snld20 extracts every symlink as archived.
+fn seven_zip(directory: &str) -> String {
+    format!(r#"7zz x -y -bso0 -bsp0 -spod -sns- -snld20 -o{directory} "${{source}}""#)
+}
+
+/// Zip and DMG extraction runs `7zz` from a catalog 7zip on `PATH`.
+fn unpacker(dependencies: &[Dependency], archive: &str, field: &str) -> Result<(), String> {
+    let has_unpacker = dependencies
+        .iter()
+        .any(|dependency| dependency.kind == DependencyKind::Build && dependency.name == UNPACKER);
+    if !has_unpacker {
+        return Err(format!(
+            "a {archive} extracts with {UNPACKER}, so declare it in {field} with kind = \"build\""
+        ));
+    }
+
+    Ok(())
 }
 
 /// Links each command declared at a path outside `bin/` at `$out/bin/<name>`.

@@ -86,6 +86,13 @@ A `github` prebuilt needs an `asset`; its `tag` defaults to the upstream tag. A 
 prebuilt downloads the URL directly. Archives and standalone executables are detected
 from the file name; `install` selects anything else, such as `Dmg`.
 
+Zip and DMG prebuilts extract with `7zz` from the catalog's `7zip`, so they declare
+it in `prebuilt.dependencies`. It takes the same entries as `build.dependencies`:
+
+```lua
+dependencies = { { package = "7zip", version = "26.04", kind = "build" } },
+```
+
 ### Platforms
 
 The keys of `platforms` are the supported systems: `aarch64-macos`, `aarch64-linux`,
@@ -189,12 +196,12 @@ or grants permissions. App-only recipes may omit `bins` and `checks`: qualificat
 checks each bundle's `Info.plist`, executable, and deep code signature without
 launching it.
 
-`install = "Dmg"` mounts the verified image read-only, copies only the declared
-bundles, and detaches the image even when copying fails. Finder backgrounds and the
-`/Applications` shortcut are not included. Internal relative symlinks are preserved;
-links outside a bundle are rejected. Bundles with extended-attribute code signatures
-are rejected because the package archive cannot preserve them; embedded signatures
-remain intact. PKG installers and installer scripts are unsupported.
+`install = "Dmg"` extracts the verified image with `7zz` without mounting it, and
+copies only the declared bundles. Each bundle must appear exactly once, at the image
+root or inside one volume directory, and can't be a symlink. Finder backgrounds and
+the `/Applications` shortcut are not included. Internal relative symlinks are
+preserved. `7zz` drops alternate streams and extended attributes, so only signatures
+embedded in the bundle survive. PKG installers and installer scripts are unsupported.
 
 ### Moving releases and mirroring
 
@@ -306,7 +313,8 @@ build = {
 },
 ```
 
-`archive` is `tar.gz` (the default), `tar.xz`, or `zip`. The backend is `autotools`,
+`archive` is `tar.gz` (the default), `tar.xz`, or `zip`. A `zip` source declares
+`7zip` as a build dependency to extract it. The backend is `autotools`,
 `rust`, `go`, `zig`, or `custom`. Recipe commands and upstream build scripts execute
 trusted code.
 
@@ -376,10 +384,24 @@ for project `-D` options; Rootbeer controls the install prefix and isolates buil
 caches. Installed commands belong under `bin/`, and runtime resources must keep
 working after the installation is moved.
 
-### Custom build phases
+### Build steps
 
-Use `backend = "custom"` when a project doesn't fit a preset. Each phase contains
-argument arrays, run in order from the unpacked source root:
+Every backend runs five phases in order: prepare, configure, build, check, and
+install. `steps.<phase>` lists argument arrays that run after the backend's own
+commands for that phase, from the unpacked source root:
+
+| Backend | prepare | configure | build | check | install |
+| --- | --- | --- | --- | --- | --- |
+| `autotools` | unpack, patch | `./configure` | `make` | `make check` | `make install` |
+| `go` | unpack, patch | copy vendor, `go generate` | `go build` into `{prefix}` | | |
+| `rust` | unpack, patch | Cargo environment | `cargo build` | | copy bins |
+| `zig` | unpack, patch | | `zig build` into `{prefix}` | | |
+| `custom` | unpack, patch | | | | |
+
+Install steps run before commands are linked into `bin/`.
+
+Use `backend = "custom"` when a project doesn't fit a preset. Its phases are only
+the recipe's steps:
 
 ```lua
 steps = {
@@ -395,9 +417,22 @@ steps = {
 
 `{prefix}` is the isolated staging directory, `{dependencies}` is the merged dependency
 prefix, and `{jobs}` is the compiler parallelism limit. `{jobs}` must not change the
-output. Build, check, and install must contain commands; configure may be empty.
+output. A custom build needs a `steps` table, but any of its phases may be empty.
 Arguments are passed directly, without a shell: for shell syntax, invoke `sh`
 explicitly and pass paths as positional arguments.
+
+A prebuilt takes `steps` too. Its prepare phase extracts the download, and its
+install phase moves the result into `{prefix}`. For an archive, steps before install
+run in the extracted tree. Unlike a source build's install steps, which run in the
+source tree, a prebuilt's install steps run in `{prefix}`:
+
+```lua
+prebuilt = {
+    url = "https://go.dev/dl/go{version}.{target}.tar.gz",
+    install = { Archive = { format = "TarGz", strip_prefix = "go" } },
+    steps = { install = { { "sh", "-c", "rm -rf src/*.bash src/*.rc" } } },
+},
+```
 
 ### Dependencies
 

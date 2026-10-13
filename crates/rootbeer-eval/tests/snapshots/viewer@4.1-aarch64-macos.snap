@@ -8,25 +8,28 @@ sha256: 8888888888888888888888888888888888888888888888888888888888888888
 urls:
   - https://example.com/Viewer-4.1.dmg
 
-# 663trheawm3dvhwgflk6d33qxrd3fujb
+# enx7fsafre6mf3r455u3lijyjnfld6aa
 kind: build
 name: viewer
 version: 4.1
 platform: aarch64-macos
 sandbox: darwin-v1
-allow:
-  - disk-images
 inputs:
   source: zt4dc4nb6fbhwnjghszk4f5kyhcpikzh
+dependencies:
+  - 7zip (build) di66qqycugywpoazam3yqddva4hkb3gr
 outputs:
   - out
 script: |
   set -eu
+  7zz x -y -bso0 -bsp0 -spod -sns- -snld20 -o"${TMPDIR}/dmg" "${source}"
   mkdir -p "${out}"
-  trap 'hdiutil detach -force "${TMPDIR}/dmg" >/dev/null 2>&1 || :' EXIT
-  hdiutil attach -nobrowse -readonly -noautoopen -mountpoint "${TMPDIR}/dmg" "${source}"
-  ditto "${TMPDIR}/dmg/Viewer.app" "${out}/Viewer.app"
-  hdiutil detach "${TMPDIR}/dmg"
-  trap - EXIT
+  set --
+  for app in "${TMPDIR}/dmg/Viewer.app" "${TMPDIR}/dmg"/*/"Viewer.app"; do
+    if [ -e "$app" ] || [ -L "$app" ]; then set -- "$@" "$app"; fi
+  done
+  [ $# -eq 1 ] || { echo "expected one Viewer.app in the DMG, found $#" >&2; exit 1; }
+  [ ! -L "$1" ] || { echo "Viewer.app in the DMG is a symlink, not an app bundle" >&2; exit 1; }
+  ditto "$1" "${out}/Viewer.app"
   mkdir -p "${out}/bin"
   ln -s ../Viewer.app/Contents/MacOS/viewer "${out}/bin/viewer"

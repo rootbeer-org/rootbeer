@@ -1,4 +1,4 @@
-use super::Script;
+use super::{Phases, Script};
 use crate::recipe::Build;
 use crate::template::Values;
 use std::collections::BTreeMap;
@@ -19,6 +19,9 @@ pub(super) fn build(values: &Values, build: &Build) -> Result<Script, String> {
 
     Ok(Script {
         env: BTreeMap::new(),
-        lines: vec![values.command(&[zig.as_slice(), &build.args].concat())?],
+        phases: Phases {
+            build: vec![values.command(&[zig.as_slice(), &build.args].concat())?],
+            ..Phases::default()
+        },
     })
 }

@@ -8,7 +8,7 @@ sha256: 5555555555555555555555555555555555555555555555555555555555555555
 urls:
   - https://example.com/gopher/archive/v0.4.0.tar.gz
 
-# wopyaeajhnwtcdrd456si2has7ihdn6h
+# i3yrl3lazfiab3dr5kcqiexg7xsiwlxm
 kind: build
 name: gopher-vendor
 version: 0.4.0
@@ -17,7 +17,7 @@ sandbox: linux-v1-net
 inputs:
   source: oxwds6bv5rm75pxp65ffbezfkvw2swoo
 dependencies:
-  - go (build) 4yst5ce3baxqc5tgf5rvfi6ctpcnpr7h
+  - go (build) lyzroo6dvybks5qy55mjsbrs42iwranj
 env:
   GO111MODULE: on
   GOENV: off
@@ -41,7 +41,7 @@ script: |
   go mod verify
   cp -R vendor "${out}"
 
-# bkznofgbrssizkk7vq6hltqxgxepegwf
+# uu3vxbnqtsw3tdn4ojlkjnniu5eto74g
 kind: build
 name: gopher
 version: 0.4.0
@@ -49,9 +49,9 @@ platform: x86_64-linux
 sandbox: linux-v1
 inputs:
   source: oxwds6bv5rm75pxp65ffbezfkvw2swoo
-  vendor: wopyaeajhnwtcdrd456si2has7ihdn6h
+  vendor: i3yrl3lazfiab3dr5kcqiexg7xsiwlxm
 dependencies:
-  - go (build) 4yst5ce3baxqc5tgf5rvfi6ctpcnpr7h
+  - go (build) lyzroo6dvybks5qy55mjsbrs42iwranj
 env:
   CGO_ENABLED: 0
   GO111MODULE: on
@@ -70,9 +70,11 @@ script: |
   set -eu
   tar -xzf "${source}" -C .
   cd gopher-0.4.0
+  rm -r testdata
   rm -rf vendor
   cp -R "${vendor}" vendor
   export GOPATH="${TMPDIR}/go" GOCACHE="${TMPDIR}/go-cache"
   go generate -tags netgo,osusergo ./internal/gen
   mkdir -p "${out}/bin"
   go build -trimpath -buildvcs=false -p "${jobs}" -tags netgo,osusergo -ldflags "-X 'main.version=0.4.0'" -o "${out}/bin/gopher" ./cmd/gopher
+  ln -s gopher "${out}/bin/gph"

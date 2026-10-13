@@ -4,13 +4,15 @@ use rootbeer_drv::Platform;
 use rootbeer_eval::{Catalog, Error, Host, Target};
 use std::collections::BTreeMap;
 
-const FIXTURES: [(&str, &str); 10] = [
+const FIXTURES: [(&str, &str); 12] = [
+    ("7zip.lua", include_str!("fixtures/7zip.lua")),
     ("auto.lua", include_str!("fixtures/auto.lua")),
     ("crab.lua", include_str!("fixtures/crab.lua")),
     ("finder.lua", include_str!("fixtures/finder.lua")),
     ("go.lua", include_str!("fixtures/go.lua")),
     ("gopher.lua", include_str!("fixtures/gopher.lua")),
     ("libz.lua", include_str!("fixtures/libz.lua")),
+    ("lister.lua", include_str!("fixtures/lister.lua")),
     ("rust.lua", include_str!("fixtures/rust.lua")),
     ("tool.lua", include_str!("fixtures/tool.lua")),
     ("viewer.lua", include_str!("fixtures/viewer.lua")),
@@ -112,18 +114,20 @@ fn host_system_rekeys_source_builds_but_not_prebuilts() {
 
     assert_eq!(
         unchanged,
-        ["finder", "go", "rust", "tool", "tool", "viewer"]
+        [
+            "7zip", "7zip", "finder", "go", "lister", "rust", "tool", "tool", "viewer"
+        ]
     );
 }
 
 #[test]
 fn rust_and_go_builds_need_their_toolchain_to_vendor_with() {
-    let gopher = FIXTURES[4].1.replace(
+    let gopher = FIXTURES[5].1.replace(
         r#"package = "go", version = "1.27.1""#,
         r#"package = "libz", version = "1.3.2""#,
     );
     let mut fixtures = FIXTURES;
-    fixtures[4].1 = &gopher;
+    fixtures[5].1 = &gopher;
     let catalog = Catalog::parse(fixtures).unwrap();
     let target = Target {
         name: "gopher".to_string(),
@@ -171,7 +175,7 @@ fn cycles_name_every_package_in_them() {
 
 #[test]
 fn recipes_are_sandboxed_declarative_tables() {
-    let unknown = FIXTURES[5].1.replace("steps = {", "stepz = {");
+    let unknown = FIXTURES[6].1.replace("steps = {", "stepz = {");
     assert!(parse_error(&unknown).contains("unknown field `stepz`"));
 
     assert!(parse_error("while true do end").contains("evaluation budget"));
@@ -180,78 +184,24 @@ fn recipes_are_sandboxed_declarative_tables() {
 }
 
 #[test]
-fn removals_stay_inside_the_output() {
-    let go = FIXTURES[3].1;
-    for pattern in [
-        "/etc",
-        "src/../..",
-        "./src",
-        "src/",
-        "src//a",
-        "src/.*",
-        "$(id)",
-        "a b",
-        "src/?",
-    ] {
-        let source = go.replace("\"lib/time/update.bash\"", &format!("{pattern:?}"));
-        assert!(
-            parse_error(&source).contains("must be a relative path"),
-            "{pattern} parsed"
-        );
-    }
-}
-
-#[test]
-fn disk_images_and_removals_fit_only_their_installs() {
-    let (go, libz, tool, viewer) = (3, 5, 7, 8);
-    let allow = r#"allow = { "disk-images" },"#;
+fn zip_and_dmg_archives_need_7zip_to_extract() {
+    let (crab, lister, viewer) = (2, 7, 10);
+    let dependency = r#"{ package = "7zip", version = "26.04", kind = "build" },"#;
+    let runtime = r#"{ package = "7zip", version = "26.04", kind = "runtime" },"#;
+    let other = r#"{ package = "libz", version = "1.3.2", kind = "build" },"#;
     let cases = [
+        (viewer, "a DMG prebuilt extracts with 7zip", other),
+        (viewer, "a DMG prebuilt extracts with 7zip", runtime),
+        (lister, "a zip prebuilt extracts with 7zip", other),
         (
-            viewer,
-            allow,
+            crab,
+            "a zip source extracts with 7zip, so declare it in build.dependencies",
             "",
-            r#"needs prebuilt.allow = { "disk-images" }"#,
-        ),
-        (
-            viewer,
-            allow,
-            r#"allow = { "tmp" },"#,
-            "accepts only `disk-images`",
-        ),
-        (
-            viewer,
-            allow,
-            r#"remove = { "a" }, allow = { "disk-images" },"#,
-            "only to an archive",
-        ),
-        (
-            tool,
-            "prebuilt = {",
-            r#"prebuilt = { remove = { "a" },"#,
-            "only to an archive",
-        ),
-        (
-            tool,
-            "prebuilt = {",
-            r#"prebuilt = { allow = { "disk-images" },"#,
-            "needs a DMG",
-        ),
-        (
-            go,
-            "install = {",
-            r#"allow = { "disk-images" }, install = {"#,
-            "needs a DMG",
-        ),
-        (
-            libz,
-            "build = {",
-            r#"build = { allow = { "disk-images" },"#,
-            "build.allow can't",
         ),
     ];
 
-    for (index, from, to, expected) in cases {
-        let edited = FIXTURES[index].1.replacen(from, to, 1);
+    for (index, expected, replacement) in cases {
+        let edited = FIXTURES[index].1.replacen(dependency, replacement, 1);
         let mut fixtures = FIXTURES;
         fixtures[index].1 = &edited;
 
@@ -260,6 +210,11 @@ fn disk_images_and_removals_fit_only_their_installs() {
             .evaluate(&hosts("a"), &catalog.targets())
             .unwrap_err()
             .to_string();
-        assert!(error.contains(expected), "{to}: {error}");
+        assert!(error.contains(expected), "{replacement}: {error}");
     }
+
+    let allowed = FIXTURES[viewer]
+        .1
+        .replace("prebuilt = {", r#"prebuilt = { allow = { "tmp" },"#);
+    assert!(parse_error(&allowed).contains("unknown field `allow`"));
 }

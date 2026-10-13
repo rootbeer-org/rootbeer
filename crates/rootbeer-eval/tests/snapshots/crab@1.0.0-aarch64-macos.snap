@@ -8,7 +8,7 @@ sha256: 2222222222222222222222222222222222222222222222222222222222222222
 urls:
   - https://example.com/crab-1.0.0.zip
 
-# yyspcrjg73r7w5chjsq6np7r4hnovrw2
+# wdufi4rgglfxiqol72pghk4divlortfs
 kind: build
 name: crab-vendor
 version: 1.0.0
@@ -17,18 +17,19 @@ sandbox: darwin-v1-net
 inputs:
   source: sveyo4w2yfdhkddym2vqexv7zu6qbq5w
 dependencies:
+  - 7zip (build) di66qqycugywpoazam3yqddva4hkb3gr
   - rust (build) hw7u6b42hvazyfw2agvewmtbcklbjezj
 outputs:
   - out
 script: |
   set -eu
-  unzip -q "${source}" -d .
+  7zz x -y -bso0 -bsp0 -spod -sns- -snld20 -o. "${source}"
   export CARGO_HOME="${TMPDIR}/cargo-home"
   test -f Cargo.lock
   mkdir -p "${out}"
   cargo vendor --locked --versioned-dirs "${out}/vendor" > "${out}/config.toml"
 
-# e22ykao3svn6hjwckyxum5koeza4eqby
+# efcvkuh2onlbhqlcc7anehq2zy6qssxb
 kind: build
 name: crab
 version: 1.0.0
@@ -36,8 +37,9 @@ platform: aarch64-macos
 sandbox: darwin-v1
 inputs:
   source: sveyo4w2yfdhkddym2vqexv7zu6qbq5w
-  vendor: yyspcrjg73r7w5chjsq6np7r4hnovrw2
+  vendor: wdufi4rgglfxiqol72pghk4divlortfs
 dependencies:
+  - 7zip (build) di66qqycugywpoazam3yqddva4hkb3gr
   - rust (build) hw7u6b42hvazyfw2agvewmtbcklbjezj
 env:
   CARGO_INCREMENTAL: 0
@@ -47,7 +49,7 @@ outputs:
   - out
 script: |
   set -eu
-  unzip -q "${source}" -d .
+  7zz x -y -bso0 -bsp0 -spod -sns- -snld20 -o. "${source}"
   export CARGO_HOME="${TMPDIR}/cargo-home" CARGO_TARGET_DIR="${TMPDIR}/cargo-target"
   export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }--remap-path-prefix=${vendor}=/vendor"
   export CFLAGS="${CFLAGS:+$CFLAGS }-ffile-prefix-map=${vendor}=/vendor"

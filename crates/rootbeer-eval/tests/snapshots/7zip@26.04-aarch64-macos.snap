@@ -1,0 +1,31 @@
+---
+source: crates/rootbeer-eval/tests/eval.rs
+---
+
+# til6t2nuvr6vmwvsfgxx5yhijwm3cgbt
+kind: fetch
+sha256: eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+urls:
+  - https://github.com/ip7z/7zip/releases/download/26.04/7z2604-mac.tar.xz
+
+# di66qqycugywpoazam3yqddva4hkb3gr
+kind: build
+name: 7zip
+version: 26.04
+platform: aarch64-macos
+sandbox: darwin-v1
+inputs:
+  source: til6t2nuvr6vmwvsfgxx5yhijwm3cgbt
+outputs:
+  - out
+script: |
+  set -eu
+  mkdir -p "${out}"
+  tar -xJf "${source}" -C "${out}"
+  mkdir -p "${out}/bin"
+  for name in 7zz; do
+    [ -e "${out}/bin/$name" ] && continue
+    set -- $(cd "${out}" && find . -type f -name "$name" -perm -u+x)
+    [ $# -eq 1 ] || { echo "expected one executable named $name, found $#" >&2; exit 1; }
+    ln -s "../${1#./}" "${out}/bin/$name"
+  done

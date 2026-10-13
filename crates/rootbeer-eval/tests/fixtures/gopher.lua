@@ -12,6 +12,14 @@ return {
 		dependencies = {
 			{ package = "go", version = "1.27.1", kind = "build" },
 		},
+		steps = {
+			prepare = {
+				{ "rm", "-r", "testdata" },
+			},
+			install = {
+				{ "ln", "-s", "gopher", "{prefix}/bin/gph" },
+			},
+		},
 		go = {
 			binaries = { gopher = "./cmd/gopher" },
 			generate = { "./internal/gen" },

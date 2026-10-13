@@ -8,7 +8,7 @@ sha256: 1111111111111111111111111111111111111111111111111111111111111111
 urls:
   - https://example.com/auto-5.8.tar.gz
 
-# bcnq2eude2zckj7pe3hwvtnpvhkj4xvb
+# wkkdwxpioszrhlarlfwgprtyezhjzfpf
 kind: build
 name: auto
 version: 5.8
@@ -29,7 +29,12 @@ script: |
   tar -xzf "${source}" -C .
   cd auto-5.8
   export LDFLAGS="-Wl,-S -Wl,-rpath,/opt/rb/store/6i67rywx65sdqz2xklja5ghagt2unkmq-libz-1.3.2/lib"
+  autoreconf -fi
   sh ./configure "--prefix=${out}" --disable-nls --with-z=/opt/rb/store/6i67rywx65sdqz2xklja5ghagt2unkmq-libz-1.3.2
+  touch configured
   make "-j${jobs}"
+  make -C doc
   make check
+  make installcheck
   make install
+  rm -r "${out}/share/info"

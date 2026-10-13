@@ -1,4 +1,4 @@
-use super::{Script, env, lines};
+use super::{Phases, Script, env, lines};
 use crate::recipe::{Bins, Build};
 use crate::template::Values;
 use std::collections::BTreeSet;
@@ -52,7 +52,7 @@ pub(super) fn build(values: &Values, build: &Build, bins: Option<&Bins>) -> Resu
     }
 
     let flags = values.command(&flags)?;
-    let mut script = lines(&[
+    let mut configure = lines(&[
         "rm -rf vendor",
         r#"cp -R "${vendor}" vendor"#,
         r#"export GOPATH="${TMPDIR}/go" GOCACHE="${TMPDIR}/go-cache""#,
@@ -61,19 +61,23 @@ pub(super) fn build(values: &Values, build: &Build, bins: Option<&Bins>) -> Resu
     if !go.generate.is_empty() {
         // Build tags pick the files whose directives run.
         let packages = values.command(&[tags.as_slice(), &go.generate].concat())?;
-        script.push(format!("go generate {packages}"));
+        configure.push(format!("go generate {packages}"));
     }
 
-    script.push(r#"mkdir -p "${out}/bin""#.into());
+    let mut build = lines(&[r#"mkdir -p "${out}/bin""#]);
     for (bin, package) in &go.binaries {
         let output = format!("{{prefix}}/bin/{bin}");
         let output = values.command(&["-o", &output, package])?;
-        script.push(format!("go build {flags} {output}"));
+        build.push(format!("go build {flags} {output}"));
     }
 
     Ok(Script {
         env: variables,
-        lines: script,
+        phases: Phases {
+            configure,
+            build,
+            ..Phases::default()
+        },
     })
 }
 
@@ -87,15 +91,18 @@ pub(super) fn vendor() -> Script {
 
     Script {
         env: variables,
-        lines: lines(&[
-            r#"export GOPATH="${TMPDIR}/go" GOMODCACHE="${TMPDIR}/go-modules" GOCACHE="${TMPDIR}/go-cache""#,
-            r#"cp go.mod go.sum "${TMPDIR}""#,
-            "mkdir -p vendor",
-            "go mod vendor",
-            r#"cmp go.mod "${TMPDIR}/go.mod""#,
-            r#"cmp go.sum "${TMPDIR}/go.sum""#,
-            "go mod verify",
-            r#"cp -R vendor "${out}""#,
-        ]),
+        phases: Phases {
+            build: lines(&[
+                r#"export GOPATH="${TMPDIR}/go" GOMODCACHE="${TMPDIR}/go-modules" GOCACHE="${TMPDIR}/go-cache""#,
+                r#"cp go.mod go.sum "${TMPDIR}""#,
+                "mkdir -p vendor",
+                "go mod vendor",
+                r#"cmp go.mod "${TMPDIR}/go.mod""#,
+                r#"cmp go.sum "${TMPDIR}/go.sum""#,
+                "go mod verify",
+                r#"cp -R vendor "${out}""#,
+            ]),
+            ..Phases::default()
+        },
     }
 }
