@@ -14,6 +14,7 @@ fn build() -> Build {
         platform: Platform::Aarch64Linux,
         sandbox: "linux-v1".into(),
         allow: BTreeSet::new(),
+        host: BTreeSet::new(),
         inputs: BTreeMap::new(),
         dependencies: Vec::new(),
         env: BTreeMap::new(),

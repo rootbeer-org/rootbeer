@@ -100,6 +100,10 @@ pub fn is_inside(path: &str) -> bool {
         && components.all(|component| matches!(component, Component::Normal(_)))
 }
 
+fn is_host_reference(reference: &str) -> bool {
+    !reference.is_empty() && !reference.contains(char::is_control)
+}
+
 impl Derivation {
     pub(crate) fn validate(&self) -> Result<(), Error> {
         match self {
@@ -119,6 +123,18 @@ impl Build {
         script(&self.script)?;
         dependencies(&self.dependencies)?;
         env(&self.env)?;
+
+        if let Some(reference) = self
+            .host
+            .iter()
+            .find(|reference| !is_host_reference(reference))
+        {
+            return Err(Error::invalid(
+                "host",
+                reference,
+                "must be non-empty without control characters",
+            ));
+        }
 
         self.inputs.keys().try_for_each(|name| {
             INPUT_NAME.check("inputs", name)?;

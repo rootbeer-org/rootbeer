@@ -104,6 +104,7 @@ pub(crate) fn build(request: &mut Request, build: &Build) -> Result<BTreeSet<Key
         request.key,
         &out,
         &allowed,
+        &build.host,
         !sandbox.has_network,
         &mut *request.log,
     )?;

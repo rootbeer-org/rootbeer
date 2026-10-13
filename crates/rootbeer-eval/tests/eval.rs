@@ -1,6 +1,6 @@
 #![cfg(test)]
 
-use rootbeer_drv::Platform;
+use rootbeer_drv::{Derivation, Platform};
 use rootbeer_eval::{Catalog, Error, Host, Target};
 use std::collections::BTreeMap;
 
@@ -217,4 +217,79 @@ fn zip_and_dmg_archives_need_7zip_to_extract() {
         .1
         .replace("prebuilt = {", r#"prebuilt = { allow = { "tmp" },"#);
     assert!(parse_error(&allowed).contains("unknown field `allow`"));
+}
+
+#[test]
+fn host_references_override_per_platform_and_key_only_the_build() {
+    let (gopher, tool) = (5, 9);
+    let shared = r#"outputs = { host = { "libX11.so.6", "/bin/bash" },"#;
+    let edited_tool = FIXTURES[tool]
+        .1
+        .replacen("outputs = {", shared, 1)
+        .replace(
+            r#"target = "darwin-arm64","#,
+            r#"target = "darwin-arm64", outputs = { host = { "@rpath/libjvm.dylib" } },"#,
+        )
+        .replace(
+            r#"target = "linux-amd64","#,
+            r#"target = "linux-amd64", outputs = { host = { "libxcb.so.1" } },"#,
+        );
+    let edited_gopher = FIXTURES[gopher].1.replacen("outputs = {", shared, 1);
+
+    let mut fixtures = FIXTURES;
+    fixtures[tool].1 = &edited_tool;
+    fixtures[gopher].1 = &edited_gopher;
+    let catalog = Catalog::parse(fixtures).unwrap();
+    let graph = catalog.evaluate(&hosts("a"), &catalog.targets()).unwrap();
+
+    let host = |name: &str, platform: Platform| {
+        let (_, package) = graph
+            .packages
+            .iter()
+            .find(|(target, _)| target.name == name && target.platform == platform)
+            .unwrap();
+        match graph.derivations.get(&package.build) {
+            Some(Derivation::Build(build)) => build.host.iter().cloned().collect::<Vec<_>>(),
+            _ => panic!("{name} has no build"),
+        }
+    };
+
+    assert_eq!(
+        host("tool", Platform::Aarch64Macos),
+        ["@rpath/libjvm.dylib"]
+    );
+    assert_eq!(host("tool", Platform::X86_64Linux), ["libxcb.so.1"]);
+    assert_eq!(
+        host("gopher", Platform::X86_64Linux),
+        ["/bin/bash", "libX11.so.6"]
+    );
+
+    let acknowledging = graph
+        .derivations
+        .values()
+        .filter(
+            |derivation| matches!(derivation, Derivation::Build(build) if !build.host.is_empty()),
+        )
+        .count();
+    assert_eq!(acknowledging, 3, "never the vendor build");
+
+    for invalid in [r#""""#, r#""libX11.so.6\n/bin/sh""#] {
+        let edited = FIXTURES[tool].1.replacen(
+            "outputs = {",
+            &format!("outputs = {{ host = {{ {invalid} }},"),
+            1,
+        );
+        let mut fixtures = FIXTURES;
+        fixtures[tool].1 = &edited;
+
+        let catalog = Catalog::parse(fixtures).unwrap();
+        let error = catalog
+            .evaluate(&hosts("a"), &catalog.targets())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("invalid host") && error.contains("without control characters"),
+            "{error}"
+        );
+    }
 }

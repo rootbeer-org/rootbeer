@@ -153,13 +153,18 @@ impl Package<'_> {
             lines.extend(discover(outputs.bins.as_ref()));
         }
 
-        Ok(self.build(
+        let unpacked = self.build(
             self.name.to_string(),
             BTreeMap::from([("source".into(), source)]),
             dependencies,
             BTreeMap::new(),
             lines,
-        ))
+        );
+
+        Ok(Build {
+            host: self.host_references(),
+            ..unpacked
+        })
     }
 }
 

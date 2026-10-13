@@ -51,17 +51,46 @@ const RUNTIME: [&str; 12] = [
 const METADATA: [&str; 2] = [".pc", ".la"];
 const PACKAGE_CONFIGS: [&str; 3] = ["lib/cmake/", "lib64/cmake/", "share/cmake/"];
 
+struct Problems<'a> {
+    host: &'a BTreeSet<String>,
+    acknowledged: BTreeSet<&'a str>,
+    list: Vec<String>,
+}
+
+impl<'a> Problems<'a> {
+    fn host(&mut self, reference: &str, problem: String) {
+        match self.host.get(reference) {
+            Some(reference) => {
+                self.acknowledged.insert(reference);
+            }
+            None => self.list.push(problem),
+        }
+    }
+
+    fn unused(&self) -> impl Iterator<Item = &'a String> {
+        self.host
+            .iter()
+            .filter(|reference| !self.acknowledged.contains(reference.as_str()))
+    }
+}
+
 pub(crate) fn scan(
     key: &Key,
     out: &Path,
     allowed: &BTreeSet<Key>,
+    host: &BTreeSet<String>,
     is_runnable: bool,
     log: &mut dyn Write,
 ) -> Result<BTreeSet<Key>, Error> {
     let mut references = BTreeSet::new();
-    let mut problems = Vec::new();
+    let mut problems = Problems {
+        host,
+        acknowledged: BTreeSet::new(),
+        list: Vec::new(),
+    };
     let mut images = Vec::new();
     let mut objects = Vec::new();
+    let stored = Path::new(STORE_ROOT).join(out.file_name().unwrap_or_default());
     for entry in WalkDir::new(out)
         .follow_root_links(false)
         .sort_by_file_name()
@@ -97,21 +126,32 @@ pub(crate) fn scan(
                 .iter()
                 .any(|directory| name.starts_with(directory));
 
+        let mut is_mentioned = false;
         for needle in FORBIDDEN {
             if memmem::find(&bytes, needle.as_bytes()).is_none() {
                 continue;
             }
 
+            is_mentioned = true;
             let problem = format!("{name} mentions {needle}");
             if is_strict {
-                problems.push(problem);
+                problems.list.push(problem);
             } else {
                 writeln!(log, "scan warning: {problem}").map_err(io_at(path))?;
             }
         }
 
-        if is_script && let Some(problem) = shebang(&name, &bytes) {
-            problems.push(problem);
+        if is_symlink
+            && !is_mentioned
+            && let Some(target) =
+                host_target(&stored.join(path.strip_prefix(out).unwrap_or(path)), &bytes)
+        {
+            let problem = format!("{name} links to {target}, which is outside the store");
+            problems.host(&target, problem);
+        }
+
+        if is_script && let Some((interpreter, problem)) = shebang(&name, &bytes) {
+            problems.host(&interpreter, problem);
         }
 
         match Mach::parse(&bytes) {
@@ -131,21 +171,35 @@ pub(crate) fn scan(
         }
     }
 
-    problems.extend(mach_linkage(&images));
-    problems.extend(elf_linkage(&objects));
+    for (library, problem) in mach_linkage(&images)
+        .into_iter()
+        .chain(elf_linkage(&objects))
+    {
+        problems.host(&library, problem);
+    }
 
-    problems.extend(
+    problems.list.extend(
         references
             .iter()
             .filter(|reference| *reference != key && !allowed.contains(reference))
             .map(|reference| format!("references {reference}, which is not in its build closure")),
     );
 
-    if !problems.is_empty() {
+    if is_runnable {
+        for reference in problems.unused() {
+            writeln!(
+                log,
+                "scan warning: host reference {reference:?} matches nothing in the output"
+            )
+            .map_err(io_at(out))?;
+        }
+    }
+
+    if !problems.list.is_empty() {
         return Err(Error::Scan {
             key: key.clone(),
             out: out.to_path_buf(),
-            problems,
+            problems: problems.list,
         });
     }
 
@@ -164,7 +218,17 @@ fn keys(bytes: &[u8]) -> Vec<Key> {
         .collect()
 }
 
-fn shebang(name: &str, bytes: &[u8]) -> Option<String> {
+// A symlink outside the store points at the host, or at a build directory
+// that is gone once the build ends. A relative one resolves from where the
+// link lands in the store.
+fn host_target(link: &Path, bytes: &[u8]) -> Option<String> {
+    let target = String::from_utf8_lossy(bytes);
+    let resolved = link.parent()?.join(target.as_ref());
+    let is_host = !normalize(&resolved).starts_with(STORE_ROOT);
+    is_host.then(|| target.into_owned())
+}
+
+fn shebang(name: &str, bytes: &[u8]) -> Option<(String, String)> {
     let line = bytes.get(2..)?.split(|byte| *byte == b'\n').next()?;
     let interpreter = String::from_utf8_lossy(line);
     let interpreter = interpreter.split_whitespace().next().unwrap_or_default();
@@ -175,8 +239,9 @@ fn shebang(name: &str, bytes: &[u8]) -> Option<String> {
         return None;
     }
 
-    Some(format!(
-        "{name} runs {interpreter:?}, which is outside the store"
+    Some((
+        interpreter.to_string(),
+        format!("{name} runs {interpreter:?}, which is outside the store"),
     ))
 }
 
@@ -220,7 +285,7 @@ struct Process {
     rpaths: Vec<PathBuf>,
 }
 
-fn mach_linkage(images: &[Image]) -> Vec<String> {
+fn mach_linkage(images: &[Image]) -> Vec<(String, String)> {
     images
         .iter()
         .zip(mach_processes(images))
@@ -233,7 +298,9 @@ fn mach_linkage(images: &[Image]) -> Vec<String> {
                         .is_resolvable(|process| is_loadable(library, image.directory(), process))
                 })
                 .map(|library| {
-                    format!("{} loads {library}, which is outside the store", image.name)
+                    let problem =
+                        format!("{} loads {library}, which is outside the store", image.name);
+                    (library.clone(), problem)
                 })
         })
         .collect()
@@ -408,7 +475,7 @@ impl<C> Searches<C> {
     }
 }
 
-fn elf_linkage(objects: &[Object]) -> Vec<String> {
+fn elf_linkage(objects: &[Object]) -> Vec<(String, String)> {
     objects
         .iter()
         .zip(search_paths(objects))
@@ -420,10 +487,11 @@ fn elf_linkage(objects: &[Object]) -> Vec<String> {
                     !searches.is_resolvable(|directories| is_resolvable(library, directories))
                 })
                 .map(|library| {
-                    format!(
+                    let problem = format!(
                         "{} needs {library}, which is outside the store",
                         object.name
-                    )
+                    );
+                    (library.clone(), problem)
                 })
         })
         .collect()
@@ -718,6 +786,7 @@ mod tests {
             &own,
             out.path(),
             &BTreeSet::from([allowed.clone()]),
+            &BTreeSet::new(),
             true,
             &mut log,
         )
@@ -747,6 +816,7 @@ mod tests {
             &own,
             out.path(),
             &BTreeSet::from([allowed]),
+            &BTreeSet::new(),
             false,
             &mut log,
         )
@@ -761,6 +831,152 @@ mod tests {
             )]
         );
         assert!(log.is_empty());
+    }
+
+    // A shared object that needs `needed` and names no SONAME or interpreter.
+    // The dynamic section starts at 176 and the string table at 512, in one
+    // 4 KiB segment.
+    fn elf(needed: &[&str]) -> Vec<u8> {
+        let length = |bytes: &[u8]| u64::try_from(bytes.len()).unwrap();
+        let mut strings = vec![0u8];
+        let mut entries = Vec::new();
+        for name in needed {
+            entries.push((1u64, length(&strings)));
+            strings.extend(name.as_bytes());
+            strings.push(0);
+        }
+
+        entries.extend([(5, 512), (10, length(&strings)), (0, 0)]);
+
+        let mut bytes = b"\x7fELF\x02\x01\x01".to_vec();
+        bytes.resize(16, 0);
+        bytes.extend(3u16.to_le_bytes());
+        bytes.extend(0xb7u16.to_le_bytes());
+        bytes.extend(1u32.to_le_bytes());
+        for word in [0u64, 64, 0] {
+            bytes.extend(word.to_le_bytes());
+        }
+
+        bytes.extend(0u32.to_le_bytes());
+        for half in [64u16, 56, 2, 64, 0, 0] {
+            bytes.extend(half.to_le_bytes());
+        }
+
+        for (kind, offset, size) in [(1u32, 0u64, 4096u64), (2, 176, 336)] {
+            bytes.extend(kind.to_le_bytes());
+            bytes.extend(4u32.to_le_bytes());
+            for word in [offset, offset, offset, size, size, 8] {
+                bytes.extend(word.to_le_bytes());
+            }
+        }
+
+        for (tag, value) in entries {
+            bytes.extend(tag.to_le_bytes());
+            bytes.extend(value.to_le_bytes());
+        }
+
+        bytes.resize(512, 0);
+        bytes.extend(strings);
+        bytes.resize(4096, 0);
+        bytes
+    }
+
+    fn problems(out: &Path, host: &[&str], log: &mut Vec<u8>) -> Vec<String> {
+        let own: Key = "a".repeat(32).parse().unwrap();
+        let host = host.iter().map(ToString::to_string).collect();
+        match scan(&own, out, &BTreeSet::new(), &host, true, log) {
+            Ok(_) => Vec::new(),
+            Err(Error::Scan { problems, .. }) => problems,
+            Err(error) => panic!("{error}"),
+        }
+    }
+
+    #[test]
+    fn acknowledged_host_references_pass_and_others_still_fail() {
+        let out = tempfile::tempdir().unwrap();
+        fs::create_dir_all(out.path().join("bin")).unwrap();
+        fs::create_dir_all(out.path().join("lib")).unwrap();
+        fs::write(
+            out.path().join("lib/plugin.so"),
+            elf(&["libX11.so.6", "libxcb.so.1"]),
+        )
+        .unwrap();
+
+        let script = out.path().join("bin/run");
+        fs::write(&script, "#!/bin/bash\n").unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let mut log = Vec::new();
+        assert_eq!(
+            problems(out.path(), &[], &mut log),
+            [
+                "bin/run runs \"/bin/bash\", which is outside the store",
+                "lib/plugin.so needs libX11.so.6, which is outside the store",
+                "lib/plugin.so needs libxcb.so.1, which is outside the store",
+            ]
+        );
+        assert!(log.is_empty());
+
+        let host = ["/bin/bash", "libX11.so.6", "libunused.so.1"];
+        assert_eq!(
+            problems(out.path(), &host, &mut log),
+            ["lib/plugin.so needs libxcb.so.1, which is outside the store"]
+        );
+        assert_eq!(
+            String::from_utf8(log).unwrap(),
+            "scan warning: host reference \"libunused.so.1\" matches nothing in the output\n"
+        );
+
+        let host = ["/bin/bash", "libX11.so.6", "libxcb.so.1"];
+        assert!(problems(out.path(), &host, &mut Vec::new()).is_empty());
+    }
+
+    #[test]
+    fn absolute_symlinks_outside_the_store_fail() {
+        let out = tempfile::tempdir().unwrap();
+        let own = format!("{STORE_ROOT}/{}-x-1/bin/x", "a".repeat(32));
+        let links = [
+            ("applications", "/Applications"),
+            ("build", "/opt/rb/var/build/k/tmp/dmg/Viewer.app"),
+            ("escape", "/opt/rb/store/../../../Applications"),
+            ("own", own.as_str()),
+            ("relative", "../Frameworks"),
+        ];
+        for (name, target) in links {
+            symlink(target, out.path().join(name)).unwrap();
+        }
+
+        assert_eq!(
+            problems(out.path(), &[], &mut Vec::new()),
+            [
+                "applications links to /Applications, which is outside the store",
+                "build mentions /build/",
+                "escape links to /opt/rb/store/../../../Applications, which is outside the store",
+            ]
+        );
+
+        let host = ["/Applications", "/opt/rb/store/../../../Applications"];
+        assert_eq!(
+            problems(out.path(), &host, &mut Vec::new()),
+            ["build mentions /build/"]
+        );
+    }
+
+    #[test]
+    fn relative_symlinks_that_climb_out_of_the_store_fail() {
+        let out = tempfile::tempdir().unwrap();
+        fs::create_dir_all(out.path().join("bin")).unwrap();
+        fs::create_dir_all(out.path().join("libexec")).unwrap();
+        symlink("../libexec/x", out.path().join("bin/x")).unwrap();
+        symlink("../../../../Applications", out.path().join("applications")).unwrap();
+
+        assert_eq!(
+            problems(out.path(), &[], &mut Vec::new()),
+            ["applications links to ../../../../Applications, which is outside the store"]
+        );
+
+        let host = ["../../../../Applications"];
+        assert!(problems(out.path(), &host, &mut Vec::new()).is_empty());
     }
 
     #[test]

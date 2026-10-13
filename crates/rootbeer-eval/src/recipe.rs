@@ -216,6 +216,7 @@ pub(crate) struct Outputs {
     pub bins: Option<Bins>,
     pub apps: Option<BTreeMap<String, String>>,
     pub checks: Option<Vec<Vec<String>>>,
+    pub host: Option<BTreeSet<String>>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -328,6 +329,7 @@ impl Spec {
                 bins: top.bins.clone().or_else(|| base.bins.clone()),
                 apps: top.apps.clone().or_else(|| base.apps.clone()),
                 checks: top.checks.clone().or_else(|| base.checks.clone()),
+                host: top.host.clone().or_else(|| base.host.clone()),
             },
         }
     }

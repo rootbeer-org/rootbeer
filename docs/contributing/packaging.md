@@ -180,6 +180,28 @@ They should exercise the tool's real functionality and bundled runtime files, no
 only `--version`. Don't depend accidentally on a developer's Homebrew installation
 or CI-only libraries.
 
+### Host references
+
+After a build, the scan fails an output that reaches outside the store. That covers
+a library the loader can't find in the store, a script interpreter, and a symlink
+that leaves the store. When the host really provides one, such as X11 for a GUI
+app on Linux, list the exact reference the scan names in `outputs.host`:
+
+```lua
+outputs = {
+    bins = { "kitty" },
+    host = { "libX11.so.6", "libxcb.so.1" },
+},
+```
+
+Each entry must match exactly. It can be a soname, an install name such as
+`@rpath/libjvm.dylib`, an interpreter path such as `/bin/bash`, or a symlink target.
+Anything unlisted still fails, and an entry that matches nothing logs a warning.
+`host` overrides per platform like the other `outputs` fields. An override can
+replace the list but not empty it, because the evaluator reads `{}` as a map. It's
+part of the build's key, so adding an entry rebuilds the package. Prefer fixing the
+output, and keep the list for references the package can't avoid.
+
 ### macOS apps and disk images
 
 Declare app exports explicitly:

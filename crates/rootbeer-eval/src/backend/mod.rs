@@ -140,8 +140,13 @@ impl Package<'_> {
 
         Ok(Build {
             allow: build.allow.clone(),
+            host: self.host_references(),
             ..compiled
         })
+    }
+
+    fn host_references(&self) -> BTreeSet<String> {
+        self.resolved.spec.outputs.host.clone().unwrap_or_default()
     }
 
     pub(crate) fn is_shared(&self) -> Result<bool, String> {
@@ -254,6 +259,7 @@ impl Package<'_> {
             platform,
             sandbox: sandbox(platform).into(),
             allow: BTreeSet::new(),
+            host: BTreeSet::new(),
             inputs,
             dependencies,
             env,

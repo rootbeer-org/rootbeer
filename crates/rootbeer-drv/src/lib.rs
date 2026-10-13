@@ -42,6 +42,11 @@ pub struct Build {
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub allow: BTreeSet<Allow>,
 
+    /// Exact host references the output scan accepts, such as a soname, an
+    /// install name, an interpreter, or a symlink target.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub host: BTreeSet<String>,
+
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub inputs: BTreeMap<String, Key>,
 

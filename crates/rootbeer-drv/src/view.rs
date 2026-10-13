@@ -21,6 +21,7 @@ impl Display for Build {
         writeln!(f, "platform: {}", self.platform)?;
         writeln!(f, "sandbox: {}", self.sandbox)?;
         list(f, "allow", self.allow.iter().map(|allow| allow.as_str()))?;
+        list(f, "host", self.host.iter().map(String::as_str))?;
         map(
             f,
             "inputs",

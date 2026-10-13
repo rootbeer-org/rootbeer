@@ -14,6 +14,7 @@ fn build() -> Build {
         platform: Platform::X86_64Linux,
         sandbox: "linux-v1".to_string(),
         allow: BTreeSet::new(),
+        host: BTreeSet::new(),
         inputs: BTreeMap::from([("source".to_string(), SOURCE_KEY.parse().unwrap())]),
         dependencies: vec![Dependency {
             key: DEPENDENCY_KEY.parse().unwrap(),
@@ -73,6 +74,25 @@ fn allow_encodes_in_declaration_order() {
 }
 
 #[test]
+fn an_empty_host_list_keeps_the_encoding() {
+    let bytes = Derivation::Build(build()).canonical_bytes().unwrap();
+    let text = String::from_utf8(bytes).unwrap();
+    assert!(!text.contains("host"), "{text}");
+
+    let acknowledged = Build {
+        host: BTreeSet::from(["libX11.so.6".to_string(), "/bin/bash".to_string()]),
+        ..build()
+    };
+
+    let bytes = Derivation::Build(acknowledged).canonical_bytes().unwrap();
+    let text = String::from_utf8(bytes).unwrap();
+    assert!(
+        text.contains(r#""host":["/bin/bash","libX11.so.6"]"#),
+        "{text}"
+    );
+}
+
+#[test]
 fn every_build_field_changes_the_key() {
     let base = key(build());
     let mutations: Vec<Mutation> = vec![
@@ -82,6 +102,9 @@ fn every_build_field_changes_the_key() {
         ("sandbox", |b| b.sandbox = "linux-v2".to_string()),
         ("allow", |b| {
             b.allow.insert(Allow::Ipc);
+        }),
+        ("host", |b| {
+            b.host.insert("libX11.so.6".to_string());
         }),
         ("inputs", |b| {
             b.inputs
@@ -195,6 +218,12 @@ fn invalid_derivations_have_no_key() {
         }),
         ("dependencies[1]", |b| {
             b.dependencies.push(b.dependencies[0].clone())
+        }),
+        ("host", |b| {
+            b.host.insert(String::new());
+        }),
+        ("host", |b| {
+            b.host.insert("libX11.so.6\n/bin/sh".to_string());
         }),
     ];
 
