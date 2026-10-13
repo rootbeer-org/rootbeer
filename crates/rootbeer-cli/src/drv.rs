@@ -102,7 +102,8 @@ enum Command {
     Gc(gc::Args),
     /// Print, as JSON levels, the packages CI must build because no cache has them
     Plan {
-        /// Each `name` or `name@version`; versions default to the platform's
+        /// Each `name` or `name@version`. A name without a default version on
+        /// the platform is left out
         #[arg(required = true)]
         packages: Vec<String>,
         #[arg(long, value_parser = parse_platform)]

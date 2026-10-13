@@ -149,6 +149,10 @@ impl Catalog {
             .collect()
     }
 
+    pub fn contains(&self, name: &str) -> bool {
+        self.recipes.contains_key(name)
+    }
+
     pub fn default_version(&self, name: &str, platform: Platform) -> Option<&str> {
         let recipe = self.recipes.get(name)?;
         recipe

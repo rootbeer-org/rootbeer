@@ -1,7 +1,7 @@
 use super::cache::{self, Caches};
 use super::{load, target, Sources};
 use rootbeer_drv::{DependencyKind, Derivation, Key, Platform};
-use rootbeer_eval::{Graph, Target};
+use rootbeer_eval::{Catalog, Graph, Target};
 use serde::Serialize;
 use std::collections::BTreeMap;
 
@@ -18,10 +18,7 @@ pub(super) fn plan(
     caches: &Caches,
 ) -> Result<(), String> {
     let (catalog, hosts) = load(sources)?;
-    let targets = packages
-        .iter()
-        .map(|package| target(&catalog, package, platform))
-        .collect::<Result<Vec<_>, _>>()?;
+    let targets = targets(&catalog, packages, platform)?;
 
     let graph = catalog
         .evaluate(&hosts, &targets)
@@ -36,6 +33,33 @@ pub(super) fn plan(
     let json = serde_json::to_string(&plan).map_err(|error| error.to_string())?;
     println!("{json}");
     Ok(())
+}
+
+fn targets(
+    catalog: &Catalog,
+    packages: &[String],
+    platform: Platform,
+) -> Result<Vec<Target>, String> {
+    let mut targets = Vec::new();
+    for package in packages {
+        let (name, version) = match package.split_once('@') {
+            Some((name, version)) => (name, Some(version)),
+            None => (package.as_str(), None),
+        };
+
+        if !catalog.contains(name) {
+            return Err(format!("{name} is not in the catalog"));
+        }
+
+        if version.is_none() && catalog.default_version(name, platform).is_none() {
+            eprintln!("{name} has no default version on {platform}, left out");
+            continue;
+        }
+
+        targets.push(target(catalog, package, platform)?);
+    }
+
+    Ok(targets)
 }
 
 fn levels(
@@ -147,6 +171,7 @@ mod tests {
             platform,
             sandbox: "linux-v1".into(),
             allow: Default::default(),
+            host: Default::default(),
             inputs: Default::default(),
             dependencies,
             env: Default::default(),
@@ -222,5 +247,37 @@ mod tests {
         let zlib = graph.packages[&zlib].build.clone();
         let cached = levels(&graph, &targets, |_, key| Ok(*key == zlib)).unwrap();
         assert_eq!(cached, [vec!["cmake@4", "xz@5"], vec!["zstd@1"]]);
+    }
+
+    #[test]
+    fn targets_leave_out_other_platforms_but_not_unknown_names() {
+        let recipe = format!(
+            r#"return {{
+                name = "mac", description = "", homepage = "", default_license = "MIT",
+                source = {{ url = "https://example.com/mac.tar.gz" }},
+                build = {{ backend = "custom", steps = {{}} }},
+                platforms = {{ ["aarch64-macos"] = {{ default_version = "1" }} }},
+                versions = {{ ["1"] = {{ digests = {{ ["aarch64-macos"] = "{}" }} }} }},
+            }}"#,
+            "0".repeat(64)
+        );
+        let catalog = Catalog::parse([("mac.lua", recipe.as_str())]).unwrap();
+        let linux = Platform::try_from("x86_64-linux".to_string()).unwrap();
+        let names = |names: &[&str]| {
+            names
+                .iter()
+                .map(|name| name.to_string())
+                .collect::<Vec<_>>()
+        };
+
+        assert!(targets(&catalog, &names(&["mac"]), linux)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            targets(&catalog, &names(&["typo"]), linux).unwrap_err(),
+            "typo is not in the catalog"
+        );
+        let pinned = targets(&catalog, &names(&["mac@1"]), linux).unwrap();
+        assert_eq!(pinned.len(), 1);
     }
 }
