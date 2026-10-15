@@ -53,6 +53,18 @@ const LINKS: [&str; 3] = ["/etc", "/tmp", "/var"];
 // only through opendirectoryd, and Go's os/user asks even with cgo off.
 const USERS: &str = "(allow mach-lookup (global-name \"com.apple.system.opendirectoryd.libinfo\"))";
 
+// Without root a process can only lower its own priority, as shells do for
+// background jobs. Tests also check that /dev/tty exists.
+const SCHED: &str = "(allow system-sched)
+(allow file-read-metadata (literal \"/dev/tty\"))";
+
+// Apple's own profiles grant ptys this way. The extension limits the ttys to
+// the ones the build opened through /dev/ptmx.
+const PTY: &str = "(allow pseudo-tty)
+(allow file-read* file-write* file-ioctl (literal \"/dev/ptmx\") (literal \"/dev/tty\"))
+(allow file-read* file-write* file-ioctl (require-all (regex #\"^/dev/ttys[0-9]+$\") (extension \"com.apple.sandbox.pty\")))
+";
+
 // This is basically a convoluted way of saying HTTP(S) and DNS are allowed. No
 // Unix sockets except for mDNS. Zig loads its roots from the system keychain
 // file, which every user can read already.
@@ -107,6 +119,7 @@ pub(crate) fn command(
         .map(|path| format!("(literal {path:?})"))
         .join(" ");
 
+    // Set-id bits are allowed in the build's own files, since sealing drops them.
     let mut profile = format!(
         "(version 1)
 (deny default)
@@ -119,7 +132,9 @@ pub(crate) fn command(
 (allow file-ioctl {host} {devices} {reads} {writes})
 (allow process-exec {executables} {reads} {writes})
 (allow file-write* {writes} (literal \"/dev/null\") (literal \"/dev/zero\") (subpath \"/dev/fd\"))
+(allow file-write-setugid {writes})
 {USERS}
+{SCHED}
 "
     );
 
@@ -132,6 +147,7 @@ pub(crate) fn command(
             Allow::Tmp => {
                 "(allow file-read* file-write* file-ioctl (subpath \"/private/tmp\"))\n".to_string()
             }
+            Allow::Pty => PTY.to_string(),
         };
 
         profile.push_str(&rule);
@@ -184,6 +200,9 @@ fn output(program: &str, args: &[&str]) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
+    use rootbeer_drv::Allow;
+    use std::collections::BTreeSet;
+
     #[test]
     fn only_a_fetching_build_reaches_the_network() {
         for has_network in [false, true] {
@@ -191,6 +210,15 @@ mod tests {
             let profile = command.get_args().nth(1).unwrap().to_str().unwrap();
             assert_eq!(profile.contains("network-outbound"), has_network);
             assert_eq!(profile.contains(super::NETWORK), has_network);
+        }
+    }
+
+    #[test]
+    fn only_a_build_that_asks_gets_ptys() {
+        for allow in [Default::default(), BTreeSet::from([Allow::Pty])] {
+            let command = super::command(&[], &[], &allow, false);
+            let profile = command.get_args().nth(1).unwrap().to_str().unwrap();
+            assert_eq!(profile.contains(super::PTY), !allow.is_empty());
         }
     }
 }

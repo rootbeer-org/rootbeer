@@ -118,6 +118,8 @@ pub enum Allow {
     Ipc,
     /// The host's shared `/tmp`, for tools that ignore `TMPDIR`
     Tmp,
+    /// Pseudo-terminals the build opens itself, for tests that drive a terminal
+    Pty,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -146,13 +148,14 @@ impl DependencyKind {
 }
 
 impl Allow {
-    const ALL: [Allow; 3] = [Allow::LocalNetwork, Allow::Ipc, Allow::Tmp];
+    const ALL: [Allow; 4] = [Allow::LocalNetwork, Allow::Ipc, Allow::Tmp, Allow::Pty];
 
     fn as_str(self) -> &'static str {
         match self {
             Allow::LocalNetwork => "local-network",
             Allow::Ipc => "ipc",
             Allow::Tmp => "tmp",
+            Allow::Pty => "pty",
         }
     }
 }

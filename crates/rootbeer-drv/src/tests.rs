@@ -68,7 +68,7 @@ fn allow_encodes_in_declaration_order() {
     let bytes = Derivation::Build(build).canonical_bytes().unwrap();
     let text = String::from_utf8(bytes).unwrap();
     assert!(
-        text.contains(r#""allow":["local-network","ipc","tmp"]"#),
+        text.contains(r#""allow":["local-network","ipc","tmp","pty"]"#),
         "{text}"
     );
 }
