@@ -54,11 +54,13 @@ const LINKS: [&str; 3] = ["/etc", "/tmp", "/var"];
 const USERS: &str = "(allow mach-lookup (global-name \"com.apple.system.opendirectoryd.libinfo\"))";
 
 // This is basically a convoluted way of saying HTTP(S) and DNS are allowed. No
-// Unix sockets except for mDNS.
+// Unix sockets except for mDNS. Zig loads its roots from the system keychain
+// file, which every user can read already.
 const NETWORK: &str = "(allow network-outbound (remote ip \"*:443\") (remote ip \"*:80\"))
 (allow network-outbound (remote unix-socket (path-literal \"/private/var/run/mDNSResponder\")))
 (allow mach-lookup (global-name \"com.apple.dnssd.service\" \"com.apple.SystemConfiguration.configd\" \"com.apple.trustd\" \"com.apple.trustd.agent\"))
 (allow file-read* (literal \"/private/etc/resolv.conf\") (literal \"/private/var/run/resolv.conf\"))
+(allow file-read* (literal \"/Library/Keychains/System.keychain\"))
 ";
 
 /// `sandbox-exec` with a profile that reads only the host toolchain and
