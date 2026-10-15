@@ -83,6 +83,30 @@ fn packing_is_deterministic_and_round_trips() {
 }
 
 #[test]
+fn sealing_makes_an_unpacked_archive_readable_by_all() {
+    let archive = raw(&[
+        ("dir", EntryType::Directory, 0o550, ""),
+        ("dir/file", EntryType::Regular, 0o440, "hi"),
+        ("dir/tool", EntryType::Regular, 0o500, "#!/bin/sh\n"),
+    ]);
+
+    let target = tempfile::tempdir().unwrap();
+    unpack(archive.as_slice(), target.path()).unwrap();
+    seal(target.path()).unwrap();
+
+    let mode = |relative: &str| {
+        let metadata = fs::metadata(target.path().join(relative)).unwrap();
+        metadata.permissions().mode() & 0o7777
+    };
+
+    assert_eq!(
+        (mode("dir"), mode("dir/file"), mode("dir/tool")),
+        (0o555, 0o444, 0o555)
+    );
+    writable(target.path());
+}
+
+#[test]
 fn unpacking_refuses_what_packing_never_writes() {
     let outside = tempfile::tempdir().unwrap();
     let escape = outside.path().to_str().unwrap();
@@ -276,7 +300,9 @@ fn sealing_registers_only_a_callers_own_plain_build() {
     assert!(error.to_string().ends_with(reason), "{error}");
 
     assert_eq!(store.path(&key).unwrap(), None);
-    fs::set_permissions(path.join("a/tool"), fs::Permissions::from_mode(0o755)).unwrap();
+    fs::set_permissions(path.join("a/tool"), fs::Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(path.join("a/file"), fs::Permissions::from_mode(0o640)).unwrap();
+    fs::set_permissions(path.join("a"), fs::Permissions::from_mode(0o750)).unwrap();
     #[cfg(target_os = "macos")]
     {
         let file = path.join("a/file");

@@ -128,11 +128,17 @@ pub(crate) fn seal(root: &Path) -> Result<(), Error> {
             continue;
         }
 
-        if file_type.is_dir() {
-            let permissions = fs::Permissions::from_mode(0o555);
-            fs::set_permissions(path, permissions).map_err(io_at(path))?;
-        }
+        // The same modes a sealed build gets, whatever the archive recorded.
+        let metadata = entry
+            .metadata()
+            .map_err(|error| io_at(path)(error.into()))?;
+        let is_executable = metadata.permissions().mode() & 0o111 != 0;
+        let mode = match file_type.is_dir() || is_executable {
+            true => 0o555,
+            false => 0o444,
+        };
 
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).map_err(io_at(path))?;
         fs::File::open(path)
             .and_then(|file| file.sync_all())
             .map_err(io_at(path))?;

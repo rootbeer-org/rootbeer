@@ -212,7 +212,15 @@ impl Sealer {
             fchown(&fd, Some(Uid::ROOT), Some(Gid::ROOT)).map_err(&at)?;
         }
 
-        fchmod(&fd, Mode::from_raw_mode(stat.st_mode & 0o555)).map_err(&at)?;
+        // Builds and profiles read the store as other users, so every entry is
+        // readable by all. Only what was executable stays so.
+        let is_executable = stat.st_mode & 0o111 != 0;
+        let mode = match kind == FileType::Directory || is_executable {
+            true => 0o555,
+            false => 0o444,
+        };
+
+        fchmod(&fd, Mode::from_raw_mode(mode)).map_err(&at)?;
         #[cfg(target_os = "macos")]
         clear_acl(&fd).map_err(io_at(path))?;
         fsync(&fd).map_err(&at)?;
