@@ -10,6 +10,9 @@ return {
 	build = {
 		backend = "zig",
 		args = { "-Doptimize=ReleaseSafe", "-Dversion={version}" },
+		dependencies = {
+			{ package = "zig", version = "0.16.0", kind = "build" },
+		},
 	},
 	outputs = {
 		bins = { "ziggy" },

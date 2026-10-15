@@ -45,8 +45,8 @@ impl Package<'_> {
         Ok(self.fetch(self.resolved.values.literal(&source.url)?))
     }
 
-    /// Go and Rust fetch their locked dependencies with network, apart from the
-    /// build, so editing a build never refetches them.
+    /// Go, Rust, and Zig fetch their locked dependencies with network, apart
+    /// from the build, so editing a build never refetches them.
     // TODO: Emit a tree-mode Fetch instead once recipes record vendor hashes
     pub(crate) fn vendor(
         &self,
@@ -58,7 +58,8 @@ impl Package<'_> {
         let (toolchain, mut script) = match backend {
             Backend::Go => ("go", go::vendor()),
             Backend::Rust => ("rust", rust::vendor()),
-            Backend::Autotools | Backend::Custom | Backend::Zig => return Ok(None),
+            Backend::Zig => ("zig", zig::vendor()),
+            Backend::Autotools | Backend::Custom => return Ok(None),
         };
 
         script.phases.prepare = self.prepare(source, dependencies)?;

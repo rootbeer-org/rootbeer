@@ -1,0 +1,27 @@
+---
+source: crates/rootbeer-eval/tests/eval.rs
+---
+
+# icpumsckobu2ox6txn6molatszphcnig
+kind: fetch
+sha256: ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+urls:
+  - https://example.com/zig-x86_64-linux-0.16.0.tar.xz
+
+# lhibbzbghj2fv4vkznnwakwemakfbvxy
+kind: build
+name: zig
+version: 0.16.0
+platform: x86_64-linux
+sandbox: linux-v1
+inputs:
+  source: icpumsckobu2ox6txn6molatszphcnig
+outputs:
+  - out
+script: |
+  set -eu
+  mkdir "${TMPDIR}/unpack"
+  tar -xJf "${source}" -C "${TMPDIR}/unpack"
+  mv "${TMPDIR}/unpack/zig-x86_64-linux-0.16.0" "${out}"
+  mkdir -p "${out}/bin"
+  ln -s ../zig "${out}/bin/zig"

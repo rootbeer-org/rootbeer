@@ -4,7 +4,7 @@ use rootbeer_drv::{Derivation, Platform};
 use rootbeer_eval::{Catalog, Error, Host, Target};
 use std::collections::BTreeMap;
 
-const FIXTURES: [(&str, &str); 12] = [
+const FIXTURES: [(&str, &str); 13] = [
     ("7zip.lua", include_str!("fixtures/7zip.lua")),
     ("auto.lua", include_str!("fixtures/auto.lua")),
     ("crab.lua", include_str!("fixtures/crab.lua")),
@@ -16,6 +16,7 @@ const FIXTURES: [(&str, &str); 12] = [
     ("rust.lua", include_str!("fixtures/rust.lua")),
     ("tool.lua", include_str!("fixtures/tool.lua")),
     ("viewer.lua", include_str!("fixtures/viewer.lua")),
+    ("zig.lua", include_str!("fixtures/zig.lua")),
     ("ziggy.lua", include_str!("fixtures/ziggy.lua")),
 ];
 
@@ -115,7 +116,7 @@ fn host_system_rekeys_source_builds_but_not_prebuilts() {
     assert_eq!(
         unchanged,
         [
-            "7zip", "7zip", "finder", "go", "lister", "rust", "tool", "tool", "viewer"
+            "7zip", "7zip", "finder", "go", "lister", "rust", "tool", "tool", "viewer", "zig"
         ]
     );
 }
