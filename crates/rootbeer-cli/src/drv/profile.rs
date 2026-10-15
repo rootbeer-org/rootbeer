@@ -1,6 +1,6 @@
 use super::cache::{self, Signed};
 use super::install::{self, Source};
-use super::{this_platform, HELPER};
+use super::{migrate, this_platform, HELPER};
 use rootbeer_profile::{Generation, Member, Profile};
 use rootbeer_store::{Store, ROOT};
 use rustix::process::getuid;
@@ -11,7 +11,7 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-const USER: &str = "user";
+pub(super) const USER: &str = "user";
 
 /// Later ones take precedence on PATH.
 pub(super) const ON_PATH: [&str; 2] = ["default", USER];
@@ -41,24 +41,45 @@ pub(super) fn add(args: &UseArgs) -> Result<(), String> {
 
     let directory = directory(true)?;
     let profile = Profile::open(&directory, USER).map_err(profile_error)?;
-    let mut generation = current(&profile)?;
+    let generation = current(&profile)?;
     let requests = planned(&generation.packages, requests, args.should_update);
     if requests.is_empty() {
         eprintln!("{USER} already has everything asked for");
         return link_apps(&profile);
     }
 
+    install_requests(&profile, generation, requests, &args.source, |_, error| {
+        Err(error)
+    })
+}
+
+pub(super) fn install_requests(
+    profile: &Profile,
+    mut generation: Generation,
+    requests: BTreeMap<String, Option<String>>,
+    source: &Source,
+    mut unmatched: impl FnMut(&str, String) -> Result<(), String>,
+) -> Result<(), String> {
     let (mut store, is_root) = install::open_store()?;
     let _held = store.hold().map_err(|error| error.to_string())?;
-    let index = install::open_index(&args.source, is_root)?;
+    let index = install::open_index(source, is_root)?;
     let mut signed = Signed::new(|name| index.package(name).map_err(|error| error.to_string()));
-    let cache = args.source.cache();
+    let cache = source.cache();
     let platform = this_platform()?;
 
     let mut members = Vec::new();
     for (name, version) in requests {
-        let (resolved, output) =
-            install::select(signed.package(&name)?, version.as_deref(), platform)?;
+        let selected = signed
+            .package(&name)
+            .and_then(|package| install::select(package, version.as_deref(), platform));
+        let (resolved, output) = match selected {
+            Ok(selected) => selected,
+            Err(error) => {
+                unmatched(&name, error)?;
+                continue;
+            }
+        };
+
         let member = Member {
             version: resolved,
             is_pinned: version.is_some(),
@@ -77,14 +98,12 @@ pub(super) fn add(args: &UseArgs) -> Result<(), String> {
 
     if members.is_empty() {
         eprintln!("{USER} already has what the index has now");
-        return link_apps(&profile);
+        return link_apps(profile);
     }
 
     if let Some(applications) = applications() {
         let apps = members.iter().flat_map(|(_, member)| member.apps.keys());
-        profile
-            .check_apps(&applications, apps.map(String::as_str))
-            .map_err(profile_error)?;
+        check_apps(profile, &applications, apps)?;
     }
 
     for (name, member) in members {
@@ -99,14 +118,14 @@ pub(super) fn add(args: &UseArgs) -> Result<(), String> {
         generation.packages.insert(name, member);
     }
 
-    switch(&profile, USER, &store, generation)?;
-    link_apps(&profile)
+    switch(profile, USER, &store, generation)?;
+    link_apps(profile)
 }
 
 /// Drops what the generation already has, unless updating. An update keeps a
 /// pin when the request names no version, and with nothing named it updates
 /// everything.
-fn planned(
+pub(super) fn planned(
     packages: &BTreeMap<String, Member>,
     mut requests: BTreeMap<String, Option<String>>,
     should_update: bool,
@@ -222,10 +241,29 @@ pub(super) fn switch(
     Ok(())
 }
 
+pub(super) fn check_apps<'a>(
+    profile: &Profile,
+    applications: &Path,
+    apps: impl IntoIterator<Item = &'a String>,
+) -> Result<(), String> {
+    let legacy = migrate::legacy_apps(applications)?;
+    let apps = apps.into_iter().filter(|app| !legacy.contains(*app));
+    profile
+        .check_apps(applications, apps.map(String::as_str))
+        .map_err(profile_error)
+}
+
 pub(super) fn link_apps(profile: &Profile) -> Result<(), String> {
     let Some(applications) = applications() else {
         return Ok(());
     };
+
+    let generation = current(profile)?;
+    let apps = generation
+        .packages
+        .values()
+        .flat_map(|member| member.apps.keys());
+    migrate::release_legacy_apps(&applications, apps)?;
 
     for problem in profile.link_apps(&applications).map_err(profile_error)? {
         eprintln!("warning: {problem}");

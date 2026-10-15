@@ -4,6 +4,7 @@ mod configuration;
 mod gc;
 mod index;
 mod install;
+mod migrate;
 mod plan;
 mod profile;
 
@@ -98,6 +99,9 @@ enum Command {
     Generations,
     /// Print shell code that puts your profiles on PATH
     Env,
+    /// Move your packages from the old /opt/rootbeer store's profiles into
+    /// /opt/rb, then release what it holds for you
+    Migrate(migrate::Args),
     /// Remove store outputs no generation of any profile on this machine holds
     Gc(gc::Args),
     /// Print, as JSON levels, the packages CI must build because no cache has them
@@ -206,6 +210,7 @@ pub fn run(args: Args) {
         Command::Rollback => profile::rollback(),
         Command::Generations => profile::generations(),
         Command::Env => profile::env(),
+        Command::Migrate(args) => migrate::migrate(&args),
         Command::Gc(args) => gc::run(&args),
     };
 

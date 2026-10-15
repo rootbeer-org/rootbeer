@@ -1,7 +1,8 @@
 use super::cache::{self, Signed};
 use super::install::{self, Source};
 use super::profile::{
-    applications, current, directory, is_same, link_apps, profile_error, profiles, switch,
+    applications, check_apps, current, directory, is_same, link_apps, profile_error, profiles,
+    switch,
 };
 use super::this_platform;
 use rootbeer_core::package::PackageIntent;
@@ -24,6 +25,7 @@ pub(crate) fn configure(
     intents: Vec<PackageIntent>,
     script_dir: &Path,
     flags: &PackageLockOptions,
+    source: &Source,
 ) -> Result<bool, String> {
     let requests = requests(intents)?;
     let path = script_dir.join("rootbeer.lock");
@@ -53,7 +55,6 @@ pub(crate) fn configure(
 
     let (mut store, is_root) = install::open_store()?;
     let _held = store.hold().map_err(|error| error.to_string())?;
-    let source = Source::default();
     let cache = source.cache();
     let is_index_open = Cell::new(false);
     let mut index = None;
@@ -66,7 +67,7 @@ pub(crate) fn configure(
 
         let index = match &mut index {
             Some(index) => index,
-            None => index.insert(install::open_index(&source, is_root)?),
+            None => index.insert(install::open_index(source, is_root)?),
         };
         is_index_open.set(true);
         index.package(package).map_err(|error| error.to_string())
@@ -106,10 +107,11 @@ pub(crate) fn configure(
 
     if let (Some(profile), Some(applications)) = (&profile, applications()) {
         let apps = kept.values().chain(resolved.values());
-        let apps = apps.flat_map(|locked| locked.apps.keys());
-        profile
-            .check_apps(&applications, apps.map(String::as_str))
-            .map_err(profile_error)?;
+        check_apps(
+            profile,
+            &applications,
+            apps.flat_map(|locked| locked.apps.keys()),
+        )?;
     }
 
     let mut members = BTreeMap::new();

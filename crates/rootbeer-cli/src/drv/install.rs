@@ -29,7 +29,7 @@ pub(super) struct Args {
 }
 
 #[derive(clap::Args, Debug)]
-pub(super) struct Source {
+pub(crate) struct Source {
     /// A TUF repository to install from instead of rootbeer's own
     #[arg(long, requires = "root")]
     index: Option<String>,

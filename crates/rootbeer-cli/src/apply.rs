@@ -229,11 +229,16 @@ pub fn run(args: Args, lua_dir: Option<&PathBuf>) {
     // Before the rest, so commands the configuration runs can use them.
     let should_link_apps = args.is_drv
         && !args.dry_run
-        && crate::drv::configure(planned.take_packages(), &script_dir, &package_lock)
-            .unwrap_or_else(|e| {
-                eprintln!("{} error: {e}", "✗".red().bold());
-                std::process::exit(1);
-            });
+        && crate::drv::configure(
+            planned.take_packages(),
+            &script_dir,
+            &package_lock,
+            &Default::default(),
+        )
+        .unwrap_or_else(|e| {
+            eprintln!("{} error: {e}", "✗".red().bold());
+            std::process::exit(1);
+        });
 
     let mut handler = CliHandler {
         progress: (!args.dry_run).then(|| crate::progress::Progress::new("resolving packages")),
