@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use mlua::{Error as LuaError, Lua, Result as LuaResult, Table, Value};
 
@@ -7,9 +7,8 @@ use super::ctx::Ctx;
 use super::module::Module;
 use super::vm::{profile_bin_path, PackageBins};
 use crate::package::{
-    lockfile::RootbeerLock, profile as package_profile, ArchiveFormat, LockedInstall,
-    LockedPackage, LockedSource, PackageCatalog, PackageIntent, PackageRequest, Provides,
-    Repository, ResolveContext,
+    ArchiveFormat, LockedInstall, LockedPackage, LockedSource, PackageCatalog, PackageIntent,
+    PackageRequest, Provides, Repository,
 };
 use crate::plan::{Op, WriteSource};
 
@@ -98,9 +97,7 @@ impl Module for Package {
         )?;
         t.set(
             "bin_dir",
-            lua.create_function(|_, ()| {
-                Ok(package_profile::bin_dir().to_string_lossy().into_owned())
-            })?,
+            lua.create_function(|_, ()| Ok(crate::env::bin_dir().to_string_lossy().into_owned()))?,
         )?;
         t.set(
             "bin_path",
@@ -139,10 +136,10 @@ impl Module for Package {
                     )));
                 }
 
-                let path = package_profile::env_path();
+                let path = crate::env::path();
                 Ctx::from(lua).push(Op::WriteFile {
                     path: path.clone(),
-                    source: WriteSource::text(package_profile::env_contents()),
+                    source: WriteSource::text(crate::env::contents()),
                 });
 
                 Ok(path.to_string_lossy().to_string())
@@ -159,11 +156,29 @@ fn append_packages(lua: &Lua, parsed: Vec<(PackageIntent, Vec<String>)>) {
         .app_data_ref::<PackageBins>()
         .expect("PackageBins not set");
     for (intent, names) in parsed {
+        let is_indexed = matches!(&intent, PackageIntent::Request(request) if is_indexed(request));
         for name in names {
-            bins.insert(name.clone(), profile_bin_path(&name));
+            // Entries the index can't serve stay where the old store put them.
+            let path = match is_indexed {
+                true => Some(profile_bin_path(&name)),
+                false => crate::env::legacy_bin(&name),
+            };
+            if let Some(path) = path {
+                bins.insert(name, path);
+            }
         }
         cx.push(Op::Package { intent });
     }
+}
+
+fn is_indexed(request: &PackageRequest) -> bool {
+    request
+        .resolver
+        .as_deref()
+        .is_none_or(|name| name == "rootbeer")
+        && request.source.is_none()
+        && request.asset.is_none()
+        && request.bins.is_empty()
 }
 
 fn parse_intent(
@@ -277,7 +292,7 @@ fn parse_intent(
         }
     }
     let mut names: Vec<String> = request.bins.keys().cloned().collect();
-    names.extend(request_bins(lua, &cx, &request)?);
+    names.extend(request_bins(&cx, &request));
     for name in &names {
         validate_command(name)?;
     }
@@ -311,62 +326,59 @@ fn batch_entries(table: Table) -> LuaResult<Vec<Value>> {
     Ok(entries.into_values().collect())
 }
 
-fn request_bins(lua: &Lua, cx: &Ctx<'_>, request: &PackageRequest) -> LuaResult<Vec<String>> {
-    let local = lua.app_data_ref::<PackageCatalog>();
-    if request
-        .resolver
-        .as_deref()
-        .is_none_or(|name| name == "rootbeer")
-    {
-        if let Some(package) = local
-            .as_ref()
-            .and_then(|catalog| catalog.find(&request.name))
-        {
-            let context = ResolveContext::current();
-            let version = match request.version.as_deref() {
-                Some(version) => version,
-                None => package
-                    .default_version_for(&context.system)
-                    .ok_or_else(|| {
-                        LuaError::RuntimeError(format!(
-                            "{} does not support {}",
-                            package.name, context.system
-                        ))
-                    })?,
-            };
-            let entry = package.versions.get(version).ok_or_else(|| {
-                LuaError::RuntimeError(format!("{}@{version}: no local recipe", package.name))
-            })?;
-            let recipe = entry.for_system(&context.system).ok_or_else(|| {
-                LuaError::RuntimeError(format!(
-                    "{}@{version}: no local recipe for {}",
-                    package.name, context.system
-                ))
-            })?;
-            return Ok(recipe.bins.names().into_iter().cloned().collect());
-        }
+/// The commands `rootbeer.lock` recorded for a request the signed index
+/// serves, on this machine's platform.
+fn request_bins(cx: &Ctx<'_>, request: &PackageRequest) -> Vec<String> {
+    if !is_indexed(request) {
+        return Vec::new();
     }
-    if let Ok(lock) = RootbeerLock::read(cx.runtime.script_dir.join("rootbeer.lock")) {
-        if request
-            .resolver
-            .as_deref()
-            .is_none_or(|name| name == "rootbeer")
-            && lock
-                .inputs
-                .local_catalog()
-                .is_some_and(|catalog| catalog.find(&request.name).is_some())
-        {
-            return Ok(Vec::new());
+
+    let path = cx.runtime.script_dir.join("rootbeer.lock");
+    let platform = format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS);
+    let lock = match rootbeer_profile::Lock::read(&path) {
+        Ok(Some(lock)) => lock,
+        Err(rootbeer_profile::Error::Older { .. }) => {
+            return legacy_lock_bins(&path, &request.name, &platform)
         }
-        if lock.inputs.configured_repository().as_ref()
-            == lua.app_data_ref::<Repository>().as_deref()
-        {
-            if let Ok(package) = lock.package_for_request(request, &ResolveContext::current()) {
-                return Ok(package.provides.bins.keys().cloned().collect());
-            }
-        }
-    }
-    Ok(Vec::new())
+        _ => return Vec::new(),
+    };
+
+    lock.packages
+        .get(&request.name)
+        .and_then(|platforms| platforms.get(&platform))
+        .map(|locked| locked.bins.iter().cloned().collect())
+        .unwrap_or_default()
+}
+
+/// A lock from before /opt/rb names the commands until the first apply since
+/// replaces it.
+fn legacy_lock_bins(path: &Path, name: &str, platform: &str) -> Vec<String> {
+    let Ok(bytes) = std::fs::read(path) else {
+        return Vec::new();
+    };
+
+    let Ok(lock) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return Vec::new();
+    };
+
+    let prefix = format!("{name}@");
+    let resolutions = lock.get("resolutions").and_then(|value| value.as_object());
+    let package = resolutions
+        .into_iter()
+        .flat_map(|resolutions| resolutions.values())
+        .filter(|resolution| {
+            let system = resolution.pointer("/proof/system");
+            system.and_then(|system| system.as_str()) == Some(platform)
+        })
+        .filter_map(|resolution| resolution.get("package")?.as_str())
+        .find(|package| package.starts_with(&prefix));
+
+    let bins = package
+        .and_then(|package| lock.get("packages")?.get(package))
+        .and_then(|package| package.pointer("/provides/bins")?.as_object());
+    bins.into_iter()
+        .flat_map(|bins| bins.keys().cloned())
+        .collect()
 }
 
 fn fields(table: &Table, allowed: &[&str]) -> LuaResult<()> {

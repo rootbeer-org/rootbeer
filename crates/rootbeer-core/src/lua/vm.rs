@@ -47,7 +47,7 @@ impl PackageBins {
 }
 
 pub(crate) fn profile_bin_path(bin: &str) -> PathBuf {
-    crate::package::profile::bin_path(bin)
+    crate::env::bin_dir().join(bin)
 }
 
 pub(crate) struct Vm {

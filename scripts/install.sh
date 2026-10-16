@@ -4,7 +4,7 @@
 set -e
 
 BASE_URL="https://rbpkg.com/bootstrap/v1"
-PROFILE_BIN="${XDG_STATE_HOME:-${HOME}/.local/state}/rootbeer/profiles/user/current/bin"
+PROFILE_BIN="/opt/rb/profiles/$(id -u)/user/bin"
 
 detect_platform() {
 	os=$(uname -s)
@@ -120,8 +120,8 @@ main() {
 
 	tar -xzf "${tmpdir}/rb.tar.gz" -C "${tmpdir}"
 	chmod +x "${tmpdir}/rb"
-	if [ -f "${tmpdir}/rb-store" ]; then
-		chmod +x "${tmpdir}/rb-store"
+	if [ -f "${tmpdir}/rb-helper" ]; then
+		chmod +x "${tmpdir}/rb-helper"
 	fi
 
   # Rootbeer immediately installs itself via the real catalog

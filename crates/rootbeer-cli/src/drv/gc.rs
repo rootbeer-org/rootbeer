@@ -1,5 +1,6 @@
-use super::profile::{directory, profile_error, profiles, ON_PATH};
+use super::profile::{directory, profile_error};
 use super::HELPER;
+use rootbeer_core::env::{profiles, ON_PATH};
 use rootbeer_drv::STORE_ROOT;
 use rootbeer_profile::Profile;
 use rootbeer_store::{Store, ROOT};
@@ -11,14 +12,15 @@ use std::process::Command;
 use std::time::Duration;
 
 #[derive(clap::Args, Debug)]
-pub(super) struct Args {
+pub(crate) struct Args {
     /// First remove your generations older than this, such as `30d`, except
     /// each profile's current one
     #[arg(long = "older-than", value_parser = days)]
     older_than: Option<Duration>,
 }
 
-pub(super) fn run(args: &Args) -> Result<(), String> {
+pub(crate) fn run(args: &Args) -> Result<(), String> {
+    super::setup::ensure()?;
     let is_root = getuid().is_root();
     let collector = match is_root {
         true => STORE_ROOT,

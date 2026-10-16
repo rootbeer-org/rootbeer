@@ -45,9 +45,9 @@ fn zsh_config_writes_bootstrap_and_zshrc() {
 
     let zprofile = find(&writes, ".zprofile");
     assert!(zprofile.contains(". "));
-    assert!(zprofile.contains("profiles/default/current/env.sh"));
+    assert!(zprofile.contains("rootbeer/env.sh"));
     assert!(writes.iter().any(|(p, content)| {
-        p.ends_with("profiles/default/current/env.sh") && content.contains("_rootbeer_package_bin=")
+        p.ends_with("rootbeer/env.sh") && content.contains("export PATH=")
     }));
 
     let zshrc = find(&writes, ".zshrc");

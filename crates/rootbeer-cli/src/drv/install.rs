@@ -101,6 +101,7 @@ pub(super) fn install(args: &Args) -> Result<(), String> {
 }
 
 pub(super) fn open_store() -> Result<(Store, bool), String> {
+    super::setup::ensure()?;
     let is_root = rustix::process::geteuid().is_root();
     if is_root {
         fs::create_dir_all(STORE_ROOT).map_err(|error| format!("{STORE_ROOT}: {error}"))?;

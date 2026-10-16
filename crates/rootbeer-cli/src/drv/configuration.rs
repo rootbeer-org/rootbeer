@@ -1,10 +1,10 @@
 use super::cache::{self, Signed};
 use super::install::{self, Source};
 use super::profile::{
-    applications, check_apps, current, directory, is_same, link_apps, profile_error, profiles,
-    switch,
+    applications, check_apps, current, directory, is_same, link_apps, profile_error, switch,
 };
 use super::this_platform;
+use rootbeer_core::env::{profiles, DEFAULT};
 use rootbeer_core::package::PackageIntent;
 use rootbeer_core::PackageLockOptions;
 use rootbeer_drv::{output_path, Platform};
@@ -16,18 +16,26 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
-const DEFAULT: &str = "default";
-
 type Requests = BTreeMap<String, Option<String>>;
 
-/// Returns whether apps need linking once the rest of the configuration runs.
+pub(crate) struct Configured {
+    /// Whether apps need linking once the rest of the configuration runs.
+    pub(crate) should_link_apps: bool,
+    /// Entries only the old store can serve, each with why.
+    pub(crate) skipped: Vec<String>,
+}
+
+/// Installs what the signed index serves into `default` and skips the rest,
+/// which the old store keeps serving until rb can install it. A package source
+/// replaces the index for every request, so it skips them all.
 pub(crate) fn configure(
     intents: Vec<PackageIntent>,
+    has_sources: bool,
     script_dir: &Path,
     flags: &PackageLockOptions,
     source: &Source,
-) -> Result<bool, String> {
-    let requests = requests(intents)?;
+) -> Result<Configured, String> {
+    let (requests, skipped) = requests(intents, has_sources)?;
     let path = script_dir.join("rootbeer.lock");
     let existing = read(&path, flags.is_locked)?;
     let platform = this_platform()?;
@@ -51,6 +59,19 @@ pub(crate) fn configure(
             "{} is stale, so run without --locked",
             path.display()
         ));
+    }
+
+    // Nothing asked for and nothing installed before, so no directory yet.
+    let has_profile = !requests.is_empty() || fs::symlink_metadata(profiles()).is_ok();
+    if !has_profile {
+        if !flags.is_locked && path.exists() {
+            lock.write(&path).map_err(profile_error)?;
+        }
+
+        return Ok(Configured {
+            should_link_apps: false,
+            skipped,
+        });
     }
 
     let (mut store, is_root) = install::open_store()?;
@@ -98,17 +119,11 @@ pub(crate) fn configure(
         }
     }
 
-    // Nothing asked for and nothing installed before, so no directory yet.
-    let has_profile = !requests.is_empty() || fs::symlink_metadata(profiles()).is_ok();
-    let profile = match has_profile {
-        true => Some(Profile::open(&directory(true)?, DEFAULT).map_err(profile_error)?),
-        false => None,
-    };
-
-    if let (Some(profile), Some(applications)) = (&profile, applications()) {
+    let profile = Profile::open(&directory(true)?, DEFAULT).map_err(profile_error)?;
+    if let Some(applications) = applications() {
         let apps = kept.values().chain(resolved.values());
         check_apps(
-            profile,
+            &profile,
             &applications,
             apps.flat_map(|locked| locked.apps.keys()),
         )?;
@@ -144,13 +159,14 @@ pub(crate) fn configure(
         lock.write(&path).map_err(profile_error)?;
     }
 
-    let Some(profile) = profile else {
-        return Ok(false);
+    let configured = Configured {
+        should_link_apps: true,
+        skipped,
     };
 
     let current = current(&profile)?;
     if same(&current.packages, &members) {
-        return Ok(true);
+        return Ok(configured);
     }
 
     let generation = Generation {
@@ -159,7 +175,16 @@ pub(crate) fn configure(
         ..Generation::default()
     };
     switch(&profile, DEFAULT, &store, generation)?;
-    Ok(true)
+    Ok(configured)
+}
+
+/// Stops before the configuration runs when a newer rb wrote its lock, and
+/// hands the command to that rb.
+pub(crate) fn check_lock(script_dir: &Path) -> Result<(), String> {
+    match Lock::read(&script_dir.join("rootbeer.lock")) {
+        Err(error @ Error::Newer { .. }) => Err(profile_error(error)),
+        _ => Ok(()),
+    }
 }
 
 pub(crate) fn link_default_apps() -> Result<(), String> {
@@ -167,18 +192,31 @@ pub(crate) fn link_default_apps() -> Result<(), String> {
     link_apps(&profile)
 }
 
-fn requests(intents: Vec<PackageIntent>) -> Result<Requests, String> {
+fn requests(
+    intents: Vec<PackageIntent>,
+    has_sources: bool,
+) -> Result<(Requests, Vec<String>), String> {
     let mut requests = Requests::new();
+    let mut skipped = Vec::new();
     for intent in intents {
         let request = match intent {
             PackageIntent::Request(request) => request,
             PackageIntent::Locked(package) => {
-                return Err(format!(
-                    "{}@{} is an exact package spec, which --drv can't install",
+                skipped.push(format!(
+                    "{}@{} is an exact package spec, which the signed index can't serve",
                     package.name, package.version
-                ))
+                ));
+                continue;
             }
         };
+
+        if has_sources {
+            skipped.push(format!(
+                "{} comes from rb.package_repository or rb.package_catalog, which replace the signed index",
+                request.name
+            ));
+            continue;
+        }
 
         let is_indexed = request
             .resolver
@@ -189,11 +227,12 @@ fn requests(intents: Vec<PackageIntent>) -> Result<Requests, String> {
             && request.bins.is_empty();
         if !is_indexed {
             let resolver = request.resolver.map(|name| format!("{name}:"));
-            return Err(format!(
-                "{}{} doesn't come from the signed index, so --drv can't install it",
+            skipped.push(format!(
+                "{}{} doesn't come from the signed index",
                 resolver.unwrap_or_default(),
                 request.name
             ));
+            continue;
         }
 
         let asked = requests.insert(request.name.clone(), request.version.clone());
@@ -202,7 +241,7 @@ fn requests(intents: Vec<PackageIntent>) -> Result<Requests, String> {
         }
     }
 
-    Ok(requests)
+    Ok((requests, skipped))
 }
 
 fn read(path: &Path, is_locked: bool) -> Result<Option<Lock>, String> {
@@ -330,28 +369,33 @@ mod tests {
     }
 
     #[test]
-    fn only_requests_the_index_can_serve_are_accepted() {
-        let parse = |requests: &[&str]| {
-            let intents = requests
+    fn requests_the_index_can_serve_are_kept_and_the_rest_skipped() {
+        let intents = |requests: &[&str]| {
+            requests
                 .iter()
                 .map(|request| PackageIntent::Request(PackageRequest::parse(request)))
-                .collect();
-            super::requests(intents)
+                .collect::<Vec<_>>()
         };
 
-        let accepted = parse(&["jq", "fd@10.2.0", "jq"]).unwrap();
+        let mut head = PackageRequest::parse("zig");
+        head.source = Some(SourceSelection::Head);
+        let mut mixed = intents(&["jq", "fd@10.2.0", "jq", "github:owner/tool@1.0"]);
+        mixed.push(PackageIntent::Request(head));
+
+        let (accepted, skipped) = super::requests(mixed, false).unwrap();
+        assert_eq!(accepted.len(), 2);
         assert_eq!(accepted["jq"], None);
         assert_eq!(accepted["fd"].as_deref(), Some("10.2.0"));
+        assert_eq!(skipped.len(), 2);
+        assert!(skipped[0].starts_with("github:"), "{skipped:?}");
+        assert!(skipped[1].starts_with("zig "), "{skipped:?}");
 
-        let error = parse(&["jq", "jq@1.7"]).unwrap_err();
+        let (accepted, skipped) = super::requests(intents(&["jq"]), true).unwrap();
+        assert!(accepted.is_empty());
+        assert_eq!(skipped.len(), 1);
+
+        let error = super::requests(intents(&["jq", "jq@1.7"]), false).unwrap_err();
         assert_eq!(error, "jq is asked for at two versions");
-
-        let error = parse(&["github:owner/tool@1.0"]).unwrap_err();
-        assert!(error.starts_with("github:"), "{error}");
-
-        let mut source = PackageRequest::parse("jq");
-        source.source = Some(SourceSelection::Head);
-        assert!(super::requests(vec![PackageIntent::Request(source)]).is_err());
     }
 
     #[test]

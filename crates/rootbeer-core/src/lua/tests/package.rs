@@ -94,17 +94,22 @@ fn rb_package_string_pushes_request_intent_without_resolving() {
 }
 
 #[test]
-fn rb_which_returns_planned_package_bin_path() {
+fn rb_which_returns_a_locked_package_bin_path() {
     let tmp = tempfile::tempdir().unwrap();
+    let platform = format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS);
+    let lock = serde_json::json!({
+        "schema": 4,
+        "packages": { "demo": { platform: {
+            "version": "1.0.0",
+            "key": "a".repeat(32),
+            "manifest": format!("sha256:{}", "0".repeat(64)),
+            "bins": ["demo"],
+        } } },
+    });
+    std::fs::write(tmp.path().join("rootbeer.lock"), lock.to_string()).unwrap();
     let vm = vm_in(
         r#"
-        rb.package({
-          name = "demo",
-          version = "1.0.0",
-          source = { file = "demo.tar.gz", sha256 = "abc123" },
-          install = { archive = "tar.gz", strip_prefix = "demo" },
-          bins = { demo = "bin/demo" },
-        })
+        rb.package("demo")
         result = rb.which("demo")
         missing = rb.which("missing")
         "#,
@@ -114,10 +119,45 @@ fn rb_which_returns_planned_package_bin_path() {
     let result: Option<String> = vm.lua.globals().get("result").unwrap();
     let missing: Option<String> = vm.lua.globals().get("missing").unwrap();
 
-    assert!(result
-        .unwrap()
-        .ends_with("profiles/default/current/bin/demo"));
+    assert_eq!(
+        result.map(PathBuf::from),
+        Some(crate::env::bin_dir().join("demo"))
+    );
     assert_eq!(missing, None);
+}
+
+#[test]
+fn rb_which_reads_a_lock_from_before_the_signed_index() {
+    let tmp = tempfile::tempdir().unwrap();
+    let platform = format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS);
+    let lock = serde_json::json!({
+        "schema": 2,
+        "resolutions": {
+            "a": { "package": "ripgrep@15.2.0", "proof": { "system": platform } },
+            "b": { "package": "ripgrep@14.0.0", "proof": { "system": "other-os" } },
+        },
+        "packages": {
+            "ripgrep@15.2.0": { "provides": { "bins": { "rg": "bin/rg" } } },
+            "ripgrep@14.0.0": { "provides": { "bins": { "ripgrep": "bin/ripgrep" } } },
+        },
+    });
+    std::fs::write(tmp.path().join("rootbeer.lock"), lock.to_string()).unwrap();
+    let vm = vm_in(
+        r#"
+        rb.package("ripgrep")
+        rg = rb.which("rg")
+        other = rb.which("ripgrep")
+        "#,
+        tmp.path(),
+    );
+
+    let rg: Option<String> = vm.lua.globals().get("rg").unwrap();
+    let other: Option<String> = vm.lua.globals().get("other").unwrap();
+    assert_eq!(
+        rg.map(PathBuf::from),
+        Some(crate::env::bin_dir().join("rg"))
+    );
+    assert_eq!(other, None);
 }
 
 #[test]
@@ -137,10 +177,10 @@ fn rb_env_export_writes_package_env_file_and_returns_path() {
     };
 
     assert_eq!(result, path.to_string_lossy());
-    assert!(path.ends_with("profiles/default/current/env.sh"));
+    assert!(path.ends_with("rootbeer/env.sh"));
     let content = source.as_str().expect("inline package environment");
-    assert!(content.contains("_rootbeer_package_bin="));
-    assert!(content.contains("export PATH=\"$_rootbeer_package_bin:$PATH\""));
+    let bin = crate::env::bin_dir();
+    assert!(content.contains(&format!("export PATH='{}'", bin.display())));
 }
 
 #[test]
@@ -284,11 +324,11 @@ fn profile_path_helpers_work_before_any_package_is_declared() {
     );
     assert_eq!(
         PathBuf::from(vm.lua.globals().get::<String>("directory").unwrap()),
-        crate::package::profile::bin_dir()
+        crate::env::bin_dir()
     );
     assert_eq!(
         PathBuf::from(vm.lua.globals().get::<String>("path").unwrap()),
-        crate::package::profile::bin_path("fresh_bootstrap_test_command")
+        crate::env::bin_dir().join("fresh_bootstrap_test_command")
     );
     assert!(vm
         .lua
@@ -371,19 +411,16 @@ fn write_local_recipe(root: &std::path::Path) {
 }
 
 #[test]
-fn local_recipes_plan_without_resolution_and_expose_their_commands() {
+fn local_recipes_plan_without_resolution() {
     let root = tempfile::tempdir().unwrap();
     write_local_recipe(root.path());
     let vm = vm_in(
         r#"
         rb.package_catalog("packages")
         rb.packages({ "demo-alias", "registry-tool" })
-        result = rb.which("demo")
     "#,
         root.path(),
     );
-    let result: String = vm.lua.globals().get("result").unwrap();
-    assert!(result.ends_with("/bin/demo"));
     assert_eq!(vm.drain_ops().len(), 2);
     assert!(!root.path().join("rootbeer.lock").exists());
 }
@@ -396,7 +433,6 @@ fn local_catalogs_reject_late_duplicate_and_invalid_declarations() {
         "rb.package('demo'); rb.package_catalog('packages')",
         "rb.package_catalog('packages'); rb.package_catalog('packages')",
         "rb.package_catalog('missing')",
-        "rb.package_catalog('packages'); rb.package('demo@missing')",
     ] {
         let vm = super::super::test_support::vm(root.path(), None);
         assert!(vm

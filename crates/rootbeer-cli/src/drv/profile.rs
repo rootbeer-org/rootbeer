@@ -1,6 +1,7 @@
 use super::cache::{self, Signed};
 use super::install::{self, Source};
 use super::{migrate, this_platform, HELPER};
+use rootbeer_core::env::{profiles, DEFAULT, USER};
 use rootbeer_profile::{Generation, Member, Profile};
 use rootbeer_store::{Store, ROOT};
 use rustix::process::getuid;
@@ -11,13 +12,8 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-pub(super) const USER: &str = "user";
-
-/// Later ones take precedence on PATH.
-pub(super) const ON_PATH: [&str; 2] = ["default", USER];
-
 #[derive(clap::Args, Debug)]
-pub(super) struct UseArgs {
+pub(crate) struct UseArgs {
     /// Each `name` or `name@version`. A version pins the package, and
     /// otherwise it follows the platform's default
     #[arg(required_unless_present = "should_update")]
@@ -29,7 +25,7 @@ pub(super) struct UseArgs {
     source: Source,
 }
 
-pub(super) fn add(args: &UseArgs) -> Result<(), String> {
+pub(crate) fn add(args: &UseArgs) -> Result<(), String> {
     let mut requests = BTreeMap::new();
     for request in &args.packages {
         let (name, version) = install::request(request);
@@ -163,7 +159,7 @@ pub(super) fn is_same(a: &Member, b: &Member) -> bool {
     strip(a) == strip(b)
 }
 
-pub(super) fn remove(names: &[String]) -> Result<(), String> {
+pub(crate) fn remove(names: &[String]) -> Result<(), String> {
     let directory = directory(false)?;
     let profile = Profile::open(&directory, USER).map_err(profile_error)?;
     let mut generation = current(&profile)?;
@@ -179,7 +175,7 @@ pub(super) fn remove(names: &[String]) -> Result<(), String> {
     link_apps(&profile)
 }
 
-pub(super) fn rollback() -> Result<(), String> {
+pub(crate) fn rollback() -> Result<(), String> {
     let directory = directory(false)?;
     let profile = Profile::open(&directory, USER).map_err(profile_error)?;
     let number = profile.rollback().map_err(profile_error)?;
@@ -187,7 +183,7 @@ pub(super) fn rollback() -> Result<(), String> {
     link_apps(&profile)
 }
 
-pub(super) fn generations() -> Result<(), String> {
+pub(crate) fn generations() -> Result<(), String> {
     let directory = directory(false)?;
     let profile = Profile::open_shared(&directory, USER).map_err(profile_error)?;
     let current = profile.current_number().map_err(profile_error)?;
@@ -209,18 +205,56 @@ pub(super) fn generations() -> Result<(), String> {
     Ok(())
 }
 
-pub(super) fn env() -> Result<(), String> {
-    let directory = profiles();
-    for name in ON_PATH {
-        let bin = rootbeer_profile::bin(&directory, name);
-        let bin = bin
-            .to_str()
-            .ok_or_else(|| format!("{} isn't UTF-8", bin.display()))?;
-
-        println!("case \":$PATH:\" in *:{bin}:*) ;; *) export PATH=\"{bin}:$PATH\" ;; esac");
+/// Updates the rootbeer in `user`, or installs it there. A configuration that
+/// installs rootbeer updates it instead.
+pub(crate) fn self_update() -> Result<(), String> {
+    let directory = directory(true)?;
+    let user = Profile::open(&directory, USER).map_err(profile_error)?;
+    let generation = current(&user)?;
+    if !generation.packages.contains_key("rootbeer") && has_rootbeer(&directory, DEFAULT)? {
+        return Err("your configuration installs rootbeer, so run `rb apply --update`".into());
     }
 
-    Ok(())
+    let requests = BTreeMap::from([("rootbeer".to_string(), None)]);
+    let requests = planned(&generation.packages, requests, true);
+    install_requests(
+        &user,
+        generation,
+        requests,
+        &Source::default(),
+        |_, error| Err(error),
+    )
+}
+
+/// While the old profiles stay on PATH, an rb from before /opt/rb can still be
+/// the one a shell finds. Installing rootbeer into `user` shadows it, and puts
+/// `rb migrate` within reach even when a fetched rb ran this command.
+pub(crate) fn keep_rootbeer() -> Result<(), String> {
+    if !rootbeer_core::env::is_legacy_live() {
+        return Ok(());
+    }
+
+    let directory = directory(true)?;
+    if has_rootbeer(&directory, DEFAULT)? || has_rootbeer(&directory, USER)? {
+        return Ok(());
+    }
+
+    let user = Profile::open(&directory, USER).map_err(profile_error)?;
+    let generation = current(&user)?;
+    let requests = BTreeMap::from([("rootbeer".to_string(), None)]);
+    install_requests(
+        &user,
+        generation,
+        requests,
+        &Source::default(),
+        |_, error| Err(error),
+    )
+}
+
+fn has_rootbeer(directory: &Path, name: &str) -> Result<bool, String> {
+    let profile = Profile::open_shared(directory, name).map_err(profile_error)?;
+    let current = profile.current().map_err(profile_error)?;
+    Ok(current.is_some_and(|generation| generation.packages.contains_key("rootbeer")))
 }
 
 pub(super) fn switch(
@@ -309,6 +343,7 @@ pub(super) fn directory(should_create: bool) -> Result<PathBuf, String> {
                 .map_err(at)?;
         }
         Err(_) => {
+            super::setup::ensure()?;
             let status = Command::new(HELPER)
                 .arg("profile")
                 .stdout(Stdio::null())
@@ -321,12 +356,6 @@ pub(super) fn directory(should_create: bool) -> Result<PathBuf, String> {
     }
 
     Ok(directory)
-}
-
-pub(super) fn profiles() -> PathBuf {
-    Path::new(ROOT)
-        .join("profiles")
-        .join(getuid().as_raw().to_string())
 }
 
 pub(super) fn profile_error(error: rootbeer_profile::Error) -> String {

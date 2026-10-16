@@ -35,19 +35,12 @@ pub struct Args {
     /// strategies that call `ctx.cli()`.
     #[arg(short = 'p', long)]
     pub profile: Option<String>,
-
-    /// Install packages into the /opt/rb store through the signed index
-    #[arg(long = "drv", hide = true)]
-    pub is_drv: bool,
 }
 
-struct CliHandler {
-    progress: Option<crate::progress::Progress>,
-}
+struct CliHandler;
 
 impl ExecutionHandler for CliHandler {
     fn on_start(&mut self, op: &Op) {
-        self.progress.take();
         match op {
             Op::Exec { cmd, args, .. } => {
                 let display = std::iter::once(cmd.as_str())
@@ -69,12 +62,10 @@ impl ExecutionHandler for CliHandler {
     }
 
     fn on_output(&mut self, line: &str) {
-        self.progress.take();
         eprintln!("    {}", line.dimmed());
     }
 
     fn on_result(&mut self, result: &OpResult) {
-        self.progress.take();
         match result {
             OpResult::FileWritten { path, bytes } => {
                 let suffix = match bytes {
@@ -191,8 +182,12 @@ pub fn run(args: Args, lua_dir: Option<&PathBuf>) {
         opts.lua_dir = lua_dir.clone();
     }
 
-    let pipeline = rootbeer_core::Pipeline::new(opts)
-        .with_package_resolver(rootbeer_build::consumer::resolver_stack_for_inputs);
+    if let Err(e) = crate::drv::check_lock(&script_dir) {
+        eprintln!("{} error: {e}", "✗".red().bold());
+        std::process::exit(1);
+    }
+
+    let pipeline = rootbeer_core::Pipeline::new(opts);
 
     eprintln!(
         "applying ({}){}",
@@ -218,34 +213,31 @@ pub fn run(args: Args, lua_dir: Option<&PathBuf>) {
         std::process::exit(1);
     });
 
-    if args.is_drv && planned.has_package_sources() {
-        eprintln!(
-            "{} error: --drv installs only from the signed index, so it can't use rb.package_catalog or rb.package_repository",
-            "✗".red().bold()
-        );
-        std::process::exit(1);
-    }
-
     // Before the rest, so commands the configuration runs can use them.
-    let should_link_apps = args.is_drv
-        && !args.dry_run
-        && crate::drv::configure(
+    let mut should_link_apps = false;
+    if !args.dry_run {
+        let has_sources = planned.has_package_sources();
+        let configured = crate::drv::configure(
             planned.take_packages(),
+            has_sources,
             &script_dir,
             &package_lock,
             &Default::default(),
         )
+        .and_then(|configured| crate::drv::profile::keep_rootbeer().map(|()| configured))
         .unwrap_or_else(|e| {
             eprintln!("{} error: {e}", "✗".red().bold());
             std::process::exit(1);
         });
 
-    let mut handler = CliHandler {
-        progress: (!args.dry_run).then(|| crate::progress::Progress::new("resolving packages")),
-    };
+        for skipped in &configured.skipped {
+            eprintln!("warning: {skipped}, so rb skipped it");
+        }
 
-    let result = planned.execute(&mut handler);
-    handler.progress.take();
+        should_link_apps = configured.should_link_apps;
+    }
+
+    let result = planned.execute(&mut CliHandler);
 
     match result {
         Ok(report) => {
@@ -269,6 +261,7 @@ pub fn run(args: Args, lua_dir: Option<&PathBuf>) {
                 "✓".green().bold(),
                 report.results.len()
             );
+            crate::drv::migrate::hint();
         }
         Err(e) => {
             eprintln!("{} error: {e}", "✗".red().bold());

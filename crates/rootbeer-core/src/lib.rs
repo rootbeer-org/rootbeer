@@ -1,5 +1,6 @@
 pub use rootbeer_store_legacy::deterministic;
 mod age;
+pub mod env;
 mod executor;
 mod lua;
 mod one_password;

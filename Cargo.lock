@@ -2120,10 +2120,8 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "data-encoding",
- "libc",
  "owo-colors",
  "rootbeer-bootstrap",
- "rootbeer-build",
  "rootbeer-cache",
  "rootbeer-core",
  "rootbeer-drv",
@@ -2149,6 +2147,7 @@ dependencies = [
  "mlua",
  "plist",
  "rootbeer-package",
+ "rootbeer-profile",
  "rootbeer-store-legacy",
  "serde",
  "serde_json",

@@ -15,11 +15,9 @@ embedded-stdlib = ["rootbeer-core/embedded-stdlib"]
 [dependencies]
 data-encoding = "2"
 clap = { version = "4.5.60", features = ["derive", "wrap_help"] }
-libc = "0.2.182"
 owo-colors = { version = "4.3.0", features = ["supports-colors"] }
 rootbeer-core = { path = "../rootbeer-core" }
 rootbeer-bootstrap = { path = "../rootbeer-bootstrap" }
-rootbeer-build = { path = "../rootbeer-build" }
 rootbeer-drv = { path = "../rootbeer-drv" }
 rootbeer-eval = { path = "../rootbeer-eval" }
 rootbeer-sandbox = { path = "../rootbeer-sandbox" }

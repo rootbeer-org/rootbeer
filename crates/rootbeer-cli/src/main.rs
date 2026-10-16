@@ -1,17 +1,12 @@
 mod apply;
-mod bootstrap;
 mod cd;
 mod drv;
 mod edit;
-mod gc;
 mod init;
 mod newer;
 mod progress;
 mod remote;
-mod run;
-mod search;
 mod typegen;
-mod update;
 
 use std::path::PathBuf;
 
@@ -48,17 +43,26 @@ enum Commands {
     /// Show license notices for package backend libraries
     Licenses,
 
-    /// Run a package command without a configuration or permanent installation
-    Run(run::RunArgs),
+    /// Run a package's command without installing it into a profile
+    Run(drv::run::Args),
 
-    /// Search published packages in the distribution manifest
-    Search(search::Args),
+    /// Search the signed package index by name
+    Search(drv::search::Args),
 
-    /// Install packages for your user without a Lua configuration
-    Use(run::UseArgs),
+    /// Install packages into your user profile, without a Lua configuration
+    Use(drv::profile::UseArgs),
 
-    /// Remove packages from your user profile, retaining cached downloads
-    Unuse(run::UnuseArgs),
+    /// Remove packages from your user profile
+    Unuse {
+        #[arg(required = true)]
+        names: Vec<String>,
+    },
+
+    /// Switch your user profile back to its previous generation
+    Rollback,
+
+    /// List your user profile's generations, marking the current one
+    Generations,
 
     /// Create or load a rootbeer configuration in the source directory
     Init(init::Args),
@@ -72,16 +76,20 @@ enum Commands {
     /// Apply the rootbeer configuration
     Apply(apply::Args),
 
-    /// Delete store entries no profile or configuration uses
-    Gc,
+    /// Remove store outputs no generation of any profile on this machine holds
+    Gc(drv::gc::Args),
 
-    /// Print shell setup for installed packages (sh, Bash, or Zsh)
+    /// Print shell setup that puts your profiles on PATH (sh, Bash, or Zsh)
     Env,
+
+    /// Move your packages from the old /opt/rootbeer store into /opt/rb, then
+    /// release what it holds for you
+    Migrate(drv::migrate::Args),
 
     /// View or change the git remote protocol for the source directory
     Remote(remote::Args),
 
-    /// Update Rootbeer through its installation owner
+    /// Update the rootbeer in your user profile
     #[command(visible_alias = "update")]
     SelfUpdate,
 
@@ -91,40 +99,10 @@ enum Commands {
 }
 
 impl Commands {
-    fn needs_store(&self) -> bool {
-        matches!(
-            self,
-            Commands::Run(_)
-                | Commands::Use(_)
-                | Commands::Unuse(_)
-                | Commands::Apply(_)
-                | Commands::Gc
-                | Commands::SelfUpdate
-        )
-    }
-
-    /// Whether `rb` may install itself before running, which needs the network.
-    fn should_adopt(&self) -> bool {
-        match self {
-            Commands::Run(args) => !args.offline,
-            Commands::Use(args) => {
-                !args.offline && !args.packages.iter().any(|package| package == "rootbeer")
-            }
-            Commands::Apply(args) => !args.offline,
-            _ => false,
-        }
-    }
-
     /// Whether a newer rb may be fetched to run this in its place. Offline
-    /// commands can't fetch, and a fetched rb can't update the installed one.
+    /// commands can't fetch.
     fn can_relaunch(&self) -> bool {
-        match self {
-            Commands::Run(args) => !args.offline,
-            Commands::Use(args) => !args.offline,
-            Commands::Apply(args) => !args.offline,
-            Commands::SelfUpdate => false,
-            _ => true,
-        }
+        !matches!(self, Commands::Apply(args) if args.offline)
     }
 }
 
@@ -135,35 +113,60 @@ fn main() {
     if cli.command.can_relaunch() {
         newer::allow();
     }
-    if cli.command.needs_store() {
-        if let Err(error) = bootstrap::ensure() {
-            eprintln!("error: {error}");
-            std::process::exit(1);
-        }
-    }
-    if cli.command.should_adopt() {
-        bootstrap::adopt();
-    }
 
-    match cli.command {
-        Commands::Licenses => print!(
-            "lzma-rust2\n{}\nzip\n{}",
-            include_str!("../../../licenses/lzma-rust2.txt"),
-            include_str!("../../../licenses/zip.txt")
-        ),
-        Commands::Init(args) => init::run(args),
-        Commands::Run(args) => run::run(args),
-        Commands::Use(args) => run::install(args),
-        Commands::Search(args) => search::run(args),
-        Commands::Unuse(args) => run::uninstall(args),
-        Commands::Cd => cd::run(),
-        Commands::Edit => edit::run(),
-        Commands::Apply(args) => apply::run(args, cli.lua_dir.as_ref()),
-        Commands::Gc => gc::run(),
-        Commands::Env => print!("{}", rootbeer_core::package::profile::env_contents()),
-        Commands::Remote(args) => remote::run(args),
-        Commands::SelfUpdate => update::run(),
-        Commands::Drv(args) => drv::run(args),
+    let result = match cli.command {
+        Commands::Licenses => {
+            print!(
+                "lzma-rust2\n{}\nzip\n{}",
+                include_str!("../../../licenses/lzma-rust2.txt"),
+                include_str!("../../../licenses/zip.txt")
+            );
+            Ok(())
+        }
+        Commands::Init(args) => {
+            init::run(args);
+            Ok(())
+        }
+        Commands::Run(args) => drv::run::run(args),
+        Commands::Search(args) => drv::search::search(&args),
+        Commands::Use(args) => drv::profile::add(&args)
+            .and_then(|()| drv::profile::keep_rootbeer())
+            .inspect(|()| drv::migrate::hint()),
+        Commands::Unuse { names } => drv::profile::remove(&names),
+        Commands::Rollback => drv::profile::rollback(),
+        Commands::Generations => drv::profile::generations(),
+        Commands::Cd => {
+            cd::run();
+            Ok(())
+        }
+        Commands::Edit => {
+            edit::run();
+            Ok(())
+        }
+        Commands::Apply(args) => {
+            apply::run(args, cli.lua_dir.as_ref());
+            Ok(())
+        }
+        Commands::Gc(args) => drv::gc::run(&args),
+        Commands::Env => {
+            print!("{}", rootbeer_core::env::contents());
+            Ok(())
+        }
+        Commands::Migrate(args) => drv::migrate::migrate(&args),
+        Commands::Remote(args) => {
+            remote::run(args);
+            Ok(())
+        }
+        Commands::SelfUpdate => drv::profile::self_update(),
+        Commands::Drv(args) => {
+            drv::run(args);
+            Ok(())
+        }
+    };
+
+    if let Err(error) = result {
+        eprintln!("error: {error}");
+        std::process::exit(1);
     }
 }
 

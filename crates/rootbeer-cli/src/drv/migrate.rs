@@ -1,9 +1,9 @@
 use super::configuration::{configure, link_default_apps};
 use super::install::Source;
-use super::profile::{self, profile_error, USER};
+use super::profile::{self, profile_error};
+use rootbeer_core::env::{self, legacy_roots, USER};
 use rootbeer_core::{Options, PackageLockOptions, Pipeline};
 use rootbeer_profile::Profile;
-use rustix::process::getuid;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -11,10 +11,8 @@ use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 
-const LEGACY_ROOT: &str = "/opt/rootbeer";
-
 #[derive(clap::Args, Debug)]
-pub(super) struct Args {
+pub(crate) struct Args {
     /// The configuration whose packages move, instead of `init.lua` in the
     /// config directory
     #[arg(short, long)]
@@ -45,10 +43,16 @@ struct Ownership {
 /// Installs what the old store's profiles hold into /opt/rb, then releases the
 /// old store's roots. Anything that can't move keeps every root, so the old
 /// binaries keep working until a rerun moves it.
-pub(super) fn migrate(args: &Args) -> Result<(), String> {
+pub(crate) fn migrate(args: &Args) -> Result<(), String> {
+    if !env::is_legacy_live() {
+        eprintln!("the old store holds nothing for you");
+        return Ok(());
+    }
+
     let mut stuck = Vec::new();
-    if let Err(error) = configuration(args) {
-        stuck.push(format!("the configuration's packages: {error}"));
+    match configuration(args) {
+        Ok(skipped) => stuck.extend(skipped),
+        Err(error) => stuck.push(format!("the configuration's packages: {error}")),
     }
 
     let requests = legacy_requests(&mut stuck)?;
@@ -65,6 +69,11 @@ pub(super) fn migrate(args: &Args) -> Result<(), String> {
         }
     }
 
+    // The old profiles are about to leave PATH, and the rb they had with them.
+    if let Err(error) = profile::keep_rootbeer() {
+        stuck.push(format!("rootbeer: {error}"));
+    }
+
     if !stuck.is_empty() {
         for problem in &stuck {
             eprintln!("  {problem}");
@@ -75,14 +84,35 @@ pub(super) fn migrate(args: &Args) -> Result<(), String> {
         );
     }
 
+    // The old profiles leave PATH first, since releasing the roots lets the old
+    // store collect what they link.
+    relink_legacy_user()?;
+    rewrite_env_files()?;
     release_roots()?;
+    write(&env::migrated_path(), b"")?;
     eprintln!("everything moved, so the old store no longer holds anything for you");
     Ok(())
 }
 
-/// Runs only the package step of `rb apply --drv`, which also moves
-/// `rootbeer.lock` to the schema that step writes.
-fn configuration(args: &Args) -> Result<(), String> {
+/// Printed while the old store may still hold something for the caller. It
+/// names the new profiles' rb, since an older one may come first on PATH.
+pub(crate) fn hint() {
+    if !env::is_legacy_live() {
+        return;
+    }
+
+    let profiles = env::profiles();
+    let rb = [USER, env::DEFAULT]
+        .map(|name| rootbeer_profile::bin(&profiles, name).join("rb"))
+        .into_iter()
+        .find(|rb| rb.exists());
+    let rb = rb.map_or("rb".into(), |rb| rb.display().to_string());
+    eprintln!("/opt/rootbeer still holds packages for you, so run `{rb} migrate` to move them");
+}
+
+/// Runs only the package step of `rb apply`, which also moves
+/// `rootbeer.lock` to the schema that step writes. Returns what it skipped.
+fn configuration(args: &Args) -> Result<Vec<String>, String> {
     let script = args
         .script
         .clone()
@@ -93,7 +123,7 @@ fn configuration(args: &Args) -> Result<(), String> {
                 "`rb apply` ran a configuration that isn't at {}, so pass it with --script",
                 script.display()
             )),
-            false => Ok(()),
+            false => Ok(Vec::new()),
         };
     }
 
@@ -102,27 +132,24 @@ fn configuration(args: &Args) -> Result<(), String> {
     options.profile = args.profile.clone();
     let script_dir = options.script_dir.clone();
 
+    super::check_lock(&script_dir)?;
     let mut planned = Pipeline::new(options)
         .plan()
         .map_err(|error| error.to_string())?;
-    if planned.has_package_sources() {
-        return Err(
-            "it uses rb.package_catalog or rb.package_repository, which the signed index can't serve"
-                .into(),
-        );
-    }
 
-    let packages = planned.take_packages();
-    if configure(
-        packages,
+    let has_sources = planned.has_package_sources();
+    let configured = configure(
+        planned.take_packages(),
+        has_sources,
         &script_dir,
         &PackageLockOptions::default(),
         &args.source,
-    )? {
+    )?;
+    if configured.should_link_apps {
         link_default_apps()?;
     }
 
-    Ok(())
+    Ok(configured.skipped)
 }
 
 /// What `rb use` asked for in the old `user` profile. A request the signed
@@ -215,10 +242,14 @@ fn release<'a>(
     }
 
     let bytes = serde_json::to_vec(&ownership).map_err(|error| error.to_string())?;
+    write(path, &bytes)
+}
+
+fn write(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
     let at = |error: io::Error| format!("{}: {error}", tmp.display());
     let mut file = File::create(&tmp).map_err(at)?;
-    file.write_all(&bytes).map_err(at)?;
+    file.write_all(bytes).map_err(at)?;
     file.sync_all().map_err(at)?;
     fs::rename(&tmp, path).map_err(|error| format!("{}: {error}", path.display()))
 }
@@ -271,11 +302,38 @@ fn release_roots() -> Result<(), String> {
     Ok(())
 }
 
-fn legacy_roots() -> PathBuf {
-    std::env::var_os("ROOTBEER_ROOT")
-        .map_or(PathBuf::from(LEGACY_ROOT), PathBuf::from)
-        .join("var/roots")
-        .join(getuid().as_raw().to_string())
+/// Shell profiles from before /opt/rb run `rb env` through the old `user`
+/// profile, and old `rb.sh` installs link `~/.rootbeer/bin` into it, so its
+/// path now leads to the new `user` profile.
+fn relink_legacy_user() -> Result<(), String> {
+    let link = rootbeer_core::state_dir().join("profiles/user/current");
+    if !fs::symlink_metadata(&link).is_ok_and(|metadata| metadata.is_symlink()) {
+        return Ok(());
+    }
+
+    let staged = link.with_file_name(".current.link");
+    let at = |path: &Path, error: io::Error| format!("{}: {error}", path.display());
+    match fs::remove_file(&staged) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(at(&staged, error)),
+        _ => {}
+    }
+
+    let user = env::profiles().join(USER);
+    std::os::unix::fs::symlink(&user, &staged).map_err(|error| at(&staged, error))?;
+    fs::rename(&staged, &link).map_err(|error| at(&link, error))
+}
+
+/// Points `env.sh` files that shells or older configurations source at the
+/// new profiles, now that the old ones may lose what they link.
+fn rewrite_env_files() -> Result<(), String> {
+    let contents = env::migrated_contents();
+    for path in [env::path(), env::legacy_env_path()] {
+        if path.is_file() {
+            write(&path, contents.as_bytes())?;
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

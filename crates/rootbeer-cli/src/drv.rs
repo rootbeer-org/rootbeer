@@ -1,14 +1,17 @@
 mod artifact;
 mod cache;
 mod configuration;
-mod gc;
+pub(crate) mod gc;
 mod index;
 mod install;
-mod migrate;
+pub(crate) mod migrate;
 mod plan;
-mod profile;
+pub(crate) mod profile;
+pub(crate) mod run;
+pub(crate) mod search;
+pub(crate) mod setup;
 
-pub(crate) use configuration::{configure, link_default_apps};
+pub(crate) use configuration::{check_lock, configure, link_default_apps};
 
 use rootbeer_cache::Cache;
 use rootbeer_drv::{
@@ -85,25 +88,6 @@ enum Command {
     },
     /// Install a package from the signed index, after what it references
     Install(install::Args),
-    /// Install packages from the signed index into a new generation of your
-    /// profile
-    Use(profile::UseArgs),
-    /// Make a new generation of your profile without these packages
-    Unuse {
-        #[arg(required = true)]
-        names: Vec<String>,
-    },
-    /// Switch your profile back to its previous generation
-    Rollback,
-    /// List your profile's generations, marking the current one
-    Generations,
-    /// Print shell code that puts your profiles on PATH
-    Env,
-    /// Move your packages from the old /opt/rootbeer store's profiles into
-    /// /opt/rb, then release what it holds for you
-    Migrate(migrate::Args),
-    /// Remove store outputs no generation of any profile on this machine holds
-    Gc(gc::Args),
     /// Print, as JSON levels, the packages CI must build because no cache has them
     Plan {
         /// Each `name` or `name@version`. A name without a default version on
@@ -205,13 +189,6 @@ pub fn run(args: Args) {
             entries,
         } => index::sign(&repository, &key, entries.as_deref()),
         Command::Install(args) => install::install(&args),
-        Command::Use(args) => profile::add(&args),
-        Command::Unuse { names } => profile::remove(&names),
-        Command::Rollback => profile::rollback(),
-        Command::Generations => profile::generations(),
-        Command::Env => profile::env(),
-        Command::Migrate(args) => migrate::migrate(&args),
-        Command::Gc(args) => gc::run(&args),
     };
 
     if let Err(error) = result {
@@ -256,6 +233,7 @@ fn build(
         .get(&target)
         .ok_or_else(|| format!("{target} did not evaluate"))?;
 
+    setup::ensure()?;
     let root = Path::new(ROOT);
     let logs = root.join("var/log");
     let is_root = rustix::process::geteuid().is_root();

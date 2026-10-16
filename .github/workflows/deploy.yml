@@ -146,10 +146,10 @@ jobs:
           sudo "$(command -v rb-helper)" setup "$(id -gn)"
           output=$(rb drv install rootbeer)
           mkdir release
-          cp "$output/bin/rb" "$output/bin/rb-store" release/
+          cp "$output/bin/rb" "$output/bin/rb-helper" release/
           echo "${output##*-rootbeer-}" > release/version
 
-          if grep -Eqa '/opt/rb/store/[0-9a-z]{32}-' release/rb release/rb-store; then
+          if grep -Eqa '/opt/rb/store/[0-9a-z]{32}-' release/rb release/rb-helper; then
             echo "::error::$output references the store"
             exit 1
           fi
@@ -257,8 +257,8 @@ jobs:
           trap 'rm -f "$key"' EXIT
           printf '%s\n' "$RB_BOOTSTRAP_KEY" > "$key"
           for platform in x86_64-linux aarch64-linux aarch64-macos; do
-            chmod +x "artifacts/release-$platform/rb" "artifacts/release-$platform/rb-store"
-            tar -czf "$RUNNER_TEMP/$platform.tar.gz" -C "artifacts/release-$platform" rb rb-store
+            chmod +x "artifacts/release-$platform/rb" "artifacts/release-$platform/rb-helper"
+            tar -czf "$RUNNER_TEMP/$platform.tar.gz" -C "artifacts/release-$platform" rb rb-helper
             scripts/bootstrap-sign.sh "$key" bootstrap "$platform" "$RB_SERIAL" \
               "$VERSION" "$REVISION" "$RUNNER_TEMP/$platform.tar.gz"
           done
@@ -414,7 +414,12 @@ jobs:
             sleep 30
           done
 
-          echo '{"version":99}' > "$work/root/layout.json"
+          # Every rb since the bootstrap channel relaunches on a lock schema it
+          # doesn't know. ROOTBEER_ROOT keeps the old store, which an rb from
+          # before /opt/rb sets up first, inside $work.
+          mkdir -p "$work/home/config/rootbeer"
+          : > "$work/home/config/rootbeer/init.lua"
+          echo '{"schema":99,"packages":{}}' > "$work/home/config/rootbeer/rootbeer.lock"
           relaunched="so running rb $VERSION instead"
           for attempt in 1 2 3 4 5; do
             output=$(HOME="$work/home" XDG_CONFIG_HOME="$work/home/config" \

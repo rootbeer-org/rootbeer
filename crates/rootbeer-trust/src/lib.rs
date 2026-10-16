@@ -125,6 +125,20 @@ impl Index {
         })
     }
 
+    /// Every package the signed targets list, sorted.
+    pub fn names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .repository
+            .all_targets()
+            .filter_map(|(target, _)| target.raw().strip_suffix(".json"))
+            .filter(|name| is_package_name(name))
+            .map(str::to_string)
+            .collect();
+
+        names.sort();
+        names
+    }
+
     pub fn package(&self, name: &str) -> Result<Option<Package>, Error> {
         outside_runtime()?;
         if !is_package_name(name) {
