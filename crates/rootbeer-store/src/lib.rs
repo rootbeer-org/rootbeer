@@ -6,9 +6,11 @@ mod add;
 mod archive;
 mod db;
 mod gc;
+mod layout;
 
 pub use archive::pack;
 use archive::{seal, unpack};
+pub use layout::{HELPER_VERSION, LAYOUT, Layout};
 use rootbeer_drv::Key;
 use rusqlite::Connection;
 use std::collections::BTreeSet;

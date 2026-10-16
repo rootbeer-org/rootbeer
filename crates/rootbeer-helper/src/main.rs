@@ -3,7 +3,7 @@
 //! garbage collection operations. It's pretty much a root helper.
 
 use rootbeer_drv::Key;
-use rootbeer_store::{ROOT, Store};
+use rootbeer_store::{Layout, ROOT, Store};
 use rustix::fs::{Access, Mode, OFlags};
 use rustix::process::{getgid, getuid};
 use std::collections::BTreeSet;
@@ -234,6 +234,7 @@ fn setup(root: &Path, group: &str) -> Result<String, String> {
     };
 
     install().map_err(|error| format!("{}: {error}", helper.display()))?;
+    Layout::write(root).map_err(|error| error.to_string())?;
     Ok(format!(
         "installed {}; members of {group} may add to the store",
         helper.display()
