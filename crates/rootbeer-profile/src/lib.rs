@@ -19,7 +19,7 @@ mod roots;
 mod tests;
 
 pub use lock::{LOCK_SCHEMA, Lock, Locked};
-pub use roots::roots;
+pub use roots::{hold_while_running, roots};
 
 pub const SCHEMA: u32 = 1;
 pub(crate) const RECORD: &str = "generation.json";

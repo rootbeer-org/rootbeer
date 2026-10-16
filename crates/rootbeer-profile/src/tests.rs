@@ -592,6 +592,28 @@ fn roots_are_every_generation_of_every_profile_and_never_through_a_link() {
 }
 
 #[test]
+fn a_running_command_holds_its_keys_until_it_exits() {
+    let fixture = fixture();
+    let root = fixture.profiles.parent().unwrap();
+    let mut exited = std::process::Command::new("true").spawn().unwrap();
+    exited.wait().unwrap();
+    let running = fixture.profiles.join(".running");
+    fs::create_dir(&running).unwrap();
+    fs::write(
+        running.join(exited.id().to_string()),
+        format!("{}\n", key('b')),
+    )
+    .unwrap();
+
+    crate::hold_while_running(&fixture.profiles, &[key('a')].into()).unwrap();
+    assert_eq!(crate::roots(root).unwrap(), [key('a')].into());
+    assert!(!running.join(exited.id().to_string()).exists());
+
+    fs::write(running.join(std::process::id().to_string()), "not a key\n").unwrap();
+    assert!(crate::roots(root).is_err());
+}
+
+#[test]
 fn pruning_keeps_the_current_generation_and_recent_ones() {
     let fixture = fixture();
     let store = locate(&fixture.store);
