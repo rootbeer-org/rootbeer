@@ -1,5 +1,6 @@
 use super::configuration::{configure, link_default_apps};
-use super::install::Source;
+use super::github;
+use super::install::{self, Source, Wanted};
 use super::profile::{self, profile_error};
 use rootbeer_core::env::{self, legacy_roots, USER};
 use rootbeer_core::{Options, PackageLockOptions, Pipeline};
@@ -31,6 +32,8 @@ struct LegacyRequest {
     resolver: Option<String>,
     source: Option<Value>,
     asset: Option<String>,
+    #[serde(default)]
+    bins: BTreeMap<String, String>,
 }
 
 #[derive(Default, Deserialize, Serialize)]
@@ -152,9 +155,9 @@ fn configuration(args: &Args) -> Result<Vec<String>, String> {
     Ok(configured.skipped)
 }
 
-/// What `rb use` asked for in the old `user` profile. A request the signed
-/// index can't serve, like a GitHub release or a branch, goes to `stuck`.
-fn legacy_requests(stuck: &mut Vec<String>) -> Result<BTreeMap<String, Option<String>>, String> {
+/// What `rb use` asked for in the old `user` profile. A request rb can't
+/// serve, like a branch, goes to `stuck`.
+fn legacy_requests(stuck: &mut Vec<String>) -> Result<BTreeMap<String, Wanted>, String> {
     let path = rootbeer_core::state_dir().join("profiles/user/current/requests.json");
     let bytes = match fs::read(&path) {
         Ok(bytes) => bytes,
@@ -170,25 +173,33 @@ fn legacy_requests(stuck: &mut Vec<String>) -> Result<BTreeMap<String, Option<St
 fn servable(
     requests: impl IntoIterator<Item = LegacyRequest>,
     stuck: &mut Vec<String>,
-) -> BTreeMap<String, Option<String>> {
+) -> BTreeMap<String, Wanted> {
     let mut servable = BTreeMap::new();
     for request in requests {
-        let is_catalog = request
-            .resolver
-            .as_deref()
-            .is_none_or(|resolver| resolver == "rootbeer");
-        if !is_catalog || request.source.is_some() || request.asset.is_some() {
-            stuck.push(format!(
-                "{}: the signed index only has catalog releases",
-                request.name
-            ));
-            continue;
-        }
+        let wanted = match (request.resolver.as_deref(), &request.source) {
+            (None | Some("rootbeer"), None) if request.asset.is_none() => {
+                Ok((request.name.clone(), Wanted::Index(request.version)))
+            }
+            (Some("github"), None) => github(&request),
+            _ => Err("rb installs only index packages and GitHub releases".to_string()),
+        };
 
-        servable.insert(request.name, request.version);
+        match wanted {
+            Ok((name, wanted)) => {
+                servable.insert(name, wanted);
+            }
+            Err(error) => stuck.push(format!("{}: {error}", request.name)),
+        }
     }
 
     servable
+}
+
+fn github(request: &LegacyRequest) -> Result<(String, Wanted), String> {
+    let mut release = github::Request::new(&request.name, request.version.clone())?;
+    release.asset.clone_from(&request.asset);
+    release.paths.clone_from(&request.bins);
+    Ok((install::named(&request.name)?, Wanted::Release(release)))
 }
 
 /// The old store's app links in `applications` that still point where its
@@ -347,11 +358,12 @@ mod tests {
             resolver: resolver.map(str::to_string),
             source: None,
             asset: None,
+            bins: BTreeMap::new(),
         }
     }
 
     #[test]
-    fn only_catalog_requests_are_servable() {
+    fn index_packages_and_releases_are_servable() {
         let mut stuck = Vec::new();
         let mut branch = request("zig", Some("branch:master"), None);
         branch.source = Some(Value::String("Head".into()));
@@ -359,20 +371,23 @@ mod tests {
             [
                 request("jq", None, None),
                 request("fd", Some("10.2.0"), Some("rootbeer")),
+                request("cli/cli", Some("v2.80.0"), Some("github")),
                 request("cli", None, Some("github")),
                 branch,
             ],
             &mut stuck,
         );
 
+        let release = github::Request::new("cli/cli", Some("v2.80.0".into())).unwrap();
         assert_eq!(
             servable,
             BTreeMap::from([
-                ("fd".to_string(), Some("10.2.0".to_string())),
-                ("jq".to_string(), None),
+                ("cli".to_string(), Wanted::Release(release)),
+                ("fd".to_string(), Wanted::Index(Some("10.2.0".to_string()))),
+                ("jq".to_string(), Wanted::Index(None)),
             ])
         );
-        assert_eq!(stuck.len(), 2);
+        assert_eq!(stuck.len(), 2, "{stuck:?}");
     }
 
     #[test]

@@ -2,6 +2,7 @@ mod artifact;
 mod cache;
 mod configuration;
 pub(crate) mod gc;
+mod github;
 mod index;
 mod install;
 pub(crate) mod migrate;

@@ -1,4 +1,4 @@
-use crate::{Error, io_at, validate_exports};
+use crate::{Error, Release, io_at, validate_exports, validate_source};
 use rootbeer_drv::{Key, is_package_name};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -7,7 +7,9 @@ use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::Path;
 
-pub const LOCK_SCHEMA: u32 = 4;
+/// Locks from schema 4 hold only index entries, so this rb reads them.
+pub const LOCK_SCHEMA: u32 = 5;
+const OLDEST_LOCK_SCHEMA: u32 = 4;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Lock {
@@ -19,7 +21,11 @@ pub struct Lock {
 pub struct Locked {
     pub version: String,
     pub key: Key,
-    pub manifest: String,
+    /// The signed index's manifest digest, for an entry from the index.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release: Option<Release>,
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub bins: BTreeSet<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -62,7 +68,7 @@ impl Lock {
             });
         }
 
-        if schema < LOCK_SCHEMA {
+        if schema < OLDEST_LOCK_SCHEMA {
             return Err(Error::Older {
                 path: path.to_path_buf(),
                 schema,
@@ -79,11 +85,16 @@ impl Lock {
             }
 
             for locked in platforms.values() {
-                validate_exports(name, &locked.bins, &locked.apps).map_err(|reason| {
-                    Error::Invalid {
-                        path: path.to_path_buf(),
-                        reason,
-                    }
+                validate_source(
+                    name,
+                    locked.manifest.as_ref(),
+                    locked.release.as_ref(),
+                    &locked.bins,
+                )
+                .and_then(|()| validate_exports(name, &locked.bins, &locked.apps))
+                .map_err(|reason| Error::Invalid {
+                    path: path.to_path_buf(),
+                    reason,
                 })?;
             }
         }

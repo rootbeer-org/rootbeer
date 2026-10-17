@@ -2,7 +2,7 @@
 //! a symlink to its current generation and each generation is a directory with
 //! symlinks into the store and a recorded manifest.
 
-use rootbeer_drv::{Key, is_app_name, is_file_name, is_inside, is_package_name};
+use rootbeer_drv::{Format, Key, Sha256, is_app_name, is_file_name, is_inside, is_package_name};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -21,7 +21,9 @@ mod tests;
 pub use lock::{LOCK_SCHEMA, Lock, Locked};
 pub use roots::{hold_while_running, roots};
 
-pub const SCHEMA: u32 = 1;
+/// Generations from schema 1 hold only index members, so this rb reads them.
+pub const SCHEMA: u32 = 2;
+const OLDEST_SCHEMA: u32 = 1;
 pub(crate) const RECORD: &str = "generation.json";
 const APPLICATIONS: &str = "Applications";
 
@@ -45,13 +47,50 @@ pub struct Member {
     #[serde(rename = "pinned")]
     pub is_pinned: bool,
     pub key: Key,
-    pub manifest: String,
+    /// The signed index's manifest digest, for a member from the index.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release: Option<Release>,
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub bins: BTreeSet<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub apps: BTreeMap<String, String>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
+}
+
+/// A GitHub release asset unpacked into the store, with what it takes to
+/// fetch and unpack it again. `paths` maps each bin to its file in the output.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Release {
+    pub repository: String,
+    pub asset: String,
+    pub url: String,
+    pub sha256: Sha256,
+    pub format: Format,
+    pub paths: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub libc: Option<Libc>,
+    /// The request named the asset, so an update asks for it again.
+    #[serde(default, rename = "keep_asset", skip_serializing_if = "is_false")]
+    pub should_keep_asset: bool,
+    /// The request named the bins, so an update asks for them again.
+    #[serde(default, rename = "keep_paths", skip_serializing_if = "is_false")]
+    pub should_keep_paths: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
+}
+
+/// The C library a Linux asset says it was built against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Libc {
+    Gnu,
+    Musl,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -74,6 +113,35 @@ pub enum Error {
     Newer { path: PathBuf, schema: u32 },
     Older { path: PathBuf, schema: u32 },
     Refused(String),
+}
+
+/// Whether `repository` is a GitHub `owner/repo`.
+pub fn is_repository(repository: &str) -> bool {
+    let is_part = |part: &str| {
+        !matches!(part, "" | "." | "..")
+            && part
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
+    };
+
+    repository
+        .split_once('/')
+        .is_some_and(|(owner, repo)| is_part(owner) && is_part(repo))
+}
+
+/// The package name a GitHub repository installs under. It's the repo name in
+/// lowercase, with `.` and `_` as `-`.
+pub fn release_name(repository: &str) -> Option<String> {
+    let (_, repo) = repository.split_once('/')?;
+    let name = repo
+        .chars()
+        .map(|c| match c {
+            '.' | '_' => '-',
+            c => c.to_ascii_lowercase(),
+        })
+        .collect::<String>();
+
+    is_package_name(&name).then_some(name)
 }
 
 pub fn bin(directory: &Path, name: &str) -> PathBuf {
@@ -507,7 +575,7 @@ fn parse(path: &Path, bytes: &[u8], number: u64) -> Result<Generation, Error> {
         });
     }
 
-    if schema != SCHEMA {
+    if schema < OLDEST_SCHEMA {
         return Err(Error::Invalid {
             path: path.to_path_buf(),
             reason: format!("no rb writes schema {schema}"),
@@ -534,7 +602,45 @@ fn validate(name: &str, member: &Member) -> Result<(), String> {
         return Err(format!("{name:?} isn't a package name"));
     }
 
+    validate_source(
+        name,
+        member.manifest.as_ref(),
+        member.release.as_ref(),
+        &member.bins,
+    )?;
     validate_exports(name, &member.bins, &member.apps)
+}
+
+/// Every package comes from exactly one place. A release links what its
+/// paths name and nothing else.
+pub(crate) fn validate_source(
+    name: &str,
+    manifest: Option<&String>,
+    release: Option<&Release>,
+    bins: &BTreeSet<String>,
+) -> Result<(), String> {
+    let release = match (manifest, release) {
+        (Some(_), None) => return Ok(()),
+        (None, Some(release)) => release,
+        (Some(_), Some(_)) => return Err(format!("{name} has both a manifest and a release")),
+        (None, None) => return Err(format!("{name} has neither a manifest nor a release")),
+    };
+
+    if !is_repository(&release.repository) {
+        return Err(format!(
+            "{name} comes from {:?}, which isn't owner/repo",
+            release.repository
+        ));
+    }
+
+    if !release.paths.keys().eq(bins.iter()) {
+        return Err(format!("{name} links bins its release doesn't name"));
+    }
+
+    match release.paths.values().find(|path| !is_inside(path)) {
+        Some(path) => Err(format!("{name} has a bin at {path:?} outside its output")),
+        None => Ok(()),
+    }
 }
 
 pub(crate) fn validate_exports(

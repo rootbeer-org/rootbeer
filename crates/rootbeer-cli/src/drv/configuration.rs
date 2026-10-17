@@ -1,5 +1,6 @@
 use super::cache::{self, Signed};
-use super::install::{self, Source};
+use super::github;
+use super::install::{self, Source, Wanted};
 use super::profile::{
     applications, check_apps, current, directory, is_same, link_apps, profile_error, switch,
 };
@@ -8,15 +9,15 @@ use rootbeer_core::env::{profiles, DEFAULT};
 use rootbeer_core::package::PackageIntent;
 use rootbeer_core::PackageLockOptions;
 use rootbeer_drv::{output_path, Platform};
-use rootbeer_profile::{Error, Generation, Lock, Locked, Member, Profile};
+use rootbeer_profile::{Error, Generation, Lock, Locked, Member, Profile, Release};
 use rootbeer_store::Store;
 use rootbeer_trust::Package;
 use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-type Requests = BTreeMap<String, Option<String>>;
+type Requests = BTreeMap<String, Wanted>;
 
 pub(crate) struct Configured {
     /// Whether apps need linking once the rest of the configuration runs.
@@ -25,9 +26,10 @@ pub(crate) struct Configured {
     pub(crate) skipped: Vec<String>,
 }
 
-/// Installs what the signed index serves into `default` and skips the rest,
-/// which the old store keeps serving until rb can install it. A package source
-/// replaces the index for every request, so it skips them all.
+/// Installs what the signed index and GitHub releases serve into `default`
+/// and skips the rest, which the old store keeps serving until rb can install
+/// it. A package source replaces the index for every request, so it skips
+/// them all.
 pub(crate) fn configure(
     intents: Vec<PackageIntent>,
     has_sources: bool,
@@ -49,7 +51,8 @@ pub(crate) fn configure(
             path.display()
         ),
         Stale::Moved(package, version) => format!(
-            "{package} is locked at {version} in {}, so run without --locked",
+            "{package}@{version} in {} no longer answers what's asked for, so run without \
+             --locked",
             path.display()
         ),
     })?;
@@ -95,26 +98,50 @@ pub(crate) fn configure(
     });
 
     let mut resolved = BTreeMap::new();
-    for (package, version) in &requests {
+    for (package, wanted) in &requests {
         if kept.contains_key(package) {
             continue;
         }
 
-        let entry = signed.package(package)?;
-        let (version, output) = install::select(entry, version.as_deref(), platform)?;
-        let locked = Locked {
-            version,
-            key: output.key.clone(),
-            manifest: output.manifest.clone(),
-            bins: output.bins.clone(),
-            apps: output.apps.clone(),
-            extra: BTreeMap::new(),
+        let locked = match wanted {
+            Wanted::Index(version) => {
+                let entry = signed.package(package)?;
+                let (version, output) = install::select(entry, version.as_deref(), platform)?;
+                Locked {
+                    version,
+                    key: output.key.clone(),
+                    manifest: Some(output.manifest.clone()),
+                    release: None,
+                    bins: output.bins.clone(),
+                    apps: output.apps.clone(),
+                    extra: BTreeMap::new(),
+                }
+            }
+            Wanted::Release(_) if flags.is_offline => {
+                return Err(format!(
+                    "{package} needs GitHub's release API, which --offline doesn't allow"
+                ));
+            }
+            Wanted::Release(request) => {
+                let previous = existing_release(&lock, package, &name);
+                let resolved =
+                    github::resolve(&mut store, is_root, package, request, platform, previous)?;
+                Locked {
+                    version: resolved.version,
+                    key: resolved.key,
+                    manifest: None,
+                    bins: resolved.release.paths.keys().cloned().collect(),
+                    release: Some(resolved.release),
+                    apps: BTreeMap::new(),
+                    extra: BTreeMap::new(),
+                }
+            }
         };
         resolved.insert(package.clone(), locked);
     }
 
     if is_index_open.get() {
-        for (package, locked) in &kept {
+        for (package, locked) in kept.iter().filter(|(_, locked)| locked.release.is_none()) {
             verify(signed.package(package)?, locked, platform)?;
         }
     }
@@ -131,21 +158,42 @@ pub(crate) fn configure(
 
     let mut members = BTreeMap::new();
     for (package, locked) in kept.into_iter().chain(resolved) {
-        cache::install_into(
-            &cache,
-            &mut store,
-            is_root,
-            &package,
-            &locked.key,
-            Some(&mut signed),
-        )?;
+        match &locked.release {
+            Some(release) => {
+                let key = github::install(
+                    &mut store,
+                    is_root,
+                    &package,
+                    &locked.version,
+                    release,
+                    platform,
+                    flags.is_offline,
+                )?;
+                if key != locked.key {
+                    return Err(format!(
+                        "{package} unpacks to {key}, not {} as {} says",
+                        locked.key,
+                        path.display()
+                    ));
+                }
+            }
+            None => cache::install_into(
+                &cache,
+                &mut store,
+                is_root,
+                &package,
+                &locked.key,
+                Some(&mut signed),
+            )?,
+        }
         installed(&store, &package, &locked)?;
 
         let member = Member {
             version: locked.version.clone(),
-            is_pinned: requests[&package].is_some(),
+            is_pinned: requests.get(&package).and_then(Wanted::version).is_some(),
             key: locked.key.clone(),
             manifest: locked.manifest.clone(),
+            release: locked.release.clone(),
             bins: locked.bins.clone(),
             apps: locked.apps.clone(),
             extra: BTreeMap::new(),
@@ -176,6 +224,10 @@ pub(crate) fn configure(
     };
     switch(&profile, DEFAULT, &store, generation)?;
     Ok(configured)
+}
+
+fn existing_release<'a>(lock: &'a Lock, package: &str, platform: &str) -> Option<&'a Release> {
+    lock.get(package, platform)?.release.as_ref()
 }
 
 /// Stops before the configuration runs when a newer rb wrote its lock, and
@@ -218,30 +270,50 @@ fn requests(
             continue;
         }
 
-        let is_indexed = request
-            .resolver
-            .as_deref()
-            .is_none_or(|name| name == "rootbeer")
-            && request.source.is_none()
-            && request.asset.is_none()
-            && request.bins.is_empty();
-        if !is_indexed {
-            let resolver = request.resolver.map(|name| format!("{name}:"));
-            skipped.push(format!(
-                "{}{} doesn't come from the signed index",
-                resolver.unwrap_or_default(),
-                request.name
-            ));
-            continue;
-        }
+        let (name, wanted) = match (request.resolver.as_deref(), &request.source) {
+            (None | Some("rootbeer"), None) => {
+                (request.name.clone(), Wanted::Index(request.version.clone()))
+            }
+            (Some("github"), None) => {
+                let mut release = github::Request::new(&request.name, request.version.clone())?;
+                release.asset = request.asset.clone();
+                release.paths = paths(&request.bins)?;
+                (install::named(&request.name)?, Wanted::Release(release))
+            }
+            (resolver, _) => {
+                let resolver = resolver.map(|name| format!("{name}:"));
+                skipped.push(format!(
+                    "{}{} doesn't come from the signed index or a GitHub release",
+                    resolver.unwrap_or_default(),
+                    request.name
+                ));
+                continue;
+            }
+        };
 
-        let asked = requests.insert(request.name.clone(), request.version.clone());
-        if asked.is_some_and(|asked| asked != request.version) {
-            return Err(format!("{} is asked for at two versions", request.name));
+        let Some(asked) = requests.insert(name.clone(), wanted.clone()) else {
+            continue;
+        };
+
+        if asked != wanted {
+            let reason = match (&asked, &wanted) {
+                (Wanted::Index(_), Wanted::Index(_)) => "at two versions",
+                _ => "from two places",
+            };
+            return Err(format!("{name} is asked for {reason}"));
         }
     }
 
     Ok((requests, skipped))
+}
+
+fn paths(bins: &BTreeMap<String, PathBuf>) -> Result<BTreeMap<String, String>, String> {
+    bins.iter()
+        .map(|(bin, path)| match path.to_str() {
+            Some(path) => Ok((bin.clone(), path.to_string())),
+            None => Err(format!("{bin}'s path {} isn't UTF-8", path.display())),
+        })
+        .collect()
 }
 
 fn read(path: &Path, is_locked: bool) -> Result<Option<Lock>, String> {
@@ -273,13 +345,10 @@ fn reconcile(
     flags: &PackageLockOptions,
 ) -> Result<BTreeMap<String, Locked>, Stale> {
     let mut kept = BTreeMap::new();
-    for (package, version) in requests {
+    for (package, wanted) in requests {
         let locked = lock.get(package, platform);
         let is_kept = locked.is_some_and(|locked| {
-            !flags.should_update
-                && version
-                    .as_ref()
-                    .is_none_or(|version| locked.version == *version)
+            !flags.should_update && wanted.is_answered_by(&locked.version, locked.release.as_ref())
         });
 
         if let Some(locked) = locked.filter(|_| is_kept) {
@@ -304,13 +373,14 @@ fn reconcile(
 /// manifest is still signed.
 fn verify(package: &Package, locked: &Locked, platform: Platform) -> Result<(), String> {
     let outputs = package.versions.get(&locked.version);
+    let manifest = locked.manifest.as_ref();
     let is_signed = match outputs.and_then(|outputs| outputs.get(&platform)) {
         Some(output) if output.key == locked.key => {
-            output.manifest == locked.manifest
+            Some(&output.manifest) == manifest
                 && output.bins == locked.bins
                 && output.apps == locked.apps
         }
-        _ => package.retired.get(&locked.key) == Some(&locked.manifest),
+        _ => manifest.is_some() && package.retired.get(&locked.key) == manifest,
     };
 
     if !is_signed {
@@ -361,7 +431,8 @@ mod tests {
         Locked {
             version: version.into(),
             key: "a".repeat(32).parse().unwrap(),
-            manifest: format!("sha256:{}", "0".repeat(64)),
+            manifest: Some(format!("sha256:{}", "0".repeat(64))),
+            release: None,
             bins: Default::default(),
             apps: Default::default(),
             extra: Default::default(),
@@ -379,16 +450,19 @@ mod tests {
 
         let mut head = PackageRequest::parse("zig");
         head.source = Some(SourceSelection::Head);
-        let mut mixed = intents(&["jq", "fd@10.2.0", "jq", "github:owner/tool@1.0"]);
+        let mut mixed = intents(&["jq", "fd@10.2.0", "jq", "github:owner/Tool_X@1.0"]);
         mixed.push(PackageIntent::Request(head));
+        mixed.extend(intents(&["gitlab:owner/tool"]));
 
         let (accepted, skipped) = super::requests(mixed, false).unwrap();
-        assert_eq!(accepted.len(), 2);
-        assert_eq!(accepted["jq"], None);
-        assert_eq!(accepted["fd"].as_deref(), Some("10.2.0"));
+        assert_eq!(accepted.len(), 3);
+        assert_eq!(accepted["jq"], Wanted::Index(None));
+        assert_eq!(accepted["fd"], Wanted::Index(Some("10.2.0".into())));
+        let release = github::Request::new("owner/Tool_X", Some("1.0".into())).unwrap();
+        assert_eq!(accepted["tool-x"], Wanted::Release(release));
         assert_eq!(skipped.len(), 2);
-        assert!(skipped[0].starts_with("github:"), "{skipped:?}");
-        assert!(skipped[1].starts_with("zig "), "{skipped:?}");
+        assert!(skipped[0].starts_with("zig "), "{skipped:?}");
+        assert!(skipped[1].starts_with("gitlab:"), "{skipped:?}");
 
         let (accepted, skipped) = super::requests(intents(&["jq"]), true).unwrap();
         assert!(accepted.is_empty());
@@ -396,6 +470,9 @@ mod tests {
 
         let error = super::requests(intents(&["jq", "jq@1.7"]), false).unwrap_err();
         assert_eq!(error, "jq is asked for at two versions");
+
+        let error = super::requests(intents(&["jq", "github:jqlang/jq"]), false).unwrap_err();
+        assert_eq!(error, "jq is asked for from two places");
     }
 
     #[test]
@@ -413,7 +490,7 @@ mod tests {
         };
 
         let kept = |version: Option<&str>, flags| {
-            let requests = Requests::from([("jq".into(), version.map(Into::into))]);
+            let requests = Requests::from([("jq".into(), Wanted::Index(version.map(Into::into)))]);
             reconcile(&lock, "aarch64-macos", &requests, flags).map(|kept| kept.contains_key("jq"))
         };
         assert!(matches!(kept(None, &plain), Ok(true)));
@@ -426,7 +503,7 @@ mod tests {
         let moved = kept(Some("1.7"), &strict);
         assert!(matches!(moved, Err(Stale::Moved(_, version)) if version == "1.8.2"));
 
-        let requests = Requests::from([("fd".into(), None)]);
+        let requests = Requests::from([("fd".into(), Wanted::Index(None))]);
         let missing = reconcile(&lock, "aarch64-macos", &requests, &strict);
         assert!(matches!(missing, Err(Stale::Missing(package)) if package == "fd"));
     }
@@ -447,12 +524,12 @@ mod tests {
 
         package
             .retired
-            .insert(entry.key.clone(), entry.manifest.clone());
+            .insert(entry.key.clone(), entry.manifest.clone().unwrap());
         assert!(verify(&package, &entry, platform).is_ok());
 
         let output = Output {
             key: entry.key.clone(),
-            manifest: entry.manifest.clone(),
+            manifest: entry.manifest.clone().unwrap(),
             bins: ["jq".to_string()].into(),
             apps: Default::default(),
         };

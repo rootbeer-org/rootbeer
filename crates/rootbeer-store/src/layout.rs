@@ -9,8 +9,9 @@ use std::path::Path;
 /// one instead.
 pub const LAYOUT: u64 = 1;
 
-/// Bumped when `rb-helper` learns a command, so rb sets the store up again.
-pub const HELPER_VERSION: u64 = 1;
+/// Bumped when `rb-helper` learns a command or a generation schema, so rb
+/// sets the store up again.
+pub const HELPER_VERSION: u64 = 2;
 
 const PATH: &str = "var/layout.json";
 

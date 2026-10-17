@@ -39,7 +39,8 @@ fn output(store: &Path, digit: char, bins: &[&str]) -> Member {
         version: "1.0".into(),
         is_pinned: false,
         key,
-        manifest: format!("sha256:{}", "0".repeat(64)),
+        manifest: Some(format!("sha256:{}", "0".repeat(64))),
+        release: None,
         bins: bins.iter().map(|name| name.to_string()).collect(),
         apps: BTreeMap::new(),
         extra: BTreeMap::new(),
@@ -454,7 +455,7 @@ fn an_app_must_be_a_bundle_inside_its_output_and_provided_once() {
 }
 
 mod lock {
-    use crate::{Error, LOCK_SCHEMA, Lock, Locked};
+    use crate::{Error, Format, LOCK_SCHEMA, Libc, Lock, Locked, Release};
     use std::collections::BTreeMap;
     use std::fs;
 
@@ -462,7 +463,8 @@ mod lock {
         Locked {
             version: "1.8.2".into(),
             key: "a".repeat(32).parse().unwrap(),
-            manifest: format!("sha256:{}", "0".repeat(64)),
+            manifest: Some(format!("sha256:{}", "0".repeat(64))),
+            release: None,
             bins: ["jq".to_string()].into(),
             apps: BTreeMap::new(),
             extra: BTreeMap::new(),
@@ -514,11 +516,18 @@ mod lock {
             Err(Error::Older { schema: 3, .. })
         ));
 
-        fs::write(&path, r#"{"schema": 5, "packages": []}"#).unwrap();
+        fs::write(&path, r#"{"schema": 6, "packages": []}"#).unwrap();
         assert!(matches!(
             Lock::read(&path),
-            Err(Error::Newer { schema: 5, .. })
+            Err(Error::Newer { schema: 6, .. })
         ));
+
+        let index_only = format!(
+            r#"{{"schema": 4, "packages": {{"jq": {{"aarch64-macos": {{"version": "1", "key": "{}", "manifest": "x"}}}}}}}}"#,
+            "a".repeat(32)
+        );
+        fs::write(&path, index_only).unwrap();
+        assert!(Lock::read(&path).unwrap().is_some());
 
         let escaping = format!(
             r#"{{"schema": 4, "packages": {{"jq": {{"aarch64-macos": {{"version": "1", "key": "{}", "manifest": "x", "bins": ["../sh"]}}}}}}}}"#,
@@ -526,6 +535,67 @@ mod lock {
         );
         fs::write(&path, escaping).unwrap();
         assert!(matches!(Lock::read(&path), Err(Error::Invalid { .. })));
+    }
+
+    #[test]
+    fn a_release_entry_round_trips_and_names_exactly_its_bins() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("rootbeer.lock");
+        let release = Release {
+            repository: "BurntSushi/ripgrep".into(),
+            asset: "ripgrep-14.1.1-aarch64-unknown-linux-gnu.tar.gz".into(),
+            url: "https://github.com/BurntSushi/ripgrep/releases/download/14.1.1/rg.tar.gz".into(),
+            sha256: "0".repeat(64).try_into().unwrap(),
+            format: Format::TarGz,
+            paths: BTreeMap::from([("rg".into(), "ripgrep-14.1.1/rg".into())]),
+            libc: Some(Libc::Gnu),
+            should_keep_asset: false,
+            should_keep_paths: false,
+        };
+        let entry = Locked {
+            manifest: None,
+            release: Some(release.clone()),
+            bins: ["rg".to_string()].into(),
+            ..locked()
+        };
+
+        let mut lock = Lock::default();
+        lock.insert("ripgrep", "aarch64-linux", entry.clone());
+        lock.write(&path).unwrap();
+        assert_eq!(Lock::read(&path).unwrap(), Some(lock));
+
+        let invalid = [
+            Locked {
+                manifest: Some("sha256:0".into()),
+                ..entry.clone()
+            },
+            Locked {
+                release: None,
+                ..entry.clone()
+            },
+            Locked {
+                bins: ["rg".to_string(), "rga".to_string()].into(),
+                ..entry.clone()
+            },
+            Locked {
+                release: Some(Release {
+                    repository: "ripgrep".into(),
+                    ..release
+                }),
+                ..entry
+            },
+        ];
+
+        for entry in invalid {
+            let mut lock = Lock::default();
+            lock.insert("ripgrep", "aarch64-linux", entry);
+            lock.write(&path).unwrap();
+            assert!(
+                matches!(Lock::read(&path), Err(Error::Invalid { .. })),
+                "{:?}",
+                Lock::read(&path)
+            );
+        }
     }
 
     #[test]
@@ -587,7 +657,14 @@ fn roots_are_every_generation_of_every_profile_and_never_through_a_link() {
     assert!(crate::roots(root).is_err());
 
     fs::remove_file(&record).unwrap();
-    fs::write(&record, r#"{"schema": 2, "packages": {}}"#).unwrap();
+    let index_only = format!(
+        r#"{{"schema": 1, "packages": {{"jq": {{"version": "1", "pinned": false, "key": "{}", "manifest": "x"}}}}}}"#,
+        key('d')
+    );
+    fs::write(&record, index_only).unwrap();
+    assert!(crate::roots(root).unwrap().contains(&key('d')));
+
+    fs::write(&record, r#"{"schema": 3, "packages": {}}"#).unwrap();
     assert!(matches!(crate::roots(root), Err(Error::Newer { .. })));
 }
 
@@ -640,4 +717,18 @@ fn pruning_keeps_the_current_generation_and_recent_ones() {
     drop(profile);
     let reader = Profile::open_shared(&fixture.profiles, "default").unwrap();
     assert!(matches!(reader.prune(day), Err(Error::Refused(_))));
+}
+
+#[test]
+fn a_repository_installs_under_its_lowercase_name() {
+    assert_eq!(
+        crate::release_name("BurntSushi/ripgrep").as_deref(),
+        Some("ripgrep")
+    );
+    assert_eq!(
+        crate::release_name("BtbN/FFmpeg_Builds.x").as_deref(),
+        Some("ffmpeg-builds-x")
+    );
+    assert_eq!(crate::release_name("owner/.hidden"), None);
+    assert_eq!(crate::release_name("ripgrep"), None);
 }

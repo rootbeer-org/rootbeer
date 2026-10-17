@@ -1,8 +1,10 @@
 use super::cache::{self, Signed};
+use super::github;
 use super::{store_error, this_platform};
 use data_encoding::HEXLOWER;
 use rootbeer_cache::Cache;
 use rootbeer_drv::{is_package_name, Key, Platform, STORE_ROOT};
+use rootbeer_profile::{release_name, Release};
 use rootbeer_store::{Store, ROOT};
 use rootbeer_trust::{Index, Output, Package};
 use sha2::{Digest, Sha256};
@@ -104,7 +106,11 @@ pub(super) fn open_store() -> Result<(Store, bool), String> {
     super::setup::ensure()?;
     let is_root = rustix::process::geteuid().is_root();
     if is_root {
-        fs::create_dir_all(STORE_ROOT).map_err(|error| format!("{STORE_ROOT}: {error}"))?;
+        let logs = Path::new(ROOT).join("var/log");
+        for directory in [Path::new(STORE_ROOT), &logs] {
+            fs::create_dir_all(directory)
+                .map_err(|error| format!("{}: {error}", directory.display()))?;
+        }
     }
 
     let store = match is_root {
@@ -121,6 +127,59 @@ pub(super) fn request(package: &str) -> (&str, Option<&str>) {
         Some((name, version)) => (name, Some(version)),
         None => (package, None),
     }
+}
+
+/// What a configuration or `rb use` asks for under one package name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Wanted {
+    /// The index's default version on this platform, or the version pinned
+    Index(Option<String>),
+    Release(github::Request),
+}
+
+impl Wanted {
+    /// `name[@version]` or `github:owner/repo[@tag]`, with the name it
+    /// installs under.
+    pub(crate) fn parse(package: &str) -> Result<(String, Wanted), String> {
+        let (name, version) = request(package);
+        let version = version.map(str::to_string);
+        let Some(repository) = name.strip_prefix("github:") else {
+            return Ok((name.to_string(), Wanted::Index(version)));
+        };
+
+        let request = github::Request::new(repository, version)?;
+        Ok((named(repository)?, Wanted::Release(request)))
+    }
+
+    pub(crate) fn version(&self) -> Option<&str> {
+        match self {
+            Wanted::Index(version) => version.as_deref(),
+            Wanted::Release(request) => request.tag.as_deref(),
+        }
+    }
+
+    pub(crate) fn pin(&mut self, version: String) {
+        match self {
+            Wanted::Index(pinned) => *pinned = Some(version),
+            Wanted::Release(request) => request.tag = Some(version),
+        }
+    }
+
+    /// Whether what's installed at `version`, from `release` or else the
+    /// index, already answers this.
+    pub(crate) fn is_answered_by(&self, version: &str, release: Option<&Release>) -> bool {
+        match (self, release) {
+            (Wanted::Index(asked), None) => asked.as_deref().is_none_or(|asked| asked == version),
+            (Wanted::Release(request), Some(release)) => request.is_answered_by(release, version),
+            _ => false,
+        }
+    }
+}
+
+/// The package name a repository installs under.
+pub(crate) fn named(repository: &str) -> Result<String, String> {
+    release_name(repository)
+        .ok_or_else(|| format!("github:{repository} has no name rb can install it under"))
 }
 
 pub(super) fn select<'a>(
