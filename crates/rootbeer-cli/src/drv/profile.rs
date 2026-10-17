@@ -1,6 +1,7 @@
 use super::cache::{self, Signed};
 use super::github;
 use super::install::{self, Source, Wanted};
+use super::local::{self, Evaluated};
 use super::{migrate, this_platform, HELPER};
 use rootbeer_core::env::{profiles, DEFAULT, USER};
 use rootbeer_profile::{Generation, Member, Profile};
@@ -23,6 +24,11 @@ pub(crate) struct UseArgs {
     /// Move these packages, or every package, to what the index has now
     #[arg(long = "update")]
     should_update: bool,
+    /// A checkout of recipes, with `packages/` and `host.lua`, whose
+    /// packages stand in for the index's. Only the packages named are built
+    /// from it
+    #[arg(long)]
+    catalog: Option<PathBuf>,
     #[command(flatten)]
     source: Source,
 }
@@ -40,15 +46,28 @@ pub(crate) fn add(args: &UseArgs) -> Result<(), String> {
     let directory = directory(true)?;
     let profile = Profile::open(&directory, USER).map_err(profile_error)?;
     let generation = current(&profile)?;
+
+    // Pinned first, so a checkout evaluates the version the pin keeps.
+    pin(&generation.packages, &mut requests, args.should_update);
+    let evaluated = match &args.catalog {
+        Some(root) => local::shadow(&mut requests, root, this_platform()?)?,
+        None => None,
+    };
+
     let requests = planned(&generation.packages, requests, args.should_update);
     if requests.is_empty() {
         eprintln!("{USER} already has everything asked for");
         return link_apps(&profile);
     }
 
-    install_requests(&profile, generation, requests, &args.source, |_, error| {
-        Err(error)
-    })
+    install_requests(
+        &profile,
+        generation,
+        requests,
+        &args.source,
+        evaluated.as_ref(),
+        |_, error| Err(error),
+    )
 }
 
 pub(super) fn install_requests(
@@ -56,6 +75,7 @@ pub(super) fn install_requests(
     mut generation: Generation,
     requests: BTreeMap<String, Wanted>,
     source: &Source,
+    evaluated: Option<&Evaluated>,
     mut unmatched: impl FnMut(&str, String) -> Result<(), String>,
 ) -> Result<(), String> {
     let (mut store, is_root) = install::open_store()?;
@@ -83,6 +103,7 @@ pub(super) fn install_requests(
                     key: output.key.clone(),
                     manifest: Some(output.manifest.clone()),
                     release: None,
+                    is_local: false,
                     bins: output.bins.clone(),
                     apps: output.apps.clone(),
                     extra: BTreeMap::new(),
@@ -100,11 +121,26 @@ pub(super) fn install_requests(
                         manifest: None,
                         bins: resolved.release.paths.keys().cloned().collect(),
                         release: Some(resolved.release),
+                        is_local: false,
                         apps: BTreeMap::new(),
                         extra: BTreeMap::new(),
                     },
                 )
             }
+            Wanted::Local { version, .. } => evaluated
+                .ok_or_else(|| format!("{name} needs --catalog"))
+                .and_then(|evaluated| evaluated.package(&name))
+                .map(|(target, package)| Member {
+                    version: target.version.clone(),
+                    is_pinned: version.is_some(),
+                    key: package.build.clone(),
+                    manifest: None,
+                    release: None,
+                    is_local: true,
+                    bins: package.metadata.bins.clone(),
+                    apps: package.metadata.apps.clone(),
+                    extra: BTreeMap::new(),
+                }),
         };
 
         let member = match member {
@@ -133,15 +169,19 @@ pub(super) fn install_requests(
 
     // A release is in the store once it resolves.
     for (name, member) in members {
-        if member.release.is_none() {
-            cache::install_into(
+        match (&member.release, member.is_local) {
+            (Some(_), _) => {}
+            (None, true) => evaluated
+                .ok_or_else(|| format!("{name} needs --catalog"))?
+                .install(&name, &mut store, is_root, &cache, &mut signed, false, true)?,
+            (None, false) => cache::install_into(
                 &cache,
                 &mut store,
                 is_root,
                 &name,
                 &member.key,
                 Some(&mut signed),
-            )?;
+            )?,
         }
         generation.packages.insert(name, member);
     }
@@ -152,7 +192,7 @@ pub(super) fn install_requests(
 
 /// Drops what the generation already has, unless updating. An update keeps a
 /// pin when the request names no version, and with nothing named it updates
-/// everything.
+/// everything but what a local catalog built.
 pub(super) fn planned(
     packages: &BTreeMap<String, Member>,
     mut requests: BTreeMap<String, Wanted>,
@@ -161,27 +201,36 @@ pub(super) fn planned(
     if should_update && requests.is_empty() {
         requests = packages
             .iter()
+            .filter(|(_, member)| !member.is_local)
             .map(|(name, member)| (name.clone(), unpinned(member)))
             .collect();
     }
 
-    for (name, wanted) in &mut requests {
-        let pinned = packages.get(name).filter(|member| member.is_pinned);
-        if let (true, None, Some(member)) = (should_update, wanted.version(), pinned) {
-            wanted.pin(member.version.clone());
-        }
-    }
-
+    pin(packages, &mut requests, should_update);
     requests.retain(|name, wanted| {
         let member = packages.get(name);
         should_update
             || !member.is_some_and(|member| {
                 member.is_pinned == wanted.version().is_some()
-                    && wanted.is_answered_by(&member.version, member.release.as_ref())
+                    && wanted.is_answered_by(member.into())
             })
     });
 
     requests
+}
+
+/// An update keeps a member's pin when the request names no version.
+fn pin(
+    packages: &BTreeMap<String, Member>,
+    requests: &mut BTreeMap<String, Wanted>,
+    should_update: bool,
+) {
+    for (name, wanted) in requests {
+        let pinned = packages.get(name).filter(|member| member.is_pinned);
+        if let (true, None, Some(member)) = (should_update, wanted.version(), pinned) {
+            wanted.pin(member.version.clone());
+        }
+    }
 }
 
 /// What a member was asked for, without its version.
@@ -265,6 +314,7 @@ pub(crate) fn self_update() -> Result<(), String> {
         generation,
         requests,
         &Source::default(),
+        None,
         |_, error| Err(error),
     )
 }
@@ -290,6 +340,7 @@ pub(crate) fn keep_rootbeer() -> Result<(), String> {
         generation,
         requests,
         &Source::default(),
+        None,
         |_, error| Err(error),
     )
 }
@@ -421,6 +472,7 @@ mod tests {
             key: "a".repeat(32).parse().unwrap(),
             manifest: Some(format!("sha256:{}", "0".repeat(64))),
             release: None,
+            is_local: false,
             bins: Default::default(),
             apps: Default::default(),
             extra: Default::default(),
@@ -472,6 +524,7 @@ mod tests {
         let ripgrep = |is_pinned| Member {
             manifest: None,
             release: Some(release.clone()),
+            is_local: false,
             bins: ["rg".to_string()].into(),
             ..member("14.1.1", is_pinned)
         };
@@ -505,6 +558,35 @@ mod tests {
             panic!("ripgrep is a release");
         };
         assert_eq!(again.asset.as_deref(), Some("rg.tar.gz"));
+    }
+
+    #[test]
+    fn a_local_build_answers_only_its_own_key_and_updates_leave_it() {
+        let local = Member {
+            manifest: None,
+            is_local: true,
+            ..member("1.0", false)
+        };
+        let packages = BTreeMap::from([("jq".to_string(), local.clone())]);
+        assert!(planned(&packages, BTreeMap::new(), true).is_empty());
+
+        let wanted = |key: &str, bins: &[&str]| Wanted::Local {
+            version: None,
+            key: key.parse().unwrap(),
+            bins: bins.iter().map(|bin| bin.to_string()).collect(),
+            apps: BTreeMap::new(),
+        };
+        let same = wanted(local.key.as_str(), &[]);
+        let rebuilt = wanted(&"b".repeat(32), &[]);
+        let exported = wanted(local.key.as_str(), &["jq"]);
+        let ask = |wanted: &Wanted| BTreeMap::from([("jq".to_string(), wanted.clone())]);
+        assert!(planned(&packages, ask(&same), false).is_empty());
+        assert_eq!(planned(&packages, ask(&rebuilt), false), ask(&rebuilt));
+        assert_eq!(planned(&packages, ask(&exported), false), ask(&exported));
+        assert_eq!(
+            planned(&packages, ask(&Wanted::Index(None)), false),
+            ask(&Wanted::Index(None))
+        );
     }
 
     #[test]

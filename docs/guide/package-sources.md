@@ -3,51 +3,41 @@
 [Browse the catalog](https://search.rbpkg.com) for packages available by name. For another tool,
 you can request a GitHub release with `rb run`, `rb use`, or `rb.packages()`.
 
-## Define packages locally
+## Build packages locally
 
-Keep registry-format recipes beside your configuration:
-
-```text
-rootbeer.lua
-packages/
-  my-tool.lua
-```
-
-Load them before declaring packages:
+To try a recipe before it's published, point your configuration at a checkout
+of the package index:
 
 ```lua
 local rb = require("rootbeer")
 
-rb.package_catalog("packages")
+rb.package_catalog("~/code/index")
 rb.packages({ "my-tool", "jq" })
 ```
 
-Each file returns a [package recipe](/contributing/packaging#write-a-recipe), with
-its filename matching the package name. Use the same `prebuilt`, `source`, `build`,
-`outputs`, `platforms`, and `versions` fields as registry recipes. GitHub and URL
-prebuilts and every build backend are supported. Each version still pins a digest
-for every platform it covers.
+The checkout holds `packages/<name>.lua` recipes and `host.lua`, like the index
+repository. A name it defines comes from its recipe, and everything else still
+comes from the signed index. When the index publishes the same build, Rootbeer
+downloads it, and otherwise it builds on your machine and runs the recipe's
+checks.
 
-The directory is relative to the configuration script; absolute paths and `~`
-also work. Call `package_catalog` once. Local names and aliases take precedence
-over the selected registry, while other requests still use the registry normally.
-Explicit `github:` requests keep their original meaning.
+Builds use your machine's toolchain in place of the one `host.lua` names, so a
+source build and its source-built dependencies build locally rather than
+matching the index. Prebuilt recipes don't depend on the toolchain and still
+match. On Linux, source builds need the builder image.
 
-Recipes can depend on other local recipes or packages from the selected registry.
-Source-capable local recipes build locally by default, even if they also declare
-upstream prebuilts. Planning reads and validates recipes without downloading or
-building. Apply runs the shared build executor and its checks, then installs the
-result in the normal package profile.
+If the checkout doesn't exist, as on another machine sharing the
+configuration, Rootbeer warns and the index serves those names.
 
-Recipe contents are recorded in `rootbeer.lock`. Editing a local recipe refreshes
-local package resolutions on the next apply; unchanged registry requests retain
-their locks. `--locked` rejects recipe changes, and `--offline` replays matching
-locks and cached packages. Use ordinary apply once after changing a recipe.
-`--update` refreshes resolutions but does not discover and rewrite local versions;
-maintain their `versions` and defaults in the recipe files.
+`rootbeer.lock` marks these packages as local and records the key each recipe
+evaluated to. Editing a recipe in a way that changes the build makes
+`--locked` fail until you apply without it.
 
-The setting applies to this Lua configuration. Standalone `rb run` and `rb use`
-do not load it. Recipes stay on your machine; no index publication is needed.
+For a one-off, `rb use --catalog ~/code/index my-tool` installs from a checkout
+into your user profile. `rb use --update` with no names leaves packages built
+this way alone, while naming one without `--catalog` moves it to the index's.
+
+With `--offline`, only builds already in the store will do.
 
 ## Install from GitHub
 
@@ -95,22 +85,6 @@ can also appear in the list; see the [package API](/reference/core#rootbeer-pack
 
 Direct GitHub requests record download hashes in their saved resolutions. They
 do not carry the Rootbeer repository publisher's signature.
-
-## Use another repository
-
-A Lua configuration can use another package repository in place of the official one:
-call `rb.package_repository()` before declaring packages, with the URL of its signed
-root and its publisher's verification key. See the
-[API reference](/reference/core#rootbeer-package-repository) for the fields. HTTPS and
-absolute local `file://` URLs are supported.
-
-The key is what you trust: Rootbeer verifies the repository's signature, rejects
-rollbacks, and checks every package document and record against the digests that
-signature covers. Standalone `rb run` and `rb use` do not read this Lua setting.
-
-Your lock records the exact root it resolved against. `rb apply --update` moves it to
-the repository's latest root; changing or removing the setting refreshes your lock on
-the next apply. Offline installs still require a matching lock and cached packages.
 
 See [updates and offline use](/guide/package-locks) for saved versions, or
 [repository hosting and trust](/contributing/package-hosting) for verification and

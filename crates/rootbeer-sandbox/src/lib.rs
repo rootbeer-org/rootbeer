@@ -61,6 +61,14 @@ pub fn realize(request: &mut Request) -> Result<BTreeSet<Key>, Error> {
     }
 }
 
+/// The toolchain this machine builds with, as a host file names it.
+pub fn system() -> Result<String, String> {
+    match cfg!(target_os = "macos") {
+        true => darwin::system(),
+        false => linux::system(),
+    }
+}
+
 fn derivation<'a>(request: &Request<'a>, key: &Key) -> Result<&'a Derivation, Error> {
     let graph: &'a BTreeMap<Key, Derivation> = request.graph;
     let failure = |reason: String| Error::Build {

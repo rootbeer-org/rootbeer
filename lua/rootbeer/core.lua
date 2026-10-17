@@ -116,23 +116,13 @@ function rootbeer.exec(cmd, args) end
 --- @field asset? string Exact release asset filename for an explicit github: request.
 --- @field bins? table<string, string> Exported command name → relative path for an explicit github: request.
 
---- @class rootbeer.PackageRepository
---- @field url string HTTPS URL of the repository's signed root (`.../current.json`), or an explicit absolute `file:///` URL.
---- @field public_key string The repository's Ed25519 verification key, as 64 lowercase hexadecimal characters.
-
---- Loads registry-format Lua recipes from a local directory, relative to the config.
---- Call once, before declaring packages. Local names and aliases take precedence
---- over the selected repository. Planning only reads recipes; apply resolves downloads
---- and executes source builds. Recipe contents are tracked in `rootbeer.lock`.
---- @param path string Directory containing one schema-2 `<name>.lua` file per package.
+--- Builds packages from a checkout of recipes, laid out like the package
+--- index with `packages/<name>.lua` and `host.lua`. A name the checkout
+--- defines comes from its recipe instead of the index, and everything else
+--- still comes from the index. A build the index publishes under the same key
+--- is downloaded, and the rest builds on this machine.
+--- @param path string The checkout, relative to the config.
 function rootbeer.package_catalog(path) end
-
---- Uses another package repository in place of the official one for canonical
---- package requests. Call once, before declaring packages. Planning performs no
---- downloads; apply verifies the repository's signed root and records the exact
---- root in `rootbeer.lock`, and `rb apply --update` moves it forward.
---- @param spec rootbeer.PackageRepository
-function rootbeer.package_repository(spec) end
 
 --- Installs a command-line tool, such as `"ripgrep"`. Use `"name@version"`
 --- to choose an exact version. Package versions are saved in `rootbeer.lock`.

@@ -4,10 +4,11 @@ use super::{store_error, this_platform};
 use data_encoding::HEXLOWER;
 use rootbeer_cache::Cache;
 use rootbeer_drv::{is_package_name, Key, Platform, STORE_ROOT};
-use rootbeer_profile::{release_name, Release};
+use rootbeer_profile::{release_name, Locked, Member, Release};
 use rootbeer_store::{Store, ROOT};
 use rootbeer_trust::{Index, Output, Package};
 use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -135,6 +136,13 @@ pub(crate) enum Wanted {
     /// The index's default version on this platform, or the version pinned
     Index(Option<String>),
     Release(github::Request),
+    /// A checkout's recipe at the key it evaluates to
+    Local {
+        version: Option<String>,
+        key: Key,
+        bins: BTreeSet<String>,
+        apps: BTreeMap<String, String>,
+    },
 }
 
 impl Wanted {
@@ -153,25 +161,87 @@ impl Wanted {
 
     pub(crate) fn version(&self) -> Option<&str> {
         match self {
-            Wanted::Index(version) => version.as_deref(),
+            Wanted::Index(version) | Wanted::Local { version, .. } => version.as_deref(),
             Wanted::Release(request) => request.tag.as_deref(),
         }
     }
 
     pub(crate) fn pin(&mut self, version: String) {
         match self {
-            Wanted::Index(pinned) => *pinned = Some(version),
+            Wanted::Index(pinned)
+            | Wanted::Local {
+                version: pinned, ..
+            } => {
+                *pinned = Some(version);
+            }
             Wanted::Release(request) => request.tag = Some(version),
         }
     }
 
-    /// Whether what's installed at `version`, from `release` or else the
-    /// index, already answers this.
-    pub(crate) fn is_answered_by(&self, version: &str, release: Option<&Release>) -> bool {
-        match (self, release) {
-            (Wanted::Index(asked), None) => asked.as_deref().is_none_or(|asked| asked == version),
-            (Wanted::Release(request), Some(release)) => request.is_answered_by(release, version),
+    /// Whether what's installed already answers this.
+    pub(crate) fn is_answered_by(&self, installed: Installed) -> bool {
+        let Installed {
+            version,
+            key,
+            release,
+            is_local,
+            bins,
+            apps,
+        } = installed;
+        match (self, release, is_local) {
+            (Wanted::Index(asked), None, false) => {
+                asked.as_deref().is_none_or(|asked| asked == version)
+            }
+            (Wanted::Release(request), Some(release), false) => {
+                request.is_answered_by(release, version)
+            }
+            (
+                Wanted::Local {
+                    key: wanted,
+                    bins: names,
+                    apps: bundles,
+                    ..
+                },
+                None,
+                true,
+            ) => wanted == key && names == bins && bundles == apps,
             _ => false,
+        }
+    }
+}
+
+/// A lock entry or generation member, as far as a request cares.
+pub(crate) struct Installed<'a> {
+    version: &'a str,
+    key: &'a Key,
+    release: Option<&'a Release>,
+    is_local: bool,
+    bins: &'a BTreeSet<String>,
+    apps: &'a BTreeMap<String, String>,
+}
+
+impl<'a> From<&'a Locked> for Installed<'a> {
+    fn from(locked: &'a Locked) -> Self {
+        Installed {
+            version: &locked.version,
+            key: &locked.key,
+            release: locked.release.as_ref(),
+            is_local: locked.is_local,
+            bins: &locked.bins,
+            apps: &locked.apps,
+        }
+    }
+}
+
+impl<'a> From<&'a Member> for Installed<'a> {
+    fn from(member: &'a Member) -> Self {
+        Installed {
+            version: &member.version,
+            key: &member.key,
+            release: member.release.as_ref(),
+            is_local: member.is_local,
+            bins: &member.bins,
+            apps: &member.apps,
         }
     }
 }

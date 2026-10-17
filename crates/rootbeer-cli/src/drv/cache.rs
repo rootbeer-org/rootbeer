@@ -27,6 +27,9 @@ type Fetch<'a> = Box<dyn FnMut(&str) -> Result<Option<Package>, String> + 'a>;
 pub(super) struct Signed<'a> {
     fetch: Fetch<'a>,
     packages: BTreeMap<String, Option<Package>>,
+    /// Why the index couldn't be read, so later lookups fail the same way
+    /// without trying again.
+    failure: Option<String>,
 }
 
 impl<'a> Signed<'a> {
@@ -34,30 +37,49 @@ impl<'a> Signed<'a> {
         Signed {
             fetch: Box::new(fetch),
             packages: BTreeMap::new(),
+            failure: None,
         }
     }
 
     pub(super) fn package(&mut self, name: &str) -> Result<&Package, String> {
-        if !self.packages.contains_key(name) {
-            let package = (self.fetch)(name)?;
-            self.packages.insert(name.to_string(), package);
-        }
-
-        self.packages
-            .get(name)
-            .and_then(Option::as_ref)
+        self.find(name)?
             .ok_or_else(|| format!("{name} isn't in the index"))
     }
 
-    fn manifest(&mut self, name: &str, key: &Key) -> Result<String, String> {
-        let package = self.package(name)?;
+    fn find(&mut self, name: &str) -> Result<Option<&Package>, String> {
+        if let Some(failure) = &self.failure {
+            return Err(failure.clone());
+        }
+
+        if !self.packages.contains_key(name) {
+            let package = (self.fetch)(name).inspect_err(|error| {
+                self.failure = Some(error.clone());
+            })?;
+            self.packages.insert(name.to_string(), package);
+        }
+
+        Ok(self.packages.get(name).and_then(Option::as_ref))
+    }
+
+    pub(super) fn manifest(&mut self, name: &str, key: &Key) -> Result<String, String> {
+        self.package(name)?;
+        self.published(name, key)?
+            .ok_or_else(|| format!("{name} {key} isn't in the index"))
+    }
+
+    /// The manifest the index signed for `key`, or None when it publishes no
+    /// such build. Only a failure to read the index is an error.
+    pub(super) fn published(&mut self, name: &str, key: &Key) -> Result<Option<String>, String> {
+        let Some(package) = self.find(name)? else {
+            return Ok(None);
+        };
+
         let mut outputs = package.versions.values().flat_map(BTreeMap::values);
-        outputs
+        let manifest = outputs
             .find(|output| output.key == *key)
             .map(|output| &output.manifest)
-            .or_else(|| package.retired.get(key))
-            .cloned()
-            .ok_or_else(|| format!("{name} {key} isn't in the index"))
+            .or_else(|| package.retired.get(key));
+        Ok(manifest.cloned())
     }
 }
 

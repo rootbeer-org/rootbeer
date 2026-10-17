@@ -426,65 +426,46 @@ fn source_selections_are_explicit_planned_inputs() {
     );
 }
 
-fn write_local_recipe(root: &std::path::Path) {
-    std::fs::create_dir(root.join("packages")).unwrap();
-    std::fs::write(
-        root.join("packages/demo.lua"),
-        format!(
-            r#"return {{
-        name = "demo", aliases = {{ "demo-alias" }},
-        description = "Local test tool", homepage = "https://example.invalid/demo",
-        default_license = "MIT",
-        prebuilt = {{ github = "owner/demo", tag = "v{{version}}", asset = "demo.tar.gz" }},
-        outputs = {{ bins = {{ "demo" }}, checks = {{ {{ "demo", "--version" }} }} }},
-        platforms = {{ ["{system}"] = {{ default_version = "1" }} }},
-        versions = {{ ["1"] = {{ digests = {{ ["{system}"] = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }} }} }},
-    }}"#,
-            system = crate::package::ResolveContext::current().system
-        ),
-    )
-    .unwrap();
-}
-
 #[test]
-fn local_recipes_plan_without_resolution() {
+fn a_catalog_is_a_checkout_with_recipes_and_repositories_are_gone() {
     let root = tempfile::tempdir().unwrap();
-    write_local_recipe(root.path());
+    std::fs::create_dir(root.path().join("packages")).unwrap();
+    std::fs::write(root.path().join("host.lua"), "return {}").unwrap();
     let vm = vm_in(
-        r#"
-        rb.package_catalog("packages")
-        rb.packages({ "demo-alias", "registry-tool" })
-    "#,
+        r#"rb.package_catalog("."); rb.package("demo")"#,
         root.path(),
     );
-    assert_eq!(vm.drain_ops().len(), 2);
-    assert!(!root.path().join("rootbeer.lock").exists());
-}
+    assert_eq!(
+        vm.lua
+            .app_data_ref::<crate::lua::Checkout>()
+            .map(|checkout| checkout.0.clone()),
+        Some(root.path().join("."))
+    );
 
-#[test]
-fn local_catalogs_reject_late_duplicate_and_invalid_declarations() {
-    let root = tempfile::tempdir().unwrap();
-    write_local_recipe(root.path());
-    for script in [
-        "rb.package('demo'); rb.package_catalog('packages')",
-        "rb.package_catalog('packages'); rb.package_catalog('packages')",
-        "rb.package_catalog('missing')",
+    let elsewhere = vm_in(r#"rb.package_catalog("missing")"#, root.path());
+    assert!(elsewhere
+        .lua
+        .app_data_ref::<crate::lua::Checkout>()
+        .is_some());
+
+    for (script, reason) in [
+        (
+            "rb.package_catalog('.'); rb.package_catalog('.')",
+            "declare package_catalog once",
+        ),
+        (
+            "rb.package_catalog('packages')",
+            "isn't a checkout of recipes",
+        ),
+        (
+            "rb.package_repository({ url = 'https://example.org', public_key = 'a' })",
+            "signed repositories are gone",
+        ),
     ] {
         let vm = super::super::test_support::vm(root.path(), None);
-        assert!(vm
+        let error = vm
             .exec(&format!("local rb = require('rootbeer'); {script}"), "test")
-            .is_err());
+            .unwrap_err();
+        assert!(error.to_string().contains(reason), "{error}");
     }
-    std::fs::write(
-        root.path().join("packages/demo.lua"),
-        "return { name = 'demo' }",
-    )
-    .unwrap();
-    let vm = super::super::test_support::vm(root.path(), None);
-    assert!(vm
-        .exec(
-            "local rb = require('rootbeer'); rb.package_catalog('packages')",
-            "test"
-        )
-        .is_err());
 }

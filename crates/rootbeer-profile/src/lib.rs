@@ -52,6 +52,9 @@ pub struct Member {
     pub manifest: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub release: Option<Release>,
+    /// Built from a local catalog, which nothing signed.
+    #[serde(default, rename = "local", skip_serializing_if = "is_false")]
+    pub is_local: bool,
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub bins: BTreeSet<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -81,7 +84,7 @@ pub struct Release {
     pub should_keep_paths: bool,
 }
 
-fn is_false(value: &bool) -> bool {
+pub(crate) fn is_false(value: &bool) -> bool {
     !value
 }
 
@@ -606,6 +609,7 @@ fn validate(name: &str, member: &Member) -> Result<(), String> {
         name,
         member.manifest.as_ref(),
         member.release.as_ref(),
+        member.is_local,
         &member.bins,
     )?;
     validate_exports(name, &member.bins, &member.apps)
@@ -617,13 +621,17 @@ pub(crate) fn validate_source(
     name: &str,
     manifest: Option<&String>,
     release: Option<&Release>,
+    is_local: bool,
     bins: &BTreeSet<String>,
 ) -> Result<(), String> {
-    let release = match (manifest, release) {
-        (Some(_), None) => return Ok(()),
-        (None, Some(release)) => release,
-        (Some(_), Some(_)) => return Err(format!("{name} has both a manifest and a release")),
-        (None, None) => return Err(format!("{name} has neither a manifest nor a release")),
+    let release = match (manifest, release, is_local) {
+        (Some(_), None, false) | (None, None, true) => return Ok(()),
+        (None, Some(release), false) => release,
+        _ => {
+            return Err(format!(
+                "{name} must come from one of the index, a release, or a local catalog"
+            ));
+        }
     };
 
     if !is_repository(&release.repository) {

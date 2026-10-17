@@ -41,6 +41,7 @@ fn output(store: &Path, digit: char, bins: &[&str]) -> Member {
         key,
         manifest: Some(format!("sha256:{}", "0".repeat(64))),
         release: None,
+        is_local: false,
         bins: bins.iter().map(|name| name.to_string()).collect(),
         apps: BTreeMap::new(),
         extra: BTreeMap::new(),
@@ -465,6 +466,7 @@ mod lock {
             key: "a".repeat(32).parse().unwrap(),
             manifest: Some(format!("sha256:{}", "0".repeat(64))),
             release: None,
+            is_local: false,
             bins: ["jq".to_string()].into(),
             apps: BTreeMap::new(),
             extra: BTreeMap::new(),
@@ -574,6 +576,10 @@ mod lock {
                 ..entry.clone()
             },
             Locked {
+                is_local: true,
+                ..entry.clone()
+            },
+            Locked {
                 bins: ["rg".to_string(), "rga".to_string()].into(),
                 ..entry.clone()
             },
@@ -585,6 +591,18 @@ mod lock {
                 ..entry
             },
         ];
+
+        let local = Locked {
+            manifest: None,
+            is_local: true,
+            ..locked()
+        };
+        let mut lock = Lock::default();
+        lock.insert("jq", "aarch64-linux", local);
+        lock.write(&path).unwrap();
+        let written: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(written["packages"]["jq"]["aarch64-linux"]["local"], true);
+        assert_eq!(Lock::read(&path).unwrap(), Some(lock));
 
         for entry in invalid {
             let mut lock = Lock::default();

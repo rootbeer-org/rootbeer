@@ -26,6 +26,9 @@ pub struct Locked {
     pub manifest: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub release: Option<Release>,
+    /// Built from a local catalog, which nothing signed.
+    #[serde(default, rename = "local", skip_serializing_if = "crate::is_false")]
+    pub is_local: bool,
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub bins: BTreeSet<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -89,6 +92,7 @@ impl Lock {
                     name,
                     locked.manifest.as_ref(),
                     locked.release.as_ref(),
+                    locked.is_local,
                     &locked.bins,
                 )
                 .and_then(|()| validate_exports(name, &locked.bins, &locked.apps))

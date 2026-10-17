@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use owo_colors::OwoColorize;
 use rootbeer_core::profile::{ProfileError, ProfileErrorContext};
@@ -216,10 +216,10 @@ pub fn run(args: Args, lua_dir: Option<&PathBuf>) {
     // Before the rest, so commands the configuration runs can use them.
     let mut should_link_apps = false;
     if !args.dry_run {
-        let has_sources = planned.has_package_sources();
+        let catalog = planned.package_catalog().map(Path::to_path_buf);
         let configured = crate::drv::configure(
             planned.take_packages(),
-            has_sources,
+            catalog.as_deref(),
             &script_dir,
             &package_lock,
             &Default::default(),

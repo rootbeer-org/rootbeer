@@ -180,7 +180,7 @@ impl Sandbox {
                     request.key,
                     &format!(
                         "was evaluated for the toolchain {expected}, but this machine has \
-                         {actual}. Pass a --host file naming it to build here."
+                         {actual}, so a host file must name it to build here."
                     ),
                 ));
             }

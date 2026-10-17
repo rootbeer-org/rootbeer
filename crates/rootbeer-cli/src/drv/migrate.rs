@@ -65,7 +65,8 @@ pub(crate) fn migrate(args: &Args) -> Result<(), String> {
         let generation = profile::current(&user)?;
         let requests = profile::planned(&generation.packages, requests, false);
         if !requests.is_empty() {
-            profile::install_requests(&user, generation, requests, &args.source, |name, error| {
+            let source = &args.source;
+            profile::install_requests(&user, generation, requests, source, None, |name, error| {
                 stuck.push(format!("{name}: {error}"));
                 Ok(())
             })?;
@@ -140,10 +141,10 @@ fn configuration(args: &Args) -> Result<Vec<String>, String> {
         .plan()
         .map_err(|error| error.to_string())?;
 
-    let has_sources = planned.has_package_sources();
+    let catalog = planned.package_catalog().map(Path::to_path_buf);
     let configured = configure(
         planned.take_packages(),
-        has_sources,
+        catalog.as_deref(),
         &script_dir,
         &PackageLockOptions::default(),
         &args.source,

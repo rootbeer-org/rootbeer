@@ -95,8 +95,7 @@ impl Repository {
             return Ok(configured.clone());
         }
         Self::official()?.ok_or_else(|| {
-            "this build trusts no PDR; build with ROOTBEER_PDR_URL and ROOTBEER_PDR_PUBLIC_KEY, \
-             or call rb.package_repository()"
+            "this build trusts no PDR; build with ROOTBEER_PDR_URL and ROOTBEER_PDR_PUBLIC_KEY"
                 .into()
         })
     }

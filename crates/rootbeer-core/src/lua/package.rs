@@ -7,12 +7,17 @@ use super::ctx::Ctx;
 use super::module::Module;
 use super::vm::{profile_bin_path, PackageBins};
 use crate::package::{
-    ArchiveFormat, LockedInstall, LockedPackage, LockedSource, PackageCatalog, PackageIntent,
-    PackageRequest, Provides, Repository,
+    ArchiveFormat, LockedInstall, LockedPackage, LockedSource, PackageIntent, PackageRequest,
+    Provides,
 };
 use crate::plan::{Op, WriteSource};
 
 pub(crate) struct Package;
+
+/// A checkout of recipes, with `packages/` and `host.lua`, set by
+/// `rb.package_catalog`.
+#[derive(Debug, Clone)]
+pub(crate) struct Checkout(pub(crate) PathBuf);
 
 impl Module for Package {
     const NAME: &'static str = "";
@@ -21,50 +26,32 @@ impl Module for Package {
         t.set(
             "package_catalog",
             lua.create_function(|lua, path: String| {
-                let cx = Ctx::from(lua);
-                if lua.app_data_ref::<PackageCatalog>().is_some()
-                    || cx
-                        .run
-                        .lock()
-                        .iter()
-                        .any(|op| matches!(op, Op::Package { .. }))
-                {
+                if lua.app_data_ref::<Checkout>().is_some() {
                     return Err(LuaError::RuntimeError(
-                        "declare package_catalog once, before packages".into(),
+                        "declare package_catalog once".into(),
                     ));
                 }
-                let path = cx.resolve(&path);
-                let catalog = PackageCatalog::from_local_directory(&path).map_err(|error| {
-                    LuaError::RuntimeError(format!("{}: {error}", path.display()))
-                })?;
-                drop(cx);
-                lua.set_app_data(catalog);
+
+                // A missing checkout falls back to the index when applied.
+                let path = Ctx::from(lua).resolve(&path);
+                let is_checkout = path.join("packages").is_dir() && path.join("host.lua").is_file();
+                if path.exists() && !is_checkout {
+                    return Err(LuaError::RuntimeError(format!(
+                        "{} isn't a checkout of recipes with packages/ and host.lua",
+                        path.display()
+                    )));
+                }
+
+                lua.set_app_data(Checkout(path));
                 Ok(())
             })?,
         )?;
         t.set(
             "package_repository",
-            lua.create_function(|lua, spec: Table| {
-                let cx = Ctx::from(lua);
-                if lua.app_data_ref::<Repository>().is_some()
-                    || cx
-                        .run
-                        .lock()
-                        .iter()
-                        .any(|op| matches!(op, Op::Package { .. }))
-                {
-                    return Err(LuaError::RuntimeError(
-                        "declare package_repository once, before packages".into(),
-                    ));
-                }
-                let repository = Repository {
-                    url: required(&spec, "url")?,
-                    public_key: required(&spec, "public_key")?,
-                };
-                repository.validate().map_err(LuaError::RuntimeError)?;
-                drop(cx);
-                lua.set_app_data(repository);
-                Ok(())
+            lua.create_function(|_, _: Value| -> LuaResult<()> {
+                Err(LuaError::RuntimeError(
+                    "rb.package_repository's signed repositories are gone, so remove it".into(),
+                ))
             })?,
         )?;
         t.set(

@@ -1,6 +1,7 @@
 use super::cache::{self, Signed};
 use super::github;
 use super::install::{self, Source, Wanted};
+use super::local;
 use super::profile::{
     applications, check_apps, current, directory, is_same, link_apps, profile_error, switch,
 };
@@ -26,22 +27,33 @@ pub(crate) struct Configured {
     pub(crate) skipped: Vec<String>,
 }
 
-/// Installs what the signed index and GitHub releases serve into `default`
-/// and skips the rest, which the old store keeps serving until rb can install
-/// it. A package source replaces the index for every request, so it skips
-/// them all.
+/// Installs what the signed index, GitHub releases, and the local catalog
+/// serve into `default` and skips the rest, which the old store keeps serving
+/// until rb can install it. A name the catalog defines comes from its recipe.
 pub(crate) fn configure(
     intents: Vec<PackageIntent>,
-    has_sources: bool,
+    catalog: Option<&Path>,
     script_dir: &Path,
     flags: &PackageLockOptions,
     source: &Source,
 ) -> Result<Configured, String> {
-    let (requests, skipped) = requests(intents, has_sources)?;
+    let (mut requests, skipped) = requests(intents)?;
     let path = script_dir.join("rootbeer.lock");
     let existing = read(&path, flags.is_locked)?;
     let platform = this_platform()?;
     let name = platform.to_string();
+    let evaluated = match catalog {
+        // A machine sharing the configuration may not have the checkout.
+        Some(root) if !root.exists() => {
+            eprintln!(
+                "warning: {} doesn't exist, so the index serves its packages",
+                root.display()
+            );
+            None
+        }
+        Some(root) => local::shadow(&mut requests, root, platform)?,
+        None => None,
+    };
 
     let mut lock = existing.clone().unwrap_or_default();
     lock.retain(&name, |package| requests.contains_key(package));
@@ -112,6 +124,7 @@ pub(crate) fn configure(
                     key: output.key.clone(),
                     manifest: Some(output.manifest.clone()),
                     release: None,
+                    is_local: false,
                     bins: output.bins.clone(),
                     apps: output.apps.clone(),
                     extra: BTreeMap::new(),
@@ -132,7 +145,22 @@ pub(crate) fn configure(
                     manifest: None,
                     bins: resolved.release.paths.keys().cloned().collect(),
                     release: Some(resolved.release),
+                    is_local: false,
                     apps: BTreeMap::new(),
+                    extra: BTreeMap::new(),
+                }
+            }
+            Wanted::Local { .. } => {
+                let (target, built) =
+                    local_evaluated(evaluated.as_ref(), package)?.package(package)?;
+                Locked {
+                    version: target.version.clone(),
+                    key: built.build.clone(),
+                    manifest: None,
+                    release: None,
+                    is_local: true,
+                    bins: built.metadata.bins.clone(),
+                    apps: built.metadata.apps.clone(),
                     extra: BTreeMap::new(),
                 }
             }
@@ -141,12 +169,13 @@ pub(crate) fn configure(
     }
 
     if is_index_open.get() {
-        for (package, locked) in kept.iter().filter(|(_, locked)| locked.release.is_none()) {
+        for (package, locked) in kept.iter().filter(|(_, locked)| locked.manifest.is_some()) {
             verify(signed.package(package)?, locked, platform)?;
         }
     }
 
     let profile = Profile::open(&directory(true)?, DEFAULT).map_err(profile_error)?;
+    let current = current(&profile)?;
     if let Some(applications) = applications() {
         let apps = kept.values().chain(resolved.values());
         check_apps(
@@ -159,6 +188,21 @@ pub(crate) fn configure(
     let mut members = BTreeMap::new();
     for (package, locked) in kept.into_iter().chain(resolved) {
         match &locked.release {
+            None if locked.is_local => {
+                let is_new = !current
+                    .packages
+                    .get(&package)
+                    .is_some_and(|member| member.key == locked.key);
+                local_evaluated(evaluated.as_ref(), &package)?.install(
+                    &package,
+                    &mut store,
+                    is_root,
+                    &cache,
+                    &mut signed,
+                    flags.is_offline,
+                    is_new,
+                )?;
+            }
             Some(release) => {
                 let key = github::install(
                     &mut store,
@@ -194,6 +238,7 @@ pub(crate) fn configure(
             key: locked.key.clone(),
             manifest: locked.manifest.clone(),
             release: locked.release.clone(),
+            is_local: locked.is_local,
             bins: locked.bins.clone(),
             apps: locked.apps.clone(),
             extra: BTreeMap::new(),
@@ -212,7 +257,6 @@ pub(crate) fn configure(
         skipped,
     };
 
-    let current = current(&profile)?;
     if same(&current.packages, &members) {
         return Ok(configured);
     }
@@ -224,6 +268,13 @@ pub(crate) fn configure(
     };
     switch(&profile, DEFAULT, &store, generation)?;
     Ok(configured)
+}
+
+fn local_evaluated<'a>(
+    evaluated: Option<&'a local::Evaluated>,
+    package: &str,
+) -> Result<&'a local::Evaluated, String> {
+    evaluated.ok_or_else(|| format!("{package} comes from rb.package_catalog, which isn't set"))
 }
 
 fn existing_release<'a>(lock: &'a Lock, package: &str, platform: &str) -> Option<&'a Release> {
@@ -244,10 +295,7 @@ pub(crate) fn link_default_apps() -> Result<(), String> {
     link_apps(&profile)
 }
 
-fn requests(
-    intents: Vec<PackageIntent>,
-    has_sources: bool,
-) -> Result<(Requests, Vec<String>), String> {
+fn requests(intents: Vec<PackageIntent>) -> Result<(Requests, Vec<String>), String> {
     let mut requests = Requests::new();
     let mut skipped = Vec::new();
     for intent in intents {
@@ -261,14 +309,6 @@ fn requests(
                 continue;
             }
         };
-
-        if has_sources {
-            skipped.push(format!(
-                "{} comes from rb.package_repository or rb.package_catalog, which replace the signed index",
-                request.name
-            ));
-            continue;
-        }
 
         let (name, wanted) = match (request.resolver.as_deref(), &request.source) {
             (None | Some("rootbeer"), None) => {
@@ -347,9 +387,8 @@ fn reconcile(
     let mut kept = BTreeMap::new();
     for (package, wanted) in requests {
         let locked = lock.get(package, platform);
-        let is_kept = locked.is_some_and(|locked| {
-            !flags.should_update && wanted.is_answered_by(&locked.version, locked.release.as_ref())
-        });
+        let is_kept = locked
+            .is_some_and(|locked| !flags.should_update && wanted.is_answered_by(locked.into()));
 
         if let Some(locked) = locked.filter(|_| is_kept) {
             kept.insert(package.clone(), locked.clone());
@@ -433,6 +472,7 @@ mod tests {
             key: "a".repeat(32).parse().unwrap(),
             manifest: Some(format!("sha256:{}", "0".repeat(64))),
             release: None,
+            is_local: false,
             bins: Default::default(),
             apps: Default::default(),
             extra: Default::default(),
@@ -454,7 +494,7 @@ mod tests {
         mixed.push(PackageIntent::Request(head));
         mixed.extend(intents(&["gitlab:owner/tool"]));
 
-        let (accepted, skipped) = super::requests(mixed, false).unwrap();
+        let (accepted, skipped) = super::requests(mixed).unwrap();
         assert_eq!(accepted.len(), 3);
         assert_eq!(accepted["jq"], Wanted::Index(None));
         assert_eq!(accepted["fd"], Wanted::Index(Some("10.2.0".into())));
@@ -464,14 +504,10 @@ mod tests {
         assert!(skipped[0].starts_with("zig "), "{skipped:?}");
         assert!(skipped[1].starts_with("gitlab:"), "{skipped:?}");
 
-        let (accepted, skipped) = super::requests(intents(&["jq"]), true).unwrap();
-        assert!(accepted.is_empty());
-        assert_eq!(skipped.len(), 1);
-
-        let error = super::requests(intents(&["jq", "jq@1.7"]), false).unwrap_err();
+        let error = super::requests(intents(&["jq", "jq@1.7"])).unwrap_err();
         assert_eq!(error, "jq is asked for at two versions");
 
-        let error = super::requests(intents(&["jq", "github:jqlang/jq"]), false).unwrap_err();
+        let error = super::requests(intents(&["jq", "github:jqlang/jq"])).unwrap_err();
         assert_eq!(error, "jq is asked for from two places");
     }
 

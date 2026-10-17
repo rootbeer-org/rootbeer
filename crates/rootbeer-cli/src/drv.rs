@@ -5,6 +5,7 @@ pub(crate) mod gc;
 mod github;
 mod index;
 mod install;
+mod local;
 pub(crate) mod migrate;
 mod plan;
 pub(crate) mod profile;
@@ -504,7 +505,7 @@ impl Resolver<'_> {
     }
 }
 
-fn present_references(
+pub(super) fn present_references(
     store: &Store,
     key: &Key,
     references: &mut BTreeMap<Key, BTreeSet<Key>>,
@@ -537,7 +538,11 @@ fn label(derivation: Option<&Derivation>) -> String {
 }
 
 /// `name` or `name@version` on `platform`, defaulting to its default version.
-fn target(catalog: &Catalog, package: &str, platform: Platform) -> Result<Target, String> {
+pub(super) fn target(
+    catalog: &Catalog,
+    package: &str,
+    platform: Platform,
+) -> Result<Target, String> {
     let (name, version) = match package.split_once('@') {
         Some((name, version)) => (name, version),
         None => {
@@ -714,17 +719,24 @@ fn entries(value: Option<&Value>) -> Option<BTreeSet<(String, String)>> {
 const LOCATE: &str = "run from a catalog checkout or pass --catalog and --host";
 
 fn load(sources: &Sources) -> Result<(Catalog, BTreeMap<Platform, Host>), String> {
+    load_from(&sources.catalog, &sources.host).map_err(|error| format!("{error}; {LOCATE}"))
+}
+
+pub(super) fn load_from(
+    directory: &Path,
+    host: &Path,
+) -> Result<(Catalog, BTreeMap<Platform, Host>), String> {
     let read = |path: &Path| {
         fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))
     };
 
-    let mut paths = fs::read_dir(&sources.catalog)
+    let mut paths = fs::read_dir(directory)
         .and_then(|entries| {
             entries
                 .map(|entry| Ok(entry?.path()))
                 .collect::<std::io::Result<Vec<_>>>()
         })
-        .map_err(|error| format!("{}: {error}; {LOCATE}", sources.catalog.display()))?;
+        .map_err(|error| format!("{}: {error}", directory.display()))?;
     paths.retain(|path| path.extension().is_some_and(|extension| extension == "lua"));
     paths.sort();
 
@@ -739,9 +751,9 @@ fn load(sources: &Sources) -> Result<(Catalog, BTreeMap<Platform, Host>), String
     )
     .map_err(|error| error.to_string())?;
 
-    let host = read(&sources.host).map_err(|error| format!("{error}; {LOCATE}"))?;
-    let hosts = Host::parse(&sources.host.display().to_string(), &host)
-        .map_err(|error| error.to_string())?;
+    let hosts = read(host)?;
+    let hosts =
+        Host::parse(&host.display().to_string(), &hosts).map_err(|error| error.to_string())?;
 
     Ok((catalog, hosts))
 }

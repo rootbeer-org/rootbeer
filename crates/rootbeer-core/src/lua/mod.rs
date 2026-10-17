@@ -13,4 +13,5 @@ mod test_support;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use package::Checkout;
 pub(crate) use vm::Vm;

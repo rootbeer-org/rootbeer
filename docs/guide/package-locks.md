@@ -78,9 +78,6 @@ Lockfiles are written atomically, and identical contents are not rewritten.
 Malformed JSON or unresolved merge conflicts fail with the filename and parse
 location in every mode, including `--update`; resolve the conflict explicitly.
 
-If you [selected a custom index](/guide/package-sources#use-another-index),
-updates keep using that snapshot until you change its URL and checksum.
-
 `rb self-update` (also available as `rb update`) selects the latest published Rootbeer package from the signed index,
 rather than the separate nightly download channel:
 
