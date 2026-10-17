@@ -298,8 +298,6 @@ fn build(
         present_references(&store, key, &mut references)?;
     }
 
-    let jobs = std::thread::available_parallelism().map_err(|error| error.to_string())?;
-
     for key in &order {
         // Checks aren't outputs, so they run every time.
         if store
@@ -312,46 +310,14 @@ fn build(
             continue;
         }
 
-        // var/log is shared, so the name may be another user's link to a file
-        let log = logs.join(key.as_str());
-        let file = match fs::remove_file(&log) {
-            Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
-            _ => File::options().write(true).create_new(true).open(&log),
-        };
-
-        let mut output = Output {
-            log: file.map_err(|error| format!("{}: {error}", log.display()))?,
-            terminal: is_verbose.then(io::stderr),
-        };
-
-        let mut request = Request {
+        let found = realize(
+            &mut store,
+            is_root,
+            &graph.derivations,
+            &references,
             key,
-            graph: &graph.derivations,
-            references: &references,
-            jobs,
-            log: &mut output,
-        };
-
-        let derivation = graph.derivations.get(key);
-        eprintln!("realizing {key} {}", label(derivation));
-        let found = rootbeer_sandbox::realize(&mut request)
-            .map_err(|error| format!("{error}\nlog: {}", log.display()))?;
-
-        let path = match derivation {
-            Some(Derivation::Fetch(_)) => fetch_path(key),
-            Some(Derivation::Build(build)) => output_path(key, &build.name, &build.version, "out"),
-            Some(Derivation::Unpack(unpack)) => {
-                output_path(key, &unpack.name, &unpack.version, "out")
-            }
-            Some(Derivation::Check(_)) | None => continue,
-        };
-
-        let entry = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .ok_or_else(|| format!("{} has no entry name", path.display()))?;
-
-        seal(&mut store, is_root, key, entry, &found)?;
+            is_verbose,
+        )?;
         references.insert(key.clone(), found);
     }
 
@@ -362,6 +328,59 @@ fn build(
     let out = output_path(&package.build, &build.name, &build.version, "out");
     println!("{}", out.display());
     Ok(())
+}
+
+/// Realizes a derivation whose inputs the store has, logging to var/log, and
+/// seals what it made. Returns the output's references.
+pub(super) fn realize(
+    store: &mut Store,
+    is_root: bool,
+    graph: &BTreeMap<Key, Derivation>,
+    references: &BTreeMap<Key, BTreeSet<Key>>,
+    key: &Key,
+    is_verbose: bool,
+) -> Result<BTreeSet<Key>, String> {
+    let jobs = std::thread::available_parallelism().map_err(|error| error.to_string())?;
+
+    // var/log is shared, so the name may be another user's link to a file
+    let log = Path::new(ROOT).join("var/log").join(key.as_str());
+    let file = match fs::remove_file(&log) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+        _ => File::options().write(true).create_new(true).open(&log),
+    };
+
+    let mut output = Output {
+        log: file.map_err(|error| format!("{}: {error}", log.display()))?,
+        terminal: is_verbose.then(io::stderr),
+    };
+
+    let mut request = Request {
+        key,
+        graph,
+        references,
+        jobs,
+        log: &mut output,
+    };
+
+    let derivation = graph.get(key);
+    eprintln!("realizing {key} {}", label(derivation));
+    let found = rootbeer_sandbox::realize(&mut request)
+        .map_err(|error| format!("{error}\nlog: {}", log.display()))?;
+
+    let path = match derivation {
+        Some(Derivation::Fetch(_)) => fetch_path(key),
+        Some(Derivation::Build(build)) => output_path(key, &build.name, &build.version, "out"),
+        Some(Derivation::Unpack(unpack)) => output_path(key, &unpack.name, &unpack.version, "out"),
+        Some(Derivation::Check(_)) | None => return Ok(found),
+    };
+
+    let entry = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| format!("{} has no entry name", path.display()))?;
+
+    seal(store, is_root, key, entry, &found)?;
+    Ok(found)
 }
 
 /// Registers a new output either as root or with the setuid helper.
