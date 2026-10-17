@@ -272,6 +272,7 @@ impl Sandbox {
         let path = match derivation(request, key)? {
             Derivation::Fetch(_) => fetch_path(key),
             Derivation::Build(build) => output_path(key, &build.name, &build.version, "out"),
+            Derivation::Unpack(unpack) => output_path(key, &unpack.name, &unpack.version, "out"),
             Derivation::Check(_) => {
                 return Err(failure(
                     request.key,
@@ -428,11 +429,11 @@ fn directory(key: &Key) -> PathBuf {
 }
 
 /// Outputs are immutable once scanned.
-fn read_only(out: &Path) -> Result<(), Error> {
+pub(crate) fn read_only(out: &Path) -> Result<(), Error> {
     chmod(out, |mode| mode & !0o222)
 }
 
-fn remove(path: &Path) -> Result<(), Error> {
+pub(crate) fn remove(path: &Path) -> Result<(), Error> {
     let result = match path.symlink_metadata() {
         Ok(metadata) if metadata.is_dir() => {
             // A read-only output's directories must be writable to empty them.
@@ -466,7 +467,7 @@ fn chmod(root: &Path, change: impl Fn(u32) -> u32) -> Result<(), Error> {
     Ok(())
 }
 
-fn failure(key: &Key, reason: &str) -> Error {
+pub(crate) fn failure(key: &Key, reason: &str) -> Error {
     Error::Build {
         key: key.clone(),
         reason: reason.to_string(),

@@ -2265,14 +2265,18 @@ name = "rootbeer-sandbox"
 version = "0.1.0"
 dependencies = [
  "data-encoding",
+ "flate2",
  "goblin",
+ "lzma-rust2",
  "memchr",
  "rootbeer-drv",
  "rustix",
  "sha2 0.10.9",
+ "tar",
  "tempfile",
  "ureq",
  "walkdir",
+ "zip",
 ]
 
 [[package]]

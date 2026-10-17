@@ -1,4 +1,4 @@
-use crate::{Build, Check, Dependency, Derivation, Error, Fetch};
+use crate::{Build, Check, Dependency, Derivation, Error, Fetch, Format, Unpack};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path};
 
@@ -82,6 +82,11 @@ pub fn is_package_name(name: &str) -> bool {
     PACKAGE_NAME.is_match(name)
 }
 
+/// Whether `version` is a version a derivation accepts.
+pub fn is_version(version: &str) -> bool {
+    VERSION.is_match(version)
+}
+
 /// One path component, never `.` or `..`, without control characters.
 pub fn is_file_name(name: &str) -> bool {
     !matches!(name, "" | "." | "..") && !name.contains('/') && !name.contains(char::is_control)
@@ -110,6 +115,7 @@ impl Derivation {
             Derivation::Build(build) => build.validate(),
             Derivation::Fetch(fetch) => fetch.validate(),
             Derivation::Check(check) => check.validate(),
+            Derivation::Unpack(unpack) => unpack.validate(),
         }
     }
 }
@@ -183,6 +189,36 @@ impl Check {
         script(&self.script)?;
         dependencies(&self.dependencies)?;
         env(&self.env)
+    }
+}
+
+impl Unpack {
+    fn validate(&self) -> Result<(), Error> {
+        PACKAGE_NAME.check("name", &self.name)?;
+        VERSION.check("version", &self.version)?;
+
+        if self.bins.is_empty() {
+            return Err(Error::invalid("bins", "", "must name at least one bin"));
+        }
+
+        if self.format == Format::Binary && self.bins.len() != 1 {
+            return Err(Error::invalid("bins", "", "must name exactly one bin"));
+        }
+
+        self.bins.iter().try_for_each(|(bin, path)| {
+            if !is_file_name(bin) {
+                return Err(Error::invalid("bins", bin, "must be a plain file name"));
+            }
+
+            match is_inside(path) {
+                true => Ok(()),
+                false => Err(Error::invalid(
+                    format!("bins.{bin}"),
+                    path,
+                    "must be a relative path inside the output",
+                )),
+            }
+        })
     }
 }
 

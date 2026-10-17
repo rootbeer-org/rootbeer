@@ -1,11 +1,13 @@
 //! rootbeer-sandbox realizes a derivation into the store. It fetches assets,
-//! builds the derivation in a sandbox, and scans outputs for references.
+//! unpacks them, builds the derivation in a sandbox, and scans outputs for
+//! references.
 
 mod build;
 mod darwin;
 mod fetch;
 mod linux;
 mod scan;
+mod unpack;
 
 use rootbeer_drv::{Derivation, Key};
 use std::collections::{BTreeMap, BTreeSet};
@@ -13,6 +15,8 @@ use std::fmt;
 use std::io::{self, Write};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
+
+pub use unpack::executables;
 
 /// One derivation to realize. Everything it names must already be realized.
 pub struct Request<'a> {
@@ -45,7 +49,7 @@ pub enum Error {
     },
 }
 
-/// Fetches, builds, or checks a derivation, replacing any partial output an
+/// Fetches, unpacks, builds, or checks a derivation, replacing any partial output an
 /// interrupted attempt left at its store path. Returns the output's runtime
 /// references when successful.
 pub fn realize(request: &mut Request) -> Result<BTreeSet<Key>, Error> {
@@ -53,6 +57,7 @@ pub fn realize(request: &mut Request) -> Result<BTreeSet<Key>, Error> {
         Derivation::Fetch(fetch) => fetch::fetch(request.key, fetch).map(|()| BTreeSet::new()),
         Derivation::Build(build) => build::build(request, build),
         Derivation::Check(check) => build::check(request, check).map(|()| BTreeSet::new()),
+        Derivation::Unpack(unpack) => unpack::unpack(request, unpack),
     }
 }
 

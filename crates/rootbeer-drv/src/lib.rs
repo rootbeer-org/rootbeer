@@ -16,7 +16,7 @@ use std::path::PathBuf;
 
 pub use error::Error;
 pub use key::{Key, Sha256};
-pub use validate::{is_app_name, is_file_name, is_inside, is_package_name};
+pub use validate::{is_app_name, is_file_name, is_inside, is_package_name, is_version};
 
 /// The store root (fixed by the encoding version and embedded in every output)
 pub const STORE_ROOT: &str = "/opt/rb/store";
@@ -27,6 +27,7 @@ pub enum Derivation {
     Build(Build),
     Fetch(Fetch),
     Check(Check),
+    Unpack(Unpack),
 }
 
 /// A build that produces outputs from a set of inputs with a script and an
@@ -87,6 +88,20 @@ pub struct Check {
     pub script: String,
 }
 
+/// Lays a fetched archive or binary out as an output without running
+/// anything from it. Each of `bins` names a file inside the output that
+/// `bin/` links to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Unpack {
+    pub name: String,
+    pub version: String,
+    pub platform: Platform,
+    pub source: Key,
+    pub format: Format,
+    pub bins: BTreeMap<String, String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Dependency {
@@ -120,6 +135,16 @@ pub enum Allow {
     Tmp,
     /// Pseudo-terminals the build opens itself, for tests that drive a terminal
     Pty,
+}
+
+/// How an unpack reads its source. A binary is the one bin itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(into = "&'static str", try_from = "String")]
+pub enum Format {
+    TarGz,
+    TarXz,
+    Zip,
+    Binary,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -160,6 +185,19 @@ impl Allow {
     }
 }
 
+impl Format {
+    const ALL: [Format; 4] = [Format::TarGz, Format::TarXz, Format::Zip, Format::Binary];
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Format::TarGz => "tar.gz",
+            Format::TarXz => "tar.xz",
+            Format::Zip => "zip",
+            Format::Binary => "binary",
+        }
+    }
+}
+
 impl Platform {
     const ALL: [Platform; 3] = [
         Platform::Aarch64Macos,
@@ -179,6 +217,12 @@ impl Platform {
 impl From<Platform> for &'static str {
     fn from(platform: Platform) -> Self {
         platform.as_str()
+    }
+}
+
+impl From<Format> for &'static str {
+    fn from(format: Format) -> Self {
+        format.as_str()
     }
 }
 
@@ -202,6 +246,17 @@ impl TryFrom<String> for Platform {
             .into_iter()
             .find(|platform| platform.as_str() == value)
             .ok_or_else(|| Error::invalid("platform", &value, "is not a supported platform"))
+    }
+}
+
+impl TryFrom<String> for Format {
+    type Error = Error;
+
+    fn try_from(value: String) -> Result<Self, Error> {
+        Format::ALL
+            .into_iter()
+            .find(|format| format.as_str() == value)
+            .ok_or_else(|| Error::invalid("format", &value, "is not an unpack format"))
     }
 }
 

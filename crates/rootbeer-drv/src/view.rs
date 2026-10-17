@@ -1,6 +1,8 @@
 //! The human view of a derivation, for diffs and terminals. Keys never read it.
 
-use crate::{Build, Check, Dependency, DependencyKind, Derivation, Fetch, Platform};
+use crate::{
+    Build, Check, Dependency, DependencyKind, Derivation, Fetch, Format, Platform, Unpack,
+};
 use std::fmt::{self, Display, Formatter};
 
 impl Display for Derivation {
@@ -9,6 +11,7 @@ impl Display for Derivation {
             Derivation::Build(build) => build.fmt(f),
             Derivation::Fetch(fetch) => fetch.fmt(f),
             Derivation::Check(check) => check.fmt(f),
+            Derivation::Unpack(unpack) => unpack.fmt(f),
         }
     }
 }
@@ -55,7 +58,25 @@ impl Display for Check {
     }
 }
 
+impl Display for Unpack {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        writeln!(f, "kind: unpack")?;
+        writeln!(f, "name: {}", self.name)?;
+        writeln!(f, "version: {}", self.version)?;
+        writeln!(f, "platform: {}", self.platform)?;
+        writeln!(f, "source: {}", self.source)?;
+        writeln!(f, "format: {}", self.format)?;
+        map(f, "bins", self.bins.iter().map(|(n, p)| (n, p.as_str())))
+    }
+}
+
 impl Display for Platform {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl Display for Format {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
     }

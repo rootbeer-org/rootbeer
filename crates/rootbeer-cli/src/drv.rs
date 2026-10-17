@@ -340,6 +340,9 @@ fn build(
         let path = match derivation {
             Some(Derivation::Fetch(_)) => fetch_path(key),
             Some(Derivation::Build(build)) => output_path(key, &build.name, &build.version, "out"),
+            Some(Derivation::Unpack(unpack)) => {
+                output_path(key, &unpack.name, &unpack.version, "out")
+            }
             Some(Derivation::Check(_)) | None => continue,
         };
 
@@ -462,6 +465,7 @@ impl Resolver<'_> {
                 )
             }
             Some(Derivation::Check(check)) => (vec![&check.target], check.dependencies.as_slice()),
+            Some(Derivation::Unpack(unpack)) => (vec![&unpack.source], [].as_slice()),
             Some(Derivation::Fetch(_)) | None => (Vec::new(), [].as_slice()),
         };
 
@@ -507,6 +511,7 @@ fn label(derivation: Option<&Derivation>) -> String {
     match derivation {
         Some(Derivation::Build(build)) => format!("{}@{}", build.name, build.version),
         Some(Derivation::Check(check)) => format!("check {}", check.name),
+        Some(Derivation::Unpack(unpack)) => format!("{}@{}", unpack.name, unpack.version),
         Some(Derivation::Fetch(_)) | None => "fetch".to_string(),
     }
 }

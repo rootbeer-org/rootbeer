@@ -6,6 +6,7 @@ const SOURCE_KEY: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const SHA256: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
 type Mutation = (&'static str, fn(&mut Build));
+type UnpackMutation = (&'static str, fn(&mut Unpack));
 
 fn build() -> Build {
     Build {
@@ -351,4 +352,81 @@ fn names_and_paths_never_leave_the_directory_they_are_joined_to() {
     for name in ["Slack", ".app", ".Slack.app", "a/Slack.app"] {
         assert!(!is_app_name(name), "{name:?}");
     }
+}
+
+fn unpack() -> Unpack {
+    Unpack {
+        name: "ripgrep".to_string(),
+        version: "14.1.1".to_string(),
+        platform: Platform::Aarch64Macos,
+        source: SOURCE_KEY.parse().unwrap(),
+        format: Format::TarGz,
+        bins: BTreeMap::from([("rg".to_string(), "ripgrep-14.1.1/rg".to_string())]),
+    }
+}
+
+#[test]
+fn every_unpack_field_changes_the_key() {
+    let key = |unpack: Unpack| Derivation::Unpack(unpack).key().unwrap();
+    let base = key(unpack());
+    let mutations: Vec<UnpackMutation> = vec![
+        ("name", |u| u.name = "rg".to_string()),
+        ("version", |u| u.version = "14.1.0".to_string()),
+        ("platform", |u| u.platform = Platform::Aarch64Linux),
+        ("source", |u| u.source = DEPENDENCY_KEY.parse().unwrap()),
+        ("format", |u| u.format = Format::TarXz),
+        ("bins", |u| {
+            u.bins.insert("rga".to_string(), "rga".to_string());
+        }),
+    ];
+
+    for (field, mutate) in mutations {
+        let mut changed = unpack();
+        mutate(&mut changed);
+        assert_ne!(key(changed), base, "changing {field} must change the key");
+    }
+
+    let bytes = Derivation::Unpack(unpack()).canonical_bytes().unwrap();
+    let expected = concat!(
+        r#"{"bins":{"rg":"ripgrep-14.1.1/rg"},"format":"tar.gz","kind":"unpack","#,
+        r#""name":"ripgrep","platform":"aarch64-macos","#,
+        r#""source":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","version":"14.1.1"}"#,
+    );
+    assert_eq!(String::from_utf8(bytes).unwrap(), expected);
+}
+
+#[test]
+fn an_unpack_links_plain_names_to_paths_inside_its_output() {
+    let cases: Vec<UnpackMutation> = vec![
+        ("bins", |u| u.bins.clear()),
+        ("bins", |u| {
+            u.bins.insert("bin/rg".to_string(), "rg".to_string());
+        }),
+        ("bins.rg", |u| {
+            u.bins.insert("rg".to_string(), "../rg".to_string());
+        }),
+        ("bins", |u| {
+            u.format = Format::Binary;
+            u.bins.insert("rga".to_string(), "rga".to_string());
+        }),
+        ("version", |u| u.version = "release/1".to_string()),
+    ];
+
+    for (field, mutate) in cases {
+        let mut invalid = unpack();
+        mutate(&mut invalid);
+        let error = Derivation::Unpack(invalid).key().unwrap_err();
+        assert_eq!(error.field, field, "{error}");
+    }
+
+    let unknown = serde_json::from_value::<Derivation>(json!({
+        "kind": "unpack", "name": "rg", "version": "1", "platform": "aarch64-macos",
+        "source": SOURCE_KEY, "format": "rar", "bins": { "rg": "rg" },
+    }));
+    assert!(
+        unknown
+            .unwrap_err()
+            .to_string()
+            .contains("not an unpack format")
+    );
 }
