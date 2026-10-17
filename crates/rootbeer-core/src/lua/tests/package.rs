@@ -127,6 +127,42 @@ fn rb_which_returns_a_locked_package_bin_path() {
 }
 
 #[test]
+fn rb_which_finds_a_locked_release_under_its_repo_name() {
+    let tmp = tempfile::tempdir().unwrap();
+    let platform = format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS);
+    let lock = serde_json::json!({
+        "schema": 5,
+        "packages": { "ripgrep": { platform: {
+            "version": "14.1.1",
+            "key": "a".repeat(32),
+            "release": {
+                "repository": "BurntSushi/ripgrep",
+                "asset": "ripgrep.tar.gz",
+                "url": "https://github.com/BurntSushi/ripgrep/releases/download/14.1.1/ripgrep.tar.gz",
+                "sha256": "0".repeat(64),
+                "format": "tar.gz",
+                "paths": { "rg": "ripgrep-14.1.1/rg" },
+            },
+            "bins": ["rg"],
+        } } },
+    });
+    std::fs::write(tmp.path().join("rootbeer.lock"), lock.to_string()).unwrap();
+    let vm = vm_in(
+        r#"
+        rb.package("github:BurntSushi/ripgrep")
+        result = rb.which("rg")
+        "#,
+        tmp.path(),
+    );
+
+    let result: Option<String> = vm.lua.globals().get("result").unwrap();
+    assert_eq!(
+        result.map(PathBuf::from),
+        Some(crate::env::bin_dir().join("rg"))
+    );
+}
+
+#[test]
 fn rb_which_reads_a_lock_from_before_the_signed_index() {
     let tmp = tempfile::tempdir().unwrap();
     let platform = format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS);

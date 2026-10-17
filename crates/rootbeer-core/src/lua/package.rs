@@ -156,10 +156,10 @@ fn append_packages(lua: &Lua, parsed: Vec<(PackageIntent, Vec<String>)>) {
         .app_data_ref::<PackageBins>()
         .expect("PackageBins not set");
     for (intent, names) in parsed {
-        let is_indexed = matches!(&intent, PackageIntent::Request(request) if is_indexed(request));
+        let is_served = matches!(&intent, PackageIntent::Request(request) if is_served(request));
         for name in names {
-            // Entries the index can't serve stay where the old store put them.
-            let path = match is_indexed {
+            // Entries rb can't install stay where the old store put them.
+            let path = match is_served {
                 true => Some(profile_bin_path(&name)),
                 false => crate::env::legacy_bin(&name),
             };
@@ -171,14 +171,10 @@ fn append_packages(lua: &Lua, parsed: Vec<(PackageIntent, Vec<String>)>) {
     }
 }
 
-fn is_indexed(request: &PackageRequest) -> bool {
-    request
-        .resolver
-        .as_deref()
-        .is_none_or(|name| name == "rootbeer")
-        && request.source.is_none()
-        && request.asset.is_none()
-        && request.bins.is_empty()
+/// Whether rb installs `request` from the signed index or a GitHub release.
+fn is_served(request: &PackageRequest) -> bool {
+    let resolver = request.resolver.as_deref();
+    request.source.is_none() && matches!(resolver, None | Some("rootbeer" | "github"))
 }
 
 fn parse_intent(
@@ -326,12 +322,20 @@ fn batch_entries(table: Table) -> LuaResult<Vec<Value>> {
     Ok(entries.into_values().collect())
 }
 
-/// The commands `rootbeer.lock` recorded for a request the signed index
-/// serves, on this machine's platform.
+/// The commands `rootbeer.lock` recorded for a request rb installs, on this
+/// machine's platform.
 fn request_bins(cx: &Ctx<'_>, request: &PackageRequest) -> Vec<String> {
-    if !is_indexed(request) {
+    if !is_served(request) {
         return Vec::new();
     }
+
+    let name = match request.resolver.as_deref() {
+        Some("github") => rootbeer_profile::release_name(&request.name),
+        _ => Some(request.name.clone()),
+    };
+    let Some(name) = name else {
+        return Vec::new();
+    };
 
     let path = cx.runtime.script_dir.join("rootbeer.lock");
     let platform = format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS);
@@ -344,7 +348,7 @@ fn request_bins(cx: &Ctx<'_>, request: &PackageRequest) -> Vec<String> {
     };
 
     lock.packages
-        .get(&request.name)
+        .get(&name)
         .and_then(|platforms| platforms.get(&platform))
         .map(|locked| locked.bins.iter().cloned().collect())
         .unwrap_or_default()
