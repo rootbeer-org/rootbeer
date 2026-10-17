@@ -1,5 +1,6 @@
 use super::cache::{self, Signed};
-use super::install::{self, Source};
+use super::github;
+use super::install::{self, Source, Wanted};
 use super::profile::{directory, profile_error};
 use super::this_platform;
 use rootbeer_drv::Key;
@@ -11,7 +12,8 @@ use std::process::Command;
 
 #[derive(clap::Args, Debug)]
 pub(crate) struct Args {
-    /// `name` or `name@version`, defaulting to the platform's default version
+    /// `name[@version]`, defaulting to the platform's default version, or
+    /// `github:owner/repo[@tag]` for a release's asset
     package: String,
     /// The command to run, when the package has several
     #[arg(long)]
@@ -45,25 +47,45 @@ pub(crate) fn run(args: Args) -> Result<(), String> {
     let (mut store, is_root) = install::open_store()?;
     let _held = store.hold().map_err(|error| error.to_string())?;
     let source = Source::default();
-    let index = install::open_index(&source, is_root)?;
-    let mut signed = Signed::new(|name| index.package(name).map_err(|error| error.to_string()));
+    let mut index = None;
+    let mut signed = Signed::new(|name| {
+        let index = match &mut index {
+            Some(index) => index,
+            None => index.insert(install::open_index(&source, is_root)?),
+        };
+        index.package(name).map_err(|error| error.to_string())
+    });
     let cache = source.cache();
     let platform = this_platform()?;
 
     let mut installed = Vec::new();
     for request in std::iter::once(&args.package).chain(&args.packages) {
-        let (name, version) = install::request(request);
-        let (_, output) = install::select(signed.package(name)?, version, platform)?;
-        let (key, bins, apps) = (output.key.clone(), output.bins.clone(), output.apps.clone());
+        let (name, wanted) = Wanted::parse(request)?;
+        let (key, bins, apps) = match &wanted {
+            Wanted::Release(request) => {
+                let resolved =
+                    github::resolve(&mut store, is_root, &name, request, platform, None)?;
+                let bins = resolved.release.paths.into_keys().collect();
+                (resolved.key, bins, BTreeMap::new())
+            }
+            Wanted::Local { .. } => return Err(format!("{name} isn't runnable from a catalog")),
+            Wanted::Index(version) => {
+                let package = signed.package(&name)?;
+                let (_, output) = install::select(package, version.as_deref(), platform)?;
+                let (key, bins, apps) =
+                    (output.key.clone(), output.bins.clone(), output.apps.clone());
+                cache::install_into(&cache, &mut store, is_root, &name, &key, Some(&mut signed))?;
+                (key, bins, apps)
+            }
+        };
 
-        cache::install_into(&cache, &mut store, is_root, name, &key, Some(&mut signed))?;
         let path = store
             .path(&key)
             .map_err(|error| error.to_string())?
             .ok_or_else(|| format!("{key} isn't present after installing"))?;
 
         installed.push(Installed {
-            name: name.to_string(),
+            name,
             key,
             path,
             bins,
