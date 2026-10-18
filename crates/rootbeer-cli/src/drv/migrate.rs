@@ -122,7 +122,9 @@ fn configuration(args: &Args) -> Result<Vec<String>, String> {
         .clone()
         .unwrap_or_else(rootbeer_core::script_path);
     if args.script.is_none() && !script.exists() {
-        return match legacy_roots().join("configuration").exists() {
+        // Every old rb wrote this root, and left it empty without a configuration.
+        let root = fs::metadata(legacy_roots().join("configuration"));
+        return match root.is_ok_and(|root| root.len() > 0) {
             true => Err(format!(
                 "`rb apply` ran a configuration that isn't at {}, so pass it with --script",
                 script.display()
