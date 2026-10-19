@@ -40,6 +40,12 @@ fn targets(
     packages: &[String],
     platform: Platform,
 ) -> Result<Vec<Target>, String> {
+    if packages.is_empty() {
+        let mut targets = catalog.targets();
+        targets.retain(|target| target.platform == platform);
+        return Ok(targets);
+    }
+
     let mut targets = Vec::new();
     for package in packages {
         let (name, version) = match package.split_once('@') {
@@ -279,5 +285,31 @@ mod tests {
         );
         let pinned = targets(&catalog, &names(&["mac@1"]), linux).unwrap();
         assert_eq!(pinned.len(), 1);
+    }
+
+    #[test]
+    fn naming_nothing_plans_every_declared_version_on_the_platform() {
+        let digest = "0".repeat(64);
+        let recipe = format!(
+            r#"return {{
+                name = "mac", description = "", homepage = "", default_license = "MIT",
+                source = {{ url = "https://example.com/mac.tar.gz" }},
+                build = {{ backend = "custom", steps = {{}} }},
+                platforms = {{ ["aarch64-macos"] = {{ default_version = "2" }} }},
+                versions = {{
+                    ["1"] = {{ digests = {{ ["aarch64-macos"] = "{digest}" }} }},
+                    ["2"] = {{ digests = {{ ["aarch64-macos"] = "{digest}" }} }},
+                }},
+            }}"#
+        );
+        let catalog = Catalog::parse([("mac.lua", recipe.as_str())]).unwrap();
+        let platform = |name: &str| Platform::try_from(name.to_string()).unwrap();
+
+        let macos = targets(&catalog, &[], platform("aarch64-macos")).unwrap();
+        let versions: Vec<_> = macos.iter().map(|target| target.version.as_str()).collect();
+        assert_eq!(versions, ["1", "2"]);
+        assert!(targets(&catalog, &[], platform("x86_64-linux"))
+            .unwrap()
+            .is_empty());
     }
 }

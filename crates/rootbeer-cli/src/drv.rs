@@ -92,9 +92,9 @@ enum Command {
     Install(install::Args),
     /// Print, as JSON levels, the packages CI must build because no cache has them
     Plan {
-        /// Each `name` or `name@version`. A name without a default version on
-        /// the platform is left out
-        #[arg(required = true)]
+        /// Each `name` or `name@version`, or every declared version when none
+        /// are named. A name without a default version on the platform is
+        /// left out
         packages: Vec<String>,
         #[arg(long, value_parser = parse_platform)]
         platform: Platform,

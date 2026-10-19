@@ -44,7 +44,7 @@ tests; never embed or duplicate production recipes in this repository.
 
 ## Package CI and Publication
 
-- pdr CI plans every default target against `ghcr.io/rootbeer-org/store` and
+- pdr CI plans every declared version against `ghcr.io/rootbeer-org/store` and
   builds only what the store lacks. PRs build and check. Pushes to main build
   again and publish, then `rootbeer-org/index` signs the new entries.
 - Rootbeer's deploy workflow releases the `rootbeer` package the index signed
