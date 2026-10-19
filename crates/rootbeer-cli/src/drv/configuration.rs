@@ -526,7 +526,7 @@ mod tests {
             license: "MIT".into(),
             default: BTreeMap::new(),
             versions: BTreeMap::new(),
-            retired: BTreeMap::new(),
+            ..Package::default()
         };
         let platform = Platform::Aarch64Macos;
         let entry = locked("1.8.2");

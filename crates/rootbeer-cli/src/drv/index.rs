@@ -94,13 +94,10 @@ fn packages(
         let digests = digests(name, &keys)?;
         let mut package = Package {
             name: name.to_string(),
-            description: String::new(),
-            license: String::new(),
-            default: BTreeMap::new(),
-            versions: BTreeMap::new(),
-            retired: BTreeMap::new(),
+            ..Package::default()
         };
 
+        let mut is_described = false;
         for ((target, evaluated), digest) in evaluated.into_iter().zip(digests) {
             let Some(manifest) = digest else {
                 continue;
@@ -109,9 +106,13 @@ fn packages(
             let metadata = &evaluated.metadata;
             let is_default =
                 default(name, target.platform).as_deref() == Some(target.version.as_str());
-            if is_default || package.description.is_empty() {
+            if is_default || !is_described {
                 package.description.clone_from(&metadata.description);
+                package.homepage.clone_from(&metadata.homepage);
                 package.license.clone_from(&metadata.license);
+                package.aliases = metadata.aliases.iter().cloned().collect();
+                package.maintainers.clone_from(&metadata.maintainers);
+                is_described = true;
             }
 
             if is_default {
@@ -146,6 +147,7 @@ fn packages(
 mod tests {
     use super::*;
     use rootbeer_eval::Metadata;
+    use std::collections::BTreeSet;
 
     fn target(name: &str, version: &str, platform: Platform) -> Target {
         Target {
@@ -176,10 +178,10 @@ mod tests {
                 check: None,
                 metadata: Metadata {
                     description: format!("{} {}", target.name, target.version),
-                    homepage: String::new(),
+                    homepage: format!("https://{}.example/{}", target.name, target.version),
                     license: "BSD".into(),
-                    aliases: Vec::new(),
-                    maintainers: Vec::new(),
+                    aliases: vec![format!("{}-cli", target.name)],
+                    maintainers: vec!["tale".into()],
                     bins: [target.name.clone()].into(),
                     apps: BTreeMap::new(),
                 },
@@ -202,6 +204,10 @@ mod tests {
         };
 
         assert_eq!(zstd.description, "zstd 1.5.7");
+        assert_eq!(zstd.homepage, "https://zstd.example/1.5.7");
+        assert_eq!(zstd.aliases, BTreeSet::from(["zstd-cli".into()]));
+        assert_eq!(zstd.maintainers, ["tale"]);
+        assert_eq!((zstd.added, zstd.updated), (None, None));
         assert_eq!(zstd.default, BTreeMap::from([(linux, "1.5.7".into())]));
         assert_eq!(zstd.versions.keys().collect::<Vec<_>>(), ["1.5.6", "1.5.7"]);
         assert!(zstd

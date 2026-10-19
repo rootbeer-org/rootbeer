@@ -386,7 +386,7 @@ mod tests {
                 ("1.5.6".into(), BTreeMap::from([(linux, output('a'))])),
                 ("1.5.7".into(), BTreeMap::from([(linux, output('b'))])),
             ]),
-            retired: BTreeMap::new(),
+            ..Package::default()
         };
 
         let key = |version: Option<&str>| {
