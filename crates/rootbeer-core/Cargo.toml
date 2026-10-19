@@ -10,8 +10,6 @@ embedded-stdlib = []
 
 [dependencies]
 age = { version = "0.12.1", default-features = false, features = ["armor"] }
-rootbeer-store-legacy = { path = "../rootbeer-store-legacy" }
-rootbeer-package = { path = "../rootbeer-package" }
 rootbeer-profile = { path = "../rootbeer-profile" }
 libc = "0.2.182"
 mlua = { version = "0.11.5", features = ["luau-jit", "serialize"] }
@@ -22,6 +20,3 @@ plist = "1"
 toml = "1"
 tempfile = "3"
 
-[dev-dependencies]
-flate2 = "1"
-tar = "0.4"

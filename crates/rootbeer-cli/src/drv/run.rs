@@ -6,9 +6,14 @@ use super::this_platform;
 use rootbeer_drv::Key;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
+use std::io;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::Mutex;
+
+/// What `tool` installed, which this rb holds from GC until it exits.
+static TOOLS: Mutex<BTreeSet<Key>> = Mutex::new(BTreeSet::new());
 
 #[derive(clap::Args, Debug)]
 pub(crate) struct Args {
@@ -133,6 +138,64 @@ pub(crate) fn run(args: Args) -> Result<(), String> {
         "running {}: {error}",
         command.get_program().display()
     ))
+}
+
+/// Installs a package rb's own features run, such as `op` for secrets, from
+/// the signed index, and returns its commands.
+pub(crate) fn tool(
+    name: &str,
+    version: &str,
+    is_offline: bool,
+) -> io::Result<BTreeMap<String, PathBuf>> {
+    if is_offline {
+        return Err(io::Error::other(
+            "it needs the signed index, which --offline doesn't allow",
+        ));
+    }
+
+    // Installing may set up /opt/rb, which asks for sudo.
+    crate::progress::pause();
+    install_tool(name, version).map_err(io::Error::other)
+}
+
+fn install_tool(name: &str, version: &str) -> Result<BTreeMap<String, PathBuf>, String> {
+    let (mut store, is_root) = install::open_store()?;
+    let _held = store.hold().map_err(|error| error.to_string())?;
+    let source = Source::default();
+    let mut index = None;
+    let mut signed = Signed::new(|name| {
+        let index = match &mut index {
+            Some(index) => index,
+            None => index.insert(install::open_index(&source, is_root)?),
+        };
+        index.package(name).map_err(|error| error.to_string())
+    });
+
+    let package = signed.package(name)?;
+    let (_, output) = install::select(package, Some(version), this_platform()?)?;
+    let (key, bins) = (output.key.clone(), output.bins.clone());
+    cache::install_into(
+        &source.cache(),
+        &mut store,
+        is_root,
+        name,
+        &key,
+        Some(&mut signed),
+    )?;
+    let path = store
+        .path(&key)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("{key} isn't present after installing"))?;
+
+    let mut tools = TOOLS.lock().unwrap_or_else(|error| error.into_inner());
+    tools.insert(key);
+    rootbeer_profile::hold_while_running(&directory(true)?, &tools).map_err(profile_error)?;
+    let bins = bins.into_iter().map(|bin| {
+        let path = path.join("bin").join(&bin);
+        (bin, path)
+    });
+
+    Ok(bins.collect())
 }
 
 fn search_path(installed: &[Installed]) -> Result<OsString, String> {

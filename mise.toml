@@ -9,6 +9,4 @@ stylua = "latest"
 "aqua:Kampfkarren/selene" = "latest"
 
 [env]
-ROOTBEER_PDR_URL = "https://pdr.rbpkg.com/v3/current.json"
-ROOTBEER_PDR_PUBLIC_KEY = "028c5b185fb63ea61128a0bf6fb0decc8b700020561db08d82a998c7d0493bc0"
 _.path = ["./scripts/bin", "./target/debug"]

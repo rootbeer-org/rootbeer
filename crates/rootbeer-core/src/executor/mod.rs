@@ -47,15 +47,6 @@ pub enum OpResult {
     RemoteUnchanged {
         url: String,
     },
-    PackageRealized {
-        name: String,
-        version: String,
-        store_path: Option<PathBuf>,
-    },
-    PackageUnchanged {
-        name: String,
-        version: String,
-    },
     PackagePlanned {
         spec: String,
     },
@@ -78,5 +69,5 @@ pub struct ExecutionReport {
 
 #[cfg(test)]
 pub use apply::apply;
-pub use apply::{apply_with_options, ApplyOptions};
+pub use apply::apply_with_tools;
 pub use dry_run::dry_run;

@@ -26,8 +26,8 @@
         let
           craneLib = inputs.crane.mkLib pkgs;
 
-          # build.rs embeds the stdlib and package definitions; `rb licenses` embeds licenses/.
-          luaFilter = path: _type: builtins.match ".*(lua|packages|licenses)/.*" path != null;
+          # build.rs embeds the stdlib; `rb licenses` embeds licenses/.
+          luaFilter = path: _type: builtins.match ".*(lua|licenses)/.*" path != null;
           src = lib.cleanSourceWith {
             src = ./.;
             filter = path: type: (luaFilter path type) || (craneLib.filterCargoSources path type);
@@ -50,21 +50,11 @@
               meta = { license = lib.licenses.mit; };
             }
           );
-          forge = craneLib.buildPackage (
-            commonArgs
-            // {
-              inherit cargoArtifacts;
-              pname = "rootbeer-forge";
-              cargoExtraArgs = "--package rootbeer-forge";
-              meta = { license = lib.licenses.mit; };
-            }
-          );
         in
         {
           packages = {
             default = rootbeer;
             inherit rootbeer;
-            rootbeer-forge = forge;
           };
 
           checks = {

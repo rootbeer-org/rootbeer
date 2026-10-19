@@ -1,62 +1,65 @@
+use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 use std::io;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Mutex;
 
-use crate::package::{standalone, PackageRequest};
+/// Installs a package from the signed index for rb's own use and returns its
+/// commands' absolute paths, keeping it from GC while rb runs.
+pub type Install = fn(&str, &str, bool) -> io::Result<BTreeMap<String, PathBuf>>;
 
 #[derive(Debug, Default)]
 pub(crate) struct ToolRuntime {
+    install: Option<Install>,
     is_offline: bool,
-    packages: Mutex<BTreeMap<Vec<u8>, BTreeMap<String, PathBuf>>>,
+    packages: Mutex<BTreeMap<(String, String), BTreeMap<String, PathBuf>>>,
 }
 
 impl ToolRuntime {
-    pub(crate) fn new(is_offline: bool) -> Self {
+    pub(crate) fn new(install: Option<Install>, is_offline: bool) -> Self {
         Self {
+            install,
             is_offline,
             ..Self::default()
         }
     }
 
-    pub(crate) fn command(&self, request: &PackageRequest, bin: &str) -> io::Result<Command> {
-        self.command_with(request, bin, |request, is_offline| {
-            let environment =
-                standalone::prepare(std::slice::from_ref(request), false, is_offline, false)
-                    .map_err(io::Error::other)?;
-            let package = environment
-                .packages
-                .into_iter()
-                .next()
-                .ok_or_else(|| io::Error::other("tool package was not realized"))?;
-            Ok(package.bins)
+    pub(crate) fn command(&self, name: &str, version: &str, bin: &str) -> io::Result<Command> {
+        self.command_with(name, version, bin, |name, version, is_offline| {
+            let install = self
+                .install
+                .ok_or_else(|| io::Error::other("only rb can install it"))?;
+            install(name, version, is_offline)
         })
     }
 
     fn command_with(
         &self,
-        request: &PackageRequest,
+        name: &str,
+        version: &str,
         bin: &str,
-        prepare: impl FnOnce(&PackageRequest, bool) -> io::Result<BTreeMap<String, PathBuf>>,
+        install: impl FnOnce(&str, &str, bool) -> io::Result<BTreeMap<String, PathBuf>>,
     ) -> io::Result<Command> {
-        let key = serde_json::to_vec(request)?;
+        let key = (name.to_string(), version.to_string());
         let mut packages = self
             .packages
             .lock()
             .map_err(|_| io::Error::other("tool runtime lock poisoned"))?;
-        if !packages.contains_key(&key) {
-            let bins = prepare(request, self.is_offline)
-                .map_err(|error| io::Error::other(format!("runtime tool {request}: {error}")))?;
-            packages.insert(key.clone(), bins);
-        }
+        let bins = match packages.entry(key) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => entry.insert(
+                install(name, version, self.is_offline)
+                    .map_err(|error| io::Error::other(format!("{name}@{version}: {error}")))?,
+            ),
+        };
 
-        let path = packages[&key].get(bin).ok_or_else(|| {
-            io::Error::other(format!("runtime tool {request} does not export {bin}"))
-        })?;
+        let path = bins
+            .get(bin)
+            .ok_or_else(|| io::Error::other(format!("{name}@{version} has no command {bin}")))?;
         if !path.is_absolute() {
             return Err(io::Error::other(format!(
-                "runtime tool {request} returned a relative executable path"
+                "{name}@{version}'s {bin} isn't an absolute path"
             )));
         }
         Ok(Command::new(path))
@@ -73,10 +76,9 @@ mod tests {
 
     #[test]
     fn shares_package_exports_and_separates_versions() {
-        let tools = ToolRuntime::new(true);
+        let tools = ToolRuntime::new(None, true);
         let count = Cell::new(0);
-        let request = PackageRequest::parse("github:example/tool@v1");
-        let prepare = |_: &PackageRequest, is_offline: bool| {
+        let install = |_: &str, _: &str, is_offline: bool| {
             assert!(is_offline);
             count.set(count.get() + 1);
             Ok(BTreeMap::from([
@@ -85,34 +87,34 @@ mod tests {
             ]))
         };
         for bin in ["first", "second", "first"] {
-            let command = tools.command_with(&request, bin, prepare).unwrap();
+            let command = tools.command_with("tool", "1", bin, install).unwrap();
             assert_eq!(
                 command.get_program(),
                 PathBuf::from(format!("/store/{bin}"))
             );
         }
         assert_eq!(count.get(), 1);
-        tools
-            .command_with(&request.clone().version("v2"), "first", prepare)
-            .unwrap();
+        tools.command_with("tool", "2", "first", install).unwrap();
         assert_eq!(count.get(), 2);
-        assert!(tools.command_with(&request, "missing", prepare).is_err());
+        assert!(tools.command_with("tool", "1", "missing", install).is_err());
         assert_eq!(count.get(), 2);
     }
 
     #[test]
-    fn retries_failed_preparation_and_rejects_relative_executables() {
+    fn retries_failed_installs_and_rejects_relative_executables() {
         let tools = ToolRuntime::default();
-        let request = PackageRequest::new("example");
         let error = tools
-            .command_with(&request, "tool", |_, _| Err(io::Error::other("uncached")))
+            .command_with("example", "1", "tool", |_, _, _| {
+                Err(io::Error::other("offline"))
+            })
             .unwrap_err();
-        assert!(error.to_string().contains("runtime tool example: uncached"));
+        assert_eq!(error.to_string(), "example@1: offline");
         assert!(tools
-            .command_with(&request, "tool", |_, _| {
+            .command_with("example", "1", "tool", |_, _, _| {
                 Ok(BTreeMap::from([("tool".into(), PathBuf::from("relative"))]))
             })
             .is_err());
+        assert!(tools.command("example", "1", "tool").is_err());
     }
 
     #[test]
@@ -125,10 +127,9 @@ mod tests {
             root.path().join("key.txt").display()
         )).unwrap();
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
-        let tools = Arc::new(ToolRuntime::new(true));
-        let request = PackageRequest::parse("op@2.39.0");
+        let tools = Arc::new(ToolRuntime::new(None, true));
         tools
-            .command_with(&request, "op", |_, _| {
+            .command_with("op", "2.39.0", "op", |_, _, _| {
                 Ok(BTreeMap::from([("op".into(), executable)]))
             })
             .unwrap();
@@ -153,17 +154,7 @@ mod tests {
             fn on_output(&mut self, _: &str) {}
             fn on_result(&mut self, _: &crate::OpResult) {}
         }
-        crate::executor::apply_with_options(
-            &tools,
-            &ops,
-            false,
-            &mut Handler,
-            crate::executor::ApplyOptions {
-                package_offline: true,
-                ..Default::default()
-            },
-        )
-        .unwrap();
+        crate::executor::apply_with_tools(&tools, &ops, false, &mut Handler).unwrap();
         assert_eq!(
             fs::read(root.path().join("read")).unwrap(),
             b"managed-value"
@@ -177,19 +168,5 @@ mod tests {
             b"decrypted"
         );
         assert_eq!(tools.packages.lock().unwrap().len(), 1);
-    }
-}
-
-#[cfg(test)]
-mod integration_tests {
-    #[test]
-    #[ignore = "requires op@2.39.0 in the local standalone cache"]
-    fn cached_provider_runtime_uses_packaged_op() {
-        let tools = super::ToolRuntime::new(true);
-        let mut command = crate::one_password::command(&tools).unwrap();
-        assert!(std::path::Path::new(command.get_program()).is_absolute());
-        let output = command.arg("--version").env("PATH", "").output().unwrap();
-        assert!(output.status.success());
-        assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), "2.39.0");
     }
 }

@@ -7,7 +7,7 @@ use super::profile::{
 };
 use super::this_platform;
 use rootbeer_core::env::{profiles, DEFAULT};
-use rootbeer_core::package::PackageIntent;
+use rootbeer_core::package::PackageRequest;
 use rootbeer_core::PackageLockOptions;
 use rootbeer_drv::{output_path, Platform};
 use rootbeer_profile::{Error, Generation, Lock, Locked, Member, Profile, Release};
@@ -23,21 +23,19 @@ type Requests = BTreeMap<String, Wanted>;
 pub(crate) struct Configured {
     /// Whether apps need linking once the rest of the configuration runs.
     pub(crate) should_link_apps: bool,
-    /// Entries only the old store can serve, each with why.
-    pub(crate) skipped: Vec<String>,
 }
 
-/// Installs what the signed index, GitHub releases, and the local catalog
-/// serve into `default` and skips the rest, which the old store keeps serving
-/// until rb can install it. A name the catalog defines comes from its recipe.
+/// Installs what the configuration asks for from the signed index, GitHub
+/// releases, and the local catalog into `default`. A name the catalog defines
+/// comes from its recipe.
 pub(crate) fn configure(
-    intents: Vec<PackageIntent>,
+    packages: Vec<PackageRequest>,
     catalog: Option<&Path>,
     script_dir: &Path,
     flags: &PackageLockOptions,
     source: &Source,
 ) -> Result<Configured, String> {
-    let (mut requests, skipped) = requests(intents)?;
+    let mut requests = requests(packages)?;
     let path = script_dir.join("rootbeer.lock");
     let existing = read(&path, flags.is_locked)?;
     let platform = this_platform()?;
@@ -85,7 +83,6 @@ pub(crate) fn configure(
 
         return Ok(Configured {
             should_link_apps: false,
-            skipped,
         });
     }
 
@@ -254,7 +251,6 @@ pub(crate) fn configure(
 
     let configured = Configured {
         should_link_apps: true,
-        skipped,
     };
 
     if same(&current.packages, &members) {
@@ -295,39 +291,21 @@ pub(crate) fn link_default_apps() -> Result<(), String> {
     link_apps(&profile)
 }
 
-fn requests(intents: Vec<PackageIntent>) -> Result<(Requests, Vec<String>), String> {
+fn requests(packages: Vec<PackageRequest>) -> Result<Requests, String> {
     let mut requests = Requests::new();
-    let mut skipped = Vec::new();
-    for intent in intents {
-        let request = match intent {
-            PackageIntent::Request(request) => request,
-            PackageIntent::Locked(package) => {
-                skipped.push(format!(
-                    "{}@{} is an exact package spec, which the signed index can't serve",
-                    package.name, package.version
-                ));
-                continue;
-            }
-        };
-
-        let (name, wanted) = match (request.resolver.as_deref(), &request.source) {
-            (None | Some("rootbeer"), None) => {
-                (request.name.clone(), Wanted::Index(request.version.clone()))
-            }
-            (Some("github"), None) => {
-                let mut release = github::Request::new(&request.name, request.version.clone())?;
-                release.asset = request.asset.clone();
-                release.paths = paths(&request.bins)?;
-                (install::named(&request.name)?, Wanted::Release(release))
-            }
-            (resolver, _) => {
-                let resolver = resolver.map(|name| format!("{name}:"));
-                skipped.push(format!(
-                    "{}{} doesn't come from the signed index or a GitHub release",
-                    resolver.unwrap_or_default(),
-                    request.name
-                ));
-                continue;
+    for package in packages {
+        let (name, wanted) = match package {
+            PackageRequest::Index { name, version } => (name, Wanted::Index(version)),
+            PackageRequest::Release {
+                repository,
+                tag,
+                asset,
+                bins,
+            } => {
+                let mut release = github::Request::new(&repository, tag)?;
+                release.asset = asset;
+                release.paths = paths(&bins)?;
+                (install::named(&repository)?, Wanted::Release(release))
             }
         };
 
@@ -344,7 +322,7 @@ fn requests(intents: Vec<PackageIntent>) -> Result<(Requests, Vec<String>), Stri
         }
     }
 
-    Ok((requests, skipped))
+    Ok(requests)
 }
 
 fn paths(bins: &BTreeMap<String, PathBuf>) -> Result<BTreeMap<String, String>, String> {
@@ -463,7 +441,6 @@ fn same(current: &BTreeMap<String, Member>, members: &BTreeMap<String, Member>) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rootbeer_core::package::{PackageRequest, SourceSelection};
     use rootbeer_trust::Output;
 
     fn locked(version: &str) -> Locked {
@@ -480,34 +457,31 @@ mod tests {
     }
 
     #[test]
-    fn requests_the_index_can_serve_are_kept_and_the_rest_skipped() {
-        let intents = |requests: &[&str]| {
+    fn requests_are_keyed_by_the_name_they_install_under() {
+        let packages = |requests: &[&str]| {
             requests
                 .iter()
-                .map(|request| PackageIntent::Request(PackageRequest::parse(request)))
+                .map(|request| PackageRequest::parse(request).unwrap())
                 .collect::<Vec<_>>()
         };
 
-        let mut head = PackageRequest::parse("zig");
-        head.source = Some(SourceSelection::Head);
-        let mut mixed = intents(&["jq", "fd@10.2.0", "jq", "github:owner/Tool_X@1.0"]);
-        mixed.push(PackageIntent::Request(head));
-        mixed.extend(intents(&["gitlab:owner/tool"]));
-
-        let (accepted, skipped) = super::requests(mixed).unwrap();
+        let accepted = super::requests(packages(&[
+            "jq",
+            "fd@10.2.0",
+            "jq",
+            "github:owner/Tool_X@1.0",
+        ]))
+        .unwrap();
         assert_eq!(accepted.len(), 3);
         assert_eq!(accepted["jq"], Wanted::Index(None));
         assert_eq!(accepted["fd"], Wanted::Index(Some("10.2.0".into())));
         let release = github::Request::new("owner/Tool_X", Some("1.0".into())).unwrap();
         assert_eq!(accepted["tool-x"], Wanted::Release(release));
-        assert_eq!(skipped.len(), 2);
-        assert!(skipped[0].starts_with("zig "), "{skipped:?}");
-        assert!(skipped[1].starts_with("gitlab:"), "{skipped:?}");
 
-        let error = super::requests(intents(&["jq", "jq@1.7"])).unwrap_err();
+        let error = super::requests(packages(&["jq", "jq@1.7"])).unwrap_err();
         assert_eq!(error, "jq is asked for at two versions");
 
-        let error = super::requests(intents(&["jq", "github:jqlang/jq"])).unwrap_err();
+        let error = super::requests(packages(&["jq", "github:jqlang/jq"])).unwrap_err();
         assert_eq!(error, "jq is asked for from two places");
     }
 

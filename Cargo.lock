@@ -1131,12 +1131,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6dbf3de79e51f3d586ab4cb9d5c3e2c14aa28ed23d180cf89b4df0454a69cc87"
 
 [[package]]
-name = "httpdate"
-version = "1.0.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
-
-[[package]]
 name = "hybrid-array"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2070,26 +2064,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rootbeer-build"
-version = "0.1.0"
-dependencies = [
- "flate2",
- "goblin",
- "libc",
- "proc-macro2",
- "ring",
- "rootbeer-catalog",
- "rootbeer-package",
- "rootbeer-store-legacy",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "syn 2.0.116",
- "tar",
- "tempfile",
-]
-
-[[package]]
 name = "rootbeer-cache"
 version = "0.1.0"
 dependencies = [
@@ -2101,17 +2075,6 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "ureq",
-]
-
-[[package]]
-name = "rootbeer-catalog"
-version = "0.1.0"
-dependencies = [
- "http",
- "ring",
- "serde",
- "serde_json",
- "sha2 0.10.9",
 ]
 
 [[package]]
@@ -2143,17 +2106,13 @@ name = "rootbeer-core"
 version = "0.1.0"
 dependencies = [
  "age",
- "flate2",
  "libc",
  "mlua",
  "plist",
- "rootbeer-package",
  "rootbeer-profile",
- "rootbeer-store-legacy",
  "serde",
  "serde_json",
  "serde_yml",
- "tar",
  "tempfile",
  "toml 1.0.3+spec-1.1.0",
 ]
@@ -2181,22 +2140,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rootbeer-forge"
-version = "0.1.0"
-dependencies = [
- "base64",
- "clap",
- "flate2",
- "rootbeer-packaging",
- "serde",
- "serde_json",
- "tar",
- "tempfile",
- "toml 1.0.3+spec-1.1.0",
- "ureq",
-]
-
-[[package]]
 name = "rootbeer-helper"
 version = "0.1.0"
 dependencies = [
@@ -2204,50 +2147,6 @@ dependencies = [
  "rootbeer-profile",
  "rootbeer-store",
  "rustix",
-]
-
-[[package]]
-name = "rootbeer-package"
-version = "0.1.0"
-dependencies = [
- "flate2",
- "httpdate",
- "libc",
- "lzma-rust2",
- "mlua",
- "ring",
- "rootbeer-catalog",
- "rootbeer-store-legacy",
- "serde",
- "serde_json",
- "serde_yml",
- "sha2 0.10.9",
- "tar",
- "tempfile",
- "ureq",
- "zip",
-]
-
-[[package]]
-name = "rootbeer-packaging"
-version = "0.1.0"
-dependencies = [
- "base64",
- "flate2",
- "proc-macro2",
- "quick-xml",
- "ring",
- "rootbeer-build",
- "rootbeer-catalog",
- "rootbeer-package",
- "rootbeer-store-legacy",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "syn 2.0.116",
- "tar",
- "tempfile",
- "ureq",
 ]
 
 [[package]]
@@ -2295,17 +2194,6 @@ dependencies = [
  "tempfile",
  "walkdir",
  "zstd",
-]
-
-[[package]]
-name = "rootbeer-store-legacy"
-version = "0.1.0"
-dependencies = [
- "libc",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tempfile",
 ]
 
 [[package]]
@@ -2604,7 +2492,6 @@ version = "1.0.149"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "83fc039473c5595ace860d8c4fafa220ff474b3fc6bfdb4293327f1a37e94d86"
 dependencies = [
- "indexmap",
  "itoa",
  "memchr",
  "serde",

@@ -108,8 +108,6 @@ impl Commands {
 
 fn main() {
     let cli = Cli::parse();
-    rootbeer_core::package::progress::observe(progress::report);
-    rootbeer_core::package::newer::observe(newer::relaunch);
     if cli.command.can_relaunch() {
         newer::allow();
     }
