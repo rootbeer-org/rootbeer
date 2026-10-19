@@ -1,71 +1,58 @@
-# Package distribution and trust
+# Index hosting and trust
 
-| Site            | Published content                                                             |
-| --------------- | ----------------------------------------------------------------------------- |
-| `rbpkg.com`     | Documentation, package search, installer, and nightly CLI binaries.           |
-| `pdr.rbpkg.com` | The signed root, one document per package, and independently signed records. |
-| GHCR            | Source builds and byte-identical upstream mirrors, addressed by digest.       |
+| Location                       | Published content                                       |
+| ------------------------------ | ------------------------------------------------------- |
+| `rbpkg.com`                    | Documentation, the installer, and the bootstrap channel |
+| `rootbeer-org.github.io/index` | The signed package index, a TUF repository              |
+| `ghcr.io/rootbeer-org/store`   | Package outputs, addressed by derivation key            |
 
-The web UI and `rb search` read the signed root alone. Installing a package fetches
-that package's document and the one signed record it names, then the artifact: a
-source build from GHCR, or an upstream binary from its vendor or mirror. No other
-package's data is downloaded.
+Trust comes from the index's signatures, never from a URL. The registry is
+untrusted storage.
 
-## Published files
+## The index
 
-Everything except the root is addressed by digest, beside the root. Trust comes from
-the root's signature and those digests, never from a URL, so a mirror is a copy of the
-directory.
+[rootbeer-org/index](https://github.com/rootbeer-org/index) serves `metadata/`
+and `targets/` from GitHub Pages. Each target `<name>.json` lists a package's
+description, license, default version per platform, and every version's outputs:
+the derivation key, the manifest digest, and its commands and macOS apps.
 
-- `current.json`: the signed root. Per package: metadata, license, maintainers,
-  publication times, and for each platform the installable version, its kind and
-  commands; plus the digest of the package's document.
-- `roots/<sha256>.json`: immutable copies of each root, which locks pin.
-- `packages/<sha256>.json`: every published version of one package, with each
-  platform's recipe, record digest, and publication time.
-- `records/<sha256>.json`: individually signed package records identifying exact
-  artifact bytes, installation instructions, provenance, and when they were signed.
+The offline root keys sign `root.json` and never come near CI. pdr's push to main
+writes new entries with `rb drv index`, and the index's sign workflow merges them
+and signs with the online key. A daily run renews the signatures, since TUF
+metadata expires.
 
-The root is signed as compact JSON with recursively sorted object keys:
+`rb` embeds the initial root and refreshes through
+[`tough`](https://github.com/awslabs/tough), which handles key rotation, expiry,
+and rollback. Each trusted root keeps its own metadata under
+`~/.local/state/rootbeer`.
 
-```text
-["rootbeer-pdr-v3",sequence,packages]
-```
+## Installing
 
-Each package record signs its exact embedded JSON bytes. A record distinguishes
-source-build evidence from verified upstream binaries.
+Installing a package refreshes the index, reads that package's target, and picks
+a version for the platform. `rb` then pulls the output's OCI manifest from
+`ghcr.io/rootbeer-org/store` by the signed digest, does the same for each store
+reference, and hands the archive to `rb-helper pull`, which checks its digest.
 
-A package job prepares and checks one package/platform, retains the result, then
-signs and uploads it to GHCR. `rootbeer-forge publish-records` adds successful
-records to those the previous root carried, keeping a previous record only while the
-catalog still approves exactly its recipe and revision. It rebuilds and downloads
-nothing. A platform keeps listing its previous version until its new default is
-published, so a failed package never takes a working one away.
+A rebuild retires an output's old key. It stays installable for existing locks,
+since the index keeps its manifest signed.
 
-## Release configuration
+`--offline` never opens the index, so only outputs already in the store will do.
+GitHub release requests and local recipe checkouts are not signed by the index.
+Profiles and `rootbeer.lock` record them as such.
 
-CLI and website builds embed `ROOTBEER_PDR_URL`, the URL of `current.json`, and
-`ROOTBEER_PDR_PUBLIC_KEY`. Set both together. The key is a 32-byte Ed25519 public
-key encoded as 64 lowercase hex characters. The private key belongs only in the
-publishing environment and its secure backup.
+## The bootstrap channel
 
-Rootbeer checks the root's signature and rejects rollback relative to its verified
-local history. It checks package documents and records against their digests,
-verifies the record's signature, identity, platform, and recipe, then checks artifact
-hashes during installation. Fresh clients have no previous sequence to compare. The
-root has no expiry policy.
+`rbpkg.com/bootstrap/v1/<platform>.json` names the newest released `rb` for each
+platform: a DSSE envelope over its version, serial, archive URL, and SHA-256,
+signed with an Ed25519 key `rb` embeds. The installer starts from it. An `rb`
+that meets state written by a newer one, such as a store layout, generation, or
+lock schema it doesn't know, fetches the release, checks the signature, serial,
+and digest, and runs it in its place.
 
-A package whose `min_engine_level` is above what this rb implements is listed by
-search as needing a newer rb, and installing it asks you to run `rb self-update`.
-A root whose schema is newer than this rb fails with the same instruction.
+Rootbeer's deploy workflow publishes it on every push to main. It installs the
+`rootbeer` package from the signed index, checks that its serial is newer than
+what's served and that its commit descends from the served one, signs the
+releases, and deploys them with the site. A gate then checks that the previous
+release relaunches into the new one.
 
-Matching locks require no refresh. On network availability errors, Rootbeer uses
-its verified cached root and reports that fallback. Invalid signatures, corrupt
-metadata, and rollback attempts fail. `rb apply --update` requires a successful
-refresh; offline use requires cached metadata and contents. A missing published
-package never triggers an implicit local source build.
-
-Keep roots, package documents, records, and GHCR blobs available for existing locks.
-If moving the endpoint, copy the directory, preserve cross-origin browser access,
-then rebuild the CLI and website with the new URL. Cached trust history is scoped to
-endpoint and verification key.
+The protocol is frozen. Changes to `rootbeer-bootstrap` are additive only.

@@ -40,26 +40,30 @@ cargo build
 cargo build --release
 ```
 
-The debug binary is automatically on your `PATH` via the `mise.toml` env
-config, so you can run `rb` and `rootbeer-forge` directly after building.
+`scripts/bin/rb` is on your `PATH` through the `mise.toml` env config and runs
+the working tree with `cargo run`. `rb` expects `rb-helper` beside it to set up
+`/opt/rb`, and `cargo build` builds both.
 
-### Prebuilt Forge
+### Prebuilt binaries
 
-Successful main CI pushes the tested Forge binaries to
-`ghcr.io/rootbeer-org/rootbeer-forge:<commit>-<target>` as OCI artifacts for
-Linux x86-64, Linux ARM64, and macOS ARM64. The index pins an exact engine
-commit and verifies the binary's GitHub build attestation before running it.
-Building from source remains available for local development.
+Successful main CI pushes the tested `rb` and `rb-helper` binaries to
+`ghcr.io/rootbeer-org/rb:<commit>-<target>` as OCI artifacts for Linux x86-64,
+Linux ARM64, and macOS ARM64, with GitHub build attestations.
+[setup-rb](https://github.com/rootbeer-org/setup-rb) installs them in CI, as pdr
+does at its pinned engine commit.
 
 For example, on Linux x86-64 with [ORAS](https://oras.land), set `revision` to
-the full engine commit:
+the full commit:
 
 ```sh
-oras pull "ghcr.io/rootbeer-org/rootbeer-forge:$revision-x86_64-unknown-linux-gnu"
-gh attestation verify rootbeer-forge-x86_64-unknown-linux-gnu --repo rootbeer-org/rootbeer \
-  --signer-workflow rootbeer-org/rootbeer/.github/workflows/build.yml \
-  --source-ref refs/heads/main --source-digest "$revision" --deny-self-hosted-runners
-chmod +x rootbeer-forge-x86_64-unknown-linux-gnu
+target=x86_64-unknown-linux-gnu
+oras pull "ghcr.io/rootbeer-org/rb:$revision-$target"
+for binary in rb rb-helper; do
+  gh attestation verify "$binary-$target" --repo rootbeer-org/rootbeer \
+    --signer-workflow rootbeer-org/rootbeer/.github/workflows/build.yml \
+    --source-ref refs/heads/main --source-digest "$revision" --deny-self-hosted-runners
+done
+chmod +x "rb-$target" "rb-helper-$target"
 ```
 
 ### With Nix
@@ -72,8 +76,7 @@ nix build
 nix flake check
 ```
 
-The binary is built to `./result/bin/rb`. Build the maintainer tool separately
-with `nix build .#rootbeer-forge`.
+The binary is built to `./result/bin/rb`.
 
 ## Running Tests
 

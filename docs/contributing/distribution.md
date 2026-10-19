@@ -19,9 +19,11 @@ ROOTBEER_LUA_DIR=/usr/share/rootbeer/lua \
 Ship the repository's `lua/rootbeer/` tree under that directory. Users can override
 the directory with `rb --lua-dir /path/to/lua apply`.
 
-Official package-catalog access is configured separately through the public
-endpoint and verification key embedded at build time. Release CI requires both.
-Catalog snapshots are fetched at runtime and verified before caching; recipes
-are never bundled in the executable. See
-[index hosting and trust](/contributing/package-hosting). Do not package the
-publisher's private signing key.
+`rb` embeds the package index's initial TUF root, the index URL, and the
+bootstrap channel's verification keys. Recipes are never bundled in the
+executable. See [index hosting and trust](/contributing/package-hosting).
+
+Ship `rb-helper` beside `rb`. The first command that needs `/opt/rb` runs
+`sudo rb-helper setup <group>` from the directory `rb` lives in.
+
+A build without `RB_SERIAL` never relaunches into a newer released `rb`.
