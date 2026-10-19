@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const INDEX: &str = "https://rootbeer-org.github.io/index/";
+const INDEX: &str = "https://index.rbpkg.com/";
 const TRUSTED_ROOT: &[u8] = include_bytes!("root.json");
 
 #[derive(clap::Args, Debug)]

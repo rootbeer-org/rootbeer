@@ -1,13 +1,15 @@
 # Index hosting and trust
 
-| Location                       | Published content                                       |
-| ------------------------------ | ------------------------------------------------------- |
-| `rbpkg.com`                    | Documentation, the installer, and the bootstrap channel |
-| `rootbeer-org.github.io/index` | The signed package index, a TUF repository              |
-| `ghcr.io/rootbeer-org/store`   | Package outputs, addressed by derivation key            |
+| Location                     | Published content                                       |
+| ---------------------------- | ------------------------------------------------------- |
+| `rbpkg.com`                  | Documentation, the installer, and the bootstrap channel |
+| `index.rbpkg.com`            | The signed package index, a TUF repository              |
+| `ghcr.io/rootbeer-org/store` | Package outputs, addressed by derivation key            |
 
 Trust comes from the index's signatures, never from a URL. The registry is
-untrusted storage.
+untrusted storage. rb from before index.rbpkg.com fetches
+`rootbeer-org.github.io/index`, which GitHub redirects here, so the index
+repository keeps its custom domain and HTTPS enforcement.
 
 ## The index
 
