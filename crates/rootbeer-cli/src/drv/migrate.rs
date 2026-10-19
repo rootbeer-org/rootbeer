@@ -76,9 +76,17 @@ pub(crate) fn migrate(args: &Args) -> Result<(), String> {
         let directory = profile::directory(true)?;
         let user = Profile::open(&directory, USER).map_err(profile_error)?;
         let generation = profile::current(&user)?;
+
+        // The old rb recorded what `rb use` was typed, which can be an alias.
+        let index = LazyIndex::new(&args.source);
+        let is_known = |name: &str| generation.packages.contains_key(name);
+        let requests =
+            install::resolve_aliases(requests, is_known, &index).unwrap_or_else(|error| {
+                stuck.push(format!("the old profile's packages: {error}"));
+                BTreeMap::new()
+            });
         let requests = profile::planned(&generation.packages, requests, false);
         if !requests.is_empty() {
-            let index = LazyIndex::new(&args.source);
             profile::install_requests(&user, generation, requests, &index, None, |name, error| {
                 stuck.push(format!("{name}: {error}"));
                 Ok(())
