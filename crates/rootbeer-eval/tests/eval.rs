@@ -294,3 +294,93 @@ fn host_references_override_per_platform_and_key_only_the_build() {
         );
     }
 }
+
+#[test]
+fn an_undeclared_version_renders_its_download_from_the_recipe() {
+    let catalog = Catalog::parse(FIXTURES).unwrap();
+    let linux = Platform::X86_64Linux;
+
+    let release = catalog
+        .download("finder", "10.6.0", None, None, linux)
+        .unwrap();
+    assert_eq!(
+        release.url,
+        "https://github.com/example/finder/releases/download/v10.6.0/finder-v10.6.0-x86_64-unknown-linux-musl.tar.gz"
+    );
+    let asset = release.release.unwrap();
+    assert_eq!(
+        (asset.repository.as_str(), asset.tag.as_str()),
+        ("example/finder", "v10.6.0")
+    );
+
+    let source = catalog
+        .download("libz", "1.4.0", None, None, linux)
+        .unwrap();
+    assert_eq!(source.url, "https://example.com/libz-1.4.0.tar.xz");
+    assert!(source.release.is_none());
+
+    assert_eq!(
+        catalog.depended_on("7zip"),
+        std::collections::BTreeSet::from(["26.04"])
+    );
+
+    assert!(catalog.download("missing", "1", None, None, linux).is_err());
+    assert!(
+        catalog
+            .download("finder", "10.6.0", None, None, Platform::Aarch64Macos)
+            .is_err()
+    );
+}
+
+#[test]
+fn serial_fills_templates_and_must_be_recorded() {
+    let recipe = |serial: &str| {
+        format!(
+            r#"return {{
+                name = "stamp", description = "", homepage = "", default_license = "MIT",
+                source = {{ url = "https://example.com/stamp-{{serial}}.tar.gz" }},
+                build = {{ backend = "custom", steps = {{}} }},
+                platforms = {{ ["x86_64-linux"] = {{ default_version = "1" }} }},
+                versions = {{ ["1"] = {{ {serial} digests = {{ ["x86_64-linux"] = "{}" }} }} }},
+            }}"#,
+            "0".repeat(64)
+        )
+    };
+
+    let stamped = recipe("serial = 20261019171758,");
+    let catalog = Catalog::parse([("stamp.lua", stamped.as_str())]).unwrap();
+    let download = catalog
+        .download(
+            "stamp",
+            "2",
+            None,
+            Some(20261020000000),
+            Platform::X86_64Linux,
+        )
+        .unwrap();
+    assert_eq!(
+        download.url,
+        "https://example.com/stamp-20261020000000.tar.gz"
+    );
+
+    let target = Target {
+        name: "stamp".into(),
+        version: "1".into(),
+        platform: Platform::X86_64Linux,
+    };
+    let graph = catalog
+        .evaluate(&hosts("test"), std::slice::from_ref(&target))
+        .unwrap();
+    assert!(graph.packages.contains_key(&target));
+
+    let unstamped = recipe("");
+    let catalog = Catalog::parse([("stamp.lua", unstamped.as_str())]).unwrap();
+    let error = catalog
+        .evaluate(&hosts("test"), &[target])
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("`{serial}` needs the version to record its serial"),
+        "{error}"
+    );
+}

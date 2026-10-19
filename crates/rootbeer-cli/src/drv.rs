@@ -1,4 +1,5 @@
 mod artifact;
+mod bump;
 mod cache;
 mod configuration;
 pub(crate) mod gc;
@@ -90,6 +91,9 @@ enum Command {
     },
     /// Install a package from the signed index, after what it references
     Install(install::Args),
+    /// Add a version to a recipe as its default, pinning each platform's
+    /// download, and drop versions beyond --keep
+    Bump(bump::Args),
     /// Print, as JSON levels, the packages CI must build because no cache has them
     Plan {
         /// Each `name` or `name@version`, or every declared version when none
@@ -191,6 +195,7 @@ pub fn run(args: Args) {
             entries,
         } => index::sign(&repository, &key, entries.as_deref()),
         Command::Install(args) => install::install(&args),
+        Command::Bump(args) => bump::bump(&args),
     };
 
     if let Err(error) = result {

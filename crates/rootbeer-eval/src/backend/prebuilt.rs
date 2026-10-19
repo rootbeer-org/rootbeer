@@ -1,6 +1,7 @@
 use super::{Package, Phases, extract, link, seven_zip, unpacker};
 use crate::recipe::{ArchiveFormat, Bins, Install, Prebuilt};
 use crate::template::{Values, escape, path, quote};
+use crate::{Download, ReleaseAsset};
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use rootbeer_drv::{Build, Dependency, Fetch, Key};
 use std::collections::BTreeMap;
@@ -20,46 +21,70 @@ const DISCOVER: &str = r#"  [ -e "${out}/bin/$name" ] && continue
   ln -s "../${1#./}" "${out}/bin/$name"
 done"#;
 
+/// Where a prebuilt downloads from, as `values` render its templates.
+pub(crate) fn locate(prebuilt: &Prebuilt, values: &Values) -> Result<Download, String> {
+    let Some(repository) = &prebuilt.github else {
+        let Some(url) = &prebuilt.url else {
+            return Err("a prebuilt downloads from exactly one of github or url".into());
+        };
+
+        return Ok(Download {
+            url: values.literal(url)?,
+            release: None,
+        });
+    };
+
+    if prebuilt.url.is_some() {
+        return Err("a prebuilt downloads from exactly one of github or url".into());
+    }
+
+    let tag = match &prebuilt.tag {
+        Some(tag) => values.literal(tag)?,
+        None => values.tag.clone(),
+    };
+
+    let asset = prebuilt
+        .asset
+        .as_deref()
+        .ok_or("a github prebuilt needs an asset")?;
+
+    let asset = Values {
+        tag: tag.clone(),
+        ..values.clone()
+    }
+    .literal(asset)?;
+
+    let url = format!(
+        "https://github.com/{repository}/releases/download/{}/{}",
+        utf8_percent_encode(&tag, SEGMENT),
+        utf8_percent_encode(&asset, SEGMENT),
+    );
+
+    Ok(Download {
+        url,
+        release: Some(ReleaseAsset {
+            repository: repository.clone(),
+            tag,
+            asset,
+        }),
+    })
+}
+
 impl Package<'_> {
     pub(crate) fn download(&self, prebuilt: &Prebuilt) -> Result<(Fetch, Option<Install>), String> {
-        let values = &self.resolved.values;
-        let (url, file) = match (&prebuilt.github, &prebuilt.url) {
-            (Some(repository), None) => {
-                let tag = match &prebuilt.tag {
-                    Some(tag) => values.literal(tag)?,
-                    None => values.tag.clone(),
-                };
-
-                let asset = prebuilt
-                    .asset
-                    .as_deref()
-                    .ok_or("a github prebuilt needs an asset")?;
-
-                let asset = Values {
-                    tag: tag.clone(),
-                    ..values.clone()
-                }
-                .literal(asset)?;
-
-                let url = format!(
-                    "https://github.com/{repository}/releases/download/{}/{}",
-                    utf8_percent_encode(&tag, SEGMENT),
-                    utf8_percent_encode(&asset, SEGMENT),
-                );
-
-                (url, asset)
-            }
-            (None, Some(url)) => {
-                let url = values.literal(url)?;
-                let file = url.rsplit('/').next().unwrap_or_default().to_string();
-
-                (url, file)
-            }
-            _ => return Err("a prebuilt downloads from exactly one of github or url".into()),
+        let download = locate(prebuilt, &self.resolved.values)?;
+        let file = match &download.release {
+            Some(release) => release.asset.clone(),
+            None => download
+                .url
+                .rsplit('/')
+                .next()
+                .unwrap_or_default()
+                .to_string(),
         };
 
         let install = prebuilt.install.clone().or_else(|| infer_install(&file));
-        Ok((self.fetch(url), install))
+        Ok((self.fetch(download.url), install))
     }
 
     pub(crate) fn unpack(

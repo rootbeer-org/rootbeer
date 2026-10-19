@@ -301,7 +301,34 @@ fn published(request: &Request) -> Result<ApiRelease, String> {
     Ok(release)
 }
 
-fn download_digest(url: &str) -> Result<Sha256, String> {
+/// The sha256 GitHub publishes for a release asset, or the hash of a download
+/// when it publishes none.
+pub(super) fn asset_digest(repository: &str, tag: &str, name: &str) -> Result<Sha256, String> {
+    let request = Request {
+        repository: repository.to_string(),
+        tag: Some(tag.to_string()),
+        asset: None,
+        paths: BTreeMap::new(),
+    };
+
+    let release = published(&request)?;
+    let asset = release
+        .assets
+        .iter()
+        .find(|asset| asset.name == name)
+        .ok_or_else(|| format!("github:{repository}'s release {tag} has no asset {name}"))?;
+
+    let digest = asset
+        .digest
+        .as_deref()
+        .and_then(|digest| digest.strip_prefix("sha256:"));
+    match digest {
+        Some(digest) => Sha256::try_from(digest.to_string()).map_err(|error| error.to_string()),
+        None => download_digest(&asset.browser_download_url),
+    }
+}
+
+pub(super) fn download_digest(url: &str) -> Result<Sha256, String> {
     let response = agent(DOWNLOAD)
         .get(url)
         .call()

@@ -20,6 +20,21 @@ pub struct Catalog {
     recipes: BTreeMap<String, Recipe>,
 }
 
+/// Where a version downloads from on one platform.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Download {
+    pub url: String,
+    /// The GitHub release asset `url` names, whose digest GitHub publishes
+    pub release: Option<ReleaseAsset>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReleaseAsset {
+    pub repository: String,
+    pub tag: String,
+    pub asset: String,
+}
+
 /// One version of a package on one platform.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Target {
@@ -151,6 +166,56 @@ impl Catalog {
 
     pub fn contains(&self, name: &str) -> bool {
         self.recipes.contains_key(name)
+    }
+
+    /// The platforms a recipe declares.
+    pub fn platforms(&self, name: &str) -> Vec<Platform> {
+        self.recipes
+            .get(name)
+            .map(|recipe| recipe.platforms.keys().copied().collect())
+            .unwrap_or_default()
+    }
+
+    /// Where a version the recipe doesn't declare yet would download from, so
+    /// its digest can be pinned before it's added.
+    pub fn download(
+        &self,
+        name: &str,
+        version: &str,
+        commit: Option<&str>,
+        serial: Option<u64>,
+        platform: Platform,
+    ) -> Result<Download, String> {
+        let recipe = self
+            .recipes
+            .get(name)
+            .ok_or_else(|| format!("{name} isn't in the catalog"))?;
+
+        recipe.download(version, commit.map(str::to_string), serial, platform)
+    }
+
+    /// The versions of a package any recipe depends on, at any layer.
+    pub fn depended_on(&self, name: &str) -> BTreeSet<&str> {
+        self.recipes
+            .values()
+            .flat_map(|recipe| {
+                let platforms = recipe.platforms.values().map(|platform| &platform.spec);
+                let versions = recipe.versions.values().map(|version| &version.spec);
+                std::iter::once(&recipe.shared)
+                    .chain(platforms)
+                    .chain(versions)
+            })
+            .flat_map(|spec| {
+                let prebuilt = spec
+                    .prebuilt
+                    .iter()
+                    .flat_map(|prebuilt| &prebuilt.dependencies);
+                let build = spec.build.iter().flat_map(|build| &build.dependencies);
+                prebuilt.chain(build)
+            })
+            .filter(|dependency| dependency.package == name)
+            .map(|dependency| dependency.version.as_str())
+            .collect()
     }
 
     pub fn default_version(&self, name: &str, platform: Platform) -> Option<&str> {

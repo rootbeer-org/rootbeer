@@ -11,6 +11,7 @@ pub(crate) struct Values<'a> {
     pub tag: String,
     pub target: Option<&'a str>,
     pub commit: Option<&'a str>,
+    pub serial: Option<u64>,
     pub platform: Platform,
     pub dependencies: BTreeMap<String, String>,
 }
@@ -70,6 +71,13 @@ impl Values<'_> {
 
         if value.contains("{runtime:") {
             return Err("`{runtime:<package>}` is not supported".into());
+        }
+
+        if value.contains("{serial}") {
+            let serial = self
+                .serial
+                .ok_or("`{serial}` needs the version to record its serial")?;
+            value = value.replace("{serial}", &serial.to_string());
         }
 
         if value.contains("{commit}") {
@@ -190,6 +198,7 @@ mod tests {
             tag: "1".to_string(),
             target: None,
             commit: None,
+            serial: None,
             platform: Platform::X86_64Linux,
             dependencies: BTreeMap::from([("zlib".to_string(), "/z".to_string())]),
         };
