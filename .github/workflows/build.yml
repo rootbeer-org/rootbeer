@@ -43,22 +43,20 @@ jobs:
           cache: false
 
       - name: Cache Cargo
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: cargo-${{ matrix.target }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          key: ${{ matrix.target }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Format
         if: matrix.target == 'aarch64-apple-darwin'
         run: cargo fmt --all -- --check
 
       - name: Lint
-        run: cargo clippy --all-targets --target ${{ matrix.target }} -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: Build
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: cargo build --locked --release --target ${{ matrix.target }}
 
       - name: Install Linux sandbox
