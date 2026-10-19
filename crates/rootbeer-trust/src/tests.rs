@@ -181,8 +181,15 @@ fn package(name: &str) -> Package {
         license: "BSD-3-Clause".into(),
         default: BTreeMap::from([(platform, "1.0".into())]),
         versions: BTreeMap::from([("1.0".into(), BTreeMap::from([(platform, output)]))]),
-        retired: BTreeMap::new(),
+        ..Package::default()
     }
+}
+
+/// What was published, before the signer stamped its dates.
+fn undated(mut package: Package) -> Package {
+    package.added = None;
+    package.updated = None;
+    package
 }
 
 fn entry(package: &Package) -> Vec<u8> {
@@ -483,7 +490,10 @@ fn signing_merges_into_the_index_and_keeps_dropped_versions() {
     let repository = fixture.path("repository");
     sign(&repository, &online, &[package("zstd"), package("lz4")]).unwrap();
     let index = fixture.refresh(&root).unwrap();
-    assert_eq!(index.package("zstd").unwrap(), Some(package("zstd")));
+    assert_eq!(
+        index.package("zstd").unwrap().map(undated),
+        Some(package("zstd"))
+    );
     drop(index);
 
     // The catalog moved to 2.0, and 1.0 stays listed for locks that pin it
@@ -500,7 +510,10 @@ fn signing_merges_into_the_index_and_keeps_dropped_versions() {
     let read = index.package("zstd").unwrap().unwrap();
     assert_eq!(read.default, newer.default);
     assert_eq!(read.versions.keys().collect::<Vec<_>>(), ["1.0", "2.0"]);
-    assert_eq!(index.package("lz4").unwrap(), Some(package("lz4")));
+    assert_eq!(
+        index.package("lz4").unwrap().map(undated),
+        Some(package("lz4"))
+    );
     assert_eq!(timestamp_version(&fixture), 2);
 }
 
@@ -537,7 +550,10 @@ fn a_rotated_online_key_signs_and_the_old_one_no_longer_can() {
     assert!(is_unsigned(sign(&repository, &online, &[])));
     sign(&repository, &replacement, &[]).unwrap();
     let index = fixture.refresh(&root).unwrap();
-    assert_eq!(index.package("zstd").unwrap(), Some(package("zstd")));
+    assert_eq!(
+        index.package("zstd").unwrap().map(undated),
+        Some(package("zstd"))
+    );
 }
 
 #[test]
@@ -582,7 +598,7 @@ fn a_changed_output_is_retired_and_defaults_outlive_a_missing_one() {
 fn fields_this_signer_does_not_know_survive_a_merge() {
     let (fixture, _, _, online) = ceremony();
     let mut grown = serde_json::to_value(package("zstd")).unwrap();
-    grown["homepage"] = "https://facebook.github.io/zstd".into();
+    grown["funding"] = "https://github.com/sponsors/facebook".into();
     fixture.publish(
         &[("zstd", serde_json::to_vec(&grown).unwrap())],
         1,
@@ -597,7 +613,7 @@ fn fields_this_signer_does_not_know_survive_a_merge() {
     let kept = fs::read_dir(repository.join("targets"))
         .unwrap()
         .map(|item| fs::read_to_string(item.unwrap().path()).unwrap())
-        .filter(|entry| entry.contains("homepage"))
+        .filter(|entry| entry.contains("funding"))
         .count();
 
     assert_eq!(kept, 2, "the published entry and its merge both have it");
@@ -617,4 +633,23 @@ fn signing_refuses_duplicates_a_damaged_repository_and_an_expiring_root() {
     let (fixture, _, _, online) = ceremony_expiring(days(5));
     let expiring = sign(&fixture.path("repository"), &online, &[]);
     assert!(matches!(expiring, Err(Error::Invalid(reason)) if reason.contains("offline keys")));
+}
+
+#[test]
+fn a_bad_alias_is_dropped_and_the_package_still_reads() {
+    let mut described = serde_json::to_value(package("rootbeer")).unwrap();
+    described["homepage"] = "https://rbpkg.com".into();
+    described["aliases"] = serde_json::json!(["rb", "Not A Name", "rootbeer"]);
+    described["maintainers"] = serde_json::json!(["tale"]);
+    let (fixture, root) = signed(&[("rootbeer", serde_json::to_vec(&described).unwrap())]);
+
+    let read = fixture
+        .refresh(&root)
+        .unwrap()
+        .package("rootbeer")
+        .unwrap()
+        .unwrap();
+    assert_eq!(read.homepage, "https://rbpkg.com");
+    assert_eq!(read.aliases, BTreeSet::from(["rb".into()]));
+    assert_eq!(read.maintainers, ["tale"]);
 }

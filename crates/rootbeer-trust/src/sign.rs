@@ -101,9 +101,11 @@ async fn sign_into(repository: &Path, key: &Path, packages: &[Package]) -> Resul
     };
 
     let staging = tempfile::tempdir().map_err(|error| Error::Invalid(error.to_string()))?;
+    let now = Timestamp::now().as_second();
     let mut staged = Vec::new();
+
     for package in packages {
-        let merged = merge(previous.remove(&package.name), package)?;
+        let merged = merge(previous.remove(&package.name), package, now)?;
         let name = format!("{}.json", package.name);
         let path = staging.path().join(&name);
         let json =
@@ -197,6 +199,7 @@ impl Transport for Pinned {
 fn merge(
     previous: Option<Map<String, Value>>,
     package: &Package,
+    now: i64,
 ) -> Result<Map<String, Value>, Error> {
     let invalid = |reason: &str| Error::Invalid(format!("{}: {reason}", package.name));
     let Value::Object(mut merged) =
@@ -205,9 +208,15 @@ fn merge(
         return Err(invalid("an entry isn't an object"));
     };
 
+    let is_dated = package.updated.is_some();
     let Some(previous) = previous else {
+        stamp(&mut merged, !is_dated, now);
         return Ok(merged);
     };
+
+    let listed =
+        |map: &Map<String, Value>| (map.get("versions").cloned(), map.get("default").cloned());
+    let was = listed(&previous);
 
     let object = |map: &Map<String, Value>, field: &str| {
         map.get(field)
@@ -273,7 +282,18 @@ fn merge(
         merged.insert("retired".into(), Value::Object(retired));
     }
 
+    let is_changed = listed(&merged) != was;
+    stamp(&mut merged, is_changed && !is_dated, now);
     Ok(merged)
+}
+
+fn stamp(entry: &mut Map<String, Value>, is_changed: bool, now: i64) {
+    entry.entry("added").or_insert(now.into());
+    if is_changed {
+        entry.insert("updated".into(), now.into());
+    }
+
+    entry.entry("updated").or_insert(now.into());
 }
 
 fn is_fresh(metadata: &Path) -> Result<bool, Error> {
@@ -326,4 +346,81 @@ fn read(path: &Path) -> Result<Vec<u8>, Error> {
 
 fn at(path: &Path, error: io::Error) -> Error {
     Error::Invalid(format!("{}: {error}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rootbeer_drv::Platform;
+
+    fn zstd(versions: &[&str]) -> Package {
+        let output: crate::Output = serde_json::from_value(serde_json::json!({
+            "key": "a".repeat(32),
+            "manifest": format!("sha256:{}", "0".repeat(64)),
+        }))
+        .unwrap();
+
+        let platform = Platform::Aarch64Linux;
+        Package {
+            name: "zstd".into(),
+            default: BTreeMap::from([(platform, versions[0].into())]),
+            versions: versions
+                .iter()
+                .map(|version| {
+                    (
+                        version.to_string(),
+                        BTreeMap::from([(platform, output.clone())]),
+                    )
+                })
+                .collect(),
+            ..Package::default()
+        }
+    }
+
+    fn dates(entry: &Map<String, Value>) -> (Option<i64>, Option<i64>) {
+        let date = |field| entry.get(field).and_then(Value::as_i64);
+        (date("added"), date("updated"))
+    }
+
+    #[test]
+    fn added_is_kept_and_updated_moves_only_with_versions_or_defaults() {
+        let first = merge(None, &zstd(&["1.0"]), 100).unwrap();
+        assert_eq!(dates(&first), (Some(100), Some(100)));
+
+        let mut described = zstd(&["1.0"]);
+        described.description = "zstd compresses better".into();
+        let same = merge(Some(first.clone()), &described, 200).unwrap();
+        assert_eq!(dates(&same), (Some(100), Some(100)));
+
+        let newer = merge(Some(same), &zstd(&["2.0", "1.0"]), 300).unwrap();
+        assert_eq!(dates(&newer), (Some(100), Some(300)));
+
+        let dropped = merge(Some(newer.clone()), &zstd(&["2.0"]), 400).unwrap();
+        assert_eq!(dates(&dropped), (Some(100), Some(300)));
+
+        let rolled_back = merge(Some(newer), &zstd(&["1.0", "2.0"]), 500).unwrap();
+        assert_eq!(dates(&rolled_back), (Some(100), Some(500)));
+
+        let mut undated = dropped;
+        undated.retain(|field, _| field != "added" && field != "updated");
+        let stamped = merge(Some(undated), &zstd(&["2.0"]), 600).unwrap();
+        assert_eq!(dates(&stamped), (Some(600), Some(600)));
+    }
+
+    #[test]
+    fn dates_an_entry_brings_win_over_the_clock() {
+        let previous = merge(None, &zstd(&["1.0"]), 100).unwrap();
+        let mut backfilled = zstd(&["2.0"]);
+        backfilled.added = Some(5);
+        backfilled.updated = Some(6);
+
+        assert_eq!(
+            dates(&merge(Some(previous), &backfilled, 300).unwrap()),
+            (Some(5), Some(6))
+        );
+        assert_eq!(
+            dates(&merge(None, &backfilled, 300).unwrap()),
+            (Some(5), Some(6))
+        );
+    }
 }

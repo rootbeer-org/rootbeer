@@ -20,16 +20,23 @@ use tough::schema::{Root, Signed};
 use tough::{IntoVec, Repository, RepositoryLoader, TargetName};
 use url::Url;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "Entry")]
 pub struct Package {
     pub name: String,
     pub description: String,
+    pub homepage: String,
     pub license: String,
+    pub aliases: BTreeSet<String>,
+    pub maintainers: Vec<String>,
     pub default: BTreeMap<Platform, String>,
     pub versions: BTreeMap<String, BTreeMap<Platform, Output>>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub retired: BTreeMap<Key, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub added: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,11 +71,21 @@ struct Entry {
     #[serde(default)]
     description: String,
     #[serde(default)]
+    homepage: String,
+    #[serde(default)]
     license: String,
+    #[serde(default)]
+    aliases: BTreeSet<String>,
+    #[serde(default)]
+    maintainers: Vec<String>,
     default: BTreeMap<String, String>,
     versions: BTreeMap<String, BTreeMap<String, Output>>,
     #[serde(default)]
     retired: BTreeMap<Key, String>,
+    #[serde(default)]
+    added: Option<i64>,
+    #[serde(default)]
+    updated: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -210,13 +227,25 @@ impl TryFrom<Entry> for Package {
             return Err(format!("{manifest:?} isn't a sha256 digest"));
         }
 
+        // A bad alias only loses that alias, so the package stays installable.
+        let aliases = entry
+            .aliases
+            .into_iter()
+            .filter(|alias| is_package_name(alias) && *alias != entry.name)
+            .collect();
+
         Ok(Package {
             name: entry.name,
             description: entry.description,
+            homepage: entry.homepage,
             license: entry.license,
+            aliases,
+            maintainers: entry.maintainers,
             default,
             versions,
             retired: entry.retired,
+            added: entry.added,
+            updated: entry.updated,
         })
     }
 }

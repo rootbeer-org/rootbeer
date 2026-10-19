@@ -366,7 +366,7 @@ mod tests {
                     "1".into(),
                     BTreeMap::from([(Platform::Aarch64Linux, output)]),
                 )]),
-                retired: BTreeMap::new(),
+                ..Package::default()
             }
         }
     }
