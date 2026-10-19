@@ -1,3 +1,5 @@
+use crate::Download;
+use crate::backend::prebuilt;
 use crate::template::Values;
 use mlua::{Lua, LuaOptions, LuaSerdeExt, StdLib, VmState};
 use rootbeer_drv::{Allow, Platform, Sha256};
@@ -50,6 +52,7 @@ pub(crate) struct PlatformSpec {
 pub(crate) struct Version {
     pub digests: BTreeMap<Platform, Sha256>,
     pub commit: Option<String>,
+    pub serial: Option<u64>,
     pub license: Option<String>,
     // Content changes rekey on their own, so revisions mean nothing here.
     #[serde(rename = "revision")]
@@ -58,7 +61,7 @@ pub(crate) struct Version {
     pub spec: Spec,
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Spec {
     pub prebuilt: Option<Prebuilt>,
@@ -263,11 +266,7 @@ impl Recipe {
             .get_key_value(version)
             .ok_or_else(|| format!("{} has no version {version}", self.name))?;
 
-        let platform_spec = self
-            .platforms
-            .get(&platform)
-            .ok_or("the version's platform is not declared")?;
-
+        let (spec, values) = self.layer(version, entry, platform)?;
         let sha256 = entry
             .digests
             .get(&platform)
@@ -279,27 +278,78 @@ impl Recipe {
             .or(self.default_license.as_deref())
             .ok_or("the version has no license")?;
 
-        let tag = match platform_spec.upstream.as_ref().or(self.upstream.as_ref()) {
-            Some(upstream) => upstream.tag_for(version),
-            None => version.clone(),
-        };
-
         Ok(Resolved {
-            spec: self
-                .shared
-                .overlay(&platform_spec.spec)
-                .overlay(&entry.spec),
-            values: Values {
-                version,
-                tag,
-                target: platform_spec.target.as_deref(),
-                commit: entry.commit.as_deref(),
-                platform,
-                dependencies: BTreeMap::new(),
-            },
+            spec,
+            values,
             sha256,
             license,
         })
+    }
+
+    /// Where `version` downloads from on `platform` before the recipe
+    /// declares it, as its own templates render it.
+    pub(crate) fn download(
+        &self,
+        version: &str,
+        commit: Option<String>,
+        serial: Option<u64>,
+        platform: Platform,
+    ) -> Result<Download, String> {
+        let entry = Version {
+            digests: BTreeMap::new(),
+            commit,
+            serial,
+            license: None,
+            _revision: None,
+            spec: Spec::default(),
+        };
+
+        let (spec, values) = self.layer(version, &entry, platform)?;
+        match (&spec.prebuilt, &spec.source) {
+            (Some(prebuilt), None) => prebuilt::locate(prebuilt, &values),
+            (None, Some(source)) => Ok(Download {
+                url: values.literal(&source.url)?,
+                release: None,
+            }),
+            (Some(_), Some(_)) => {
+                Err("a platform is prebuilt or built from source, not both".into())
+            }
+            (None, None) => Err("a platform needs a prebuilt or a source".into()),
+        }
+    }
+
+    fn layer<'a>(
+        &'a self,
+        version: &'a str,
+        entry: &'a Version,
+        platform: Platform,
+    ) -> Result<(Spec, Values<'a>), String> {
+        let platform_spec = self
+            .platforms
+            .get(&platform)
+            .ok_or("the version's platform is not declared")?;
+
+        let tag = match platform_spec.upstream.as_ref().or(self.upstream.as_ref()) {
+            Some(upstream) => upstream.tag_for(version),
+            None => version.to_string(),
+        };
+
+        let spec = self
+            .shared
+            .overlay(&platform_spec.spec)
+            .overlay(&entry.spec);
+
+        let values = Values {
+            version,
+            tag,
+            target: platform_spec.target.as_deref(),
+            commit: entry.commit.as_deref(),
+            serial: entry.serial,
+            platform,
+            dependencies: BTreeMap::new(),
+        };
+
+        Ok((spec, values))
     }
 }
 

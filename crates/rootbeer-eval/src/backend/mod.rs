@@ -1,7 +1,7 @@
 mod autotools;
 mod custom;
 mod go;
-mod prebuilt;
+pub(crate) mod prebuilt;
 mod rust;
 mod zig;
 
