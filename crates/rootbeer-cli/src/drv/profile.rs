@@ -1,6 +1,6 @@
 use super::cache::{self, Signed};
 use super::github;
-use super::install::{self, Source, Wanted};
+use super::install::{self, LazyIndex, Source, Wanted};
 use super::local::{self, Evaluated};
 use super::{migrate, this_platform, HELPER};
 use rootbeer_core::env::{profiles, DEFAULT, USER};
@@ -46,6 +46,9 @@ pub(crate) fn add(args: &UseArgs) -> Result<(), String> {
     let directory = directory(true)?;
     let profile = Profile::open(&directory, USER).map_err(profile_error)?;
     let generation = current(&profile)?;
+    let index = LazyIndex::new(&args.source);
+    let is_known = |name: &str| generation.packages.contains_key(name);
+    let mut requests = install::resolve_aliases(requests, is_known, &index)?;
 
     // Pinned first, so a checkout evaluates the version the pin keeps.
     pin(&generation.packages, &mut requests, args.should_update);
@@ -64,7 +67,7 @@ pub(crate) fn add(args: &UseArgs) -> Result<(), String> {
         &profile,
         generation,
         requests,
-        &args.source,
+        &index,
         evaluated.as_ref(),
         |_, error| Err(error),
     )
@@ -74,21 +77,19 @@ pub(super) fn install_requests(
     profile: &Profile,
     mut generation: Generation,
     requests: BTreeMap<String, Wanted>,
-    source: &Source,
+    index: &LazyIndex,
     evaluated: Option<&Evaluated>,
     mut unmatched: impl FnMut(&str, String) -> Result<(), String>,
 ) -> Result<(), String> {
     let (mut store, is_root) = install::open_store()?;
     let _held = store.hold().map_err(|error| error.to_string())?;
-    let mut index = None;
     let mut signed = Signed::new(|name| {
-        let index = match &mut index {
-            Some(index) => index,
-            None => index.insert(install::open_index(source, is_root)?),
-        };
-        index.package(name).map_err(|error| error.to_string())
+        index
+            .get()?
+            .package(name)
+            .map_err(|error| error.to_string())
     });
-    let cache = source.cache();
+    let cache = index.source().cache();
     let platform = this_platform()?;
 
     let mut members = Vec::new();
@@ -256,8 +257,20 @@ pub(crate) fn remove(names: &[String]) -> Result<(), String> {
     let profile = Profile::open(&directory, USER).map_err(profile_error)?;
     let mut generation = current(&profile)?;
     let names = names.iter().collect::<BTreeSet<_>>();
+    let source = Source::default();
+    let index = LazyIndex::new(&source);
     for name in names {
-        if generation.packages.remove(name).is_none() {
+        if generation.packages.remove(name).is_some() {
+            continue;
+        }
+
+        // An alias names what the profile records under the package's name.
+        let canonical = index.get().ok().and_then(|index| index.canonical(name));
+        let is_removed = canonical
+            .filter(|canonical| canonical != name)
+            .is_some_and(|canonical| generation.packages.remove(&canonical).is_some());
+
+        if !is_removed {
             return Err(format!("{name} isn't in {USER}"));
         }
     }
@@ -313,7 +326,7 @@ pub(crate) fn self_update() -> Result<(), String> {
         &user,
         generation,
         requests,
-        &Source::default(),
+        &LazyIndex::new(&Source::default()),
         None,
         |_, error| Err(error),
     )
@@ -339,7 +352,7 @@ pub(crate) fn keep_rootbeer() -> Result<(), String> {
         &user,
         generation,
         requests,
-        &Source::default(),
+        &LazyIndex::new(&Source::default()),
         None,
         |_, error| Err(error),
     )

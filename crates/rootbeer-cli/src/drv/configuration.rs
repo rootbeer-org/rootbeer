@@ -1,6 +1,6 @@
 use super::cache::{self, Signed};
 use super::github;
-use super::install::{self, Source, Wanted};
+use super::install::{self, LazyIndex, Source, Wanted};
 use super::local;
 use super::profile::{
     applications, check_apps, current, directory, is_same, link_apps, profile_error, switch,
@@ -90,7 +90,7 @@ pub(crate) fn configure(
     let _held = store.hold().map_err(|error| error.to_string())?;
     let cache = source.cache();
     let is_index_open = Cell::new(false);
-    let mut index = None;
+    let index = LazyIndex::new(source);
     let mut signed = Signed::new(|package| {
         if flags.is_offline {
             return Err(format!(
@@ -98,10 +98,7 @@ pub(crate) fn configure(
             ));
         }
 
-        let index = match &mut index {
-            Some(index) => index,
-            None => index.insert(install::open_index(source, is_root)?),
-        };
+        let index = index.get()?;
         is_index_open.set(true);
         index.package(package).map_err(|error| error.to_string())
     });
@@ -114,7 +111,16 @@ pub(crate) fn configure(
 
         let locked = match wanted {
             Wanted::Index(version) => {
-                let entry = signed.package(package)?;
+                // The lock and profile record what the configuration names,
+                // so an alias would change with the index.
+                let entry = match signed.package(package) {
+                    Ok(entry) => entry,
+                    Err(error) if is_index_open.get() => {
+                        return Err(alias(&index, package).unwrap_or(error));
+                    }
+                    Err(error) => return Err(error),
+                };
+
                 let (version, output) = install::select(entry, version.as_deref(), platform)?;
                 Locked {
                     version,
@@ -271,6 +277,12 @@ fn local_evaluated<'a>(
     package: &str,
 ) -> Result<&'a local::Evaluated, String> {
     evaluated.ok_or_else(|| format!("{package} comes from rb.package_catalog, which isn't set"))
+}
+
+fn alias(index: &LazyIndex, package: &str) -> Option<String> {
+    let canonical = index.get().ok()?.canonical(package)?;
+    (canonical != package)
+        .then(|| format!("{package} is {canonical}, so the configuration should name {canonical}"))
 }
 
 fn existing_release<'a>(lock: &'a Lock, package: &str, platform: &str) -> Option<&'a Release> {

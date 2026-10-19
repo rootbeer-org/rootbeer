@@ -653,3 +653,66 @@ fn a_bad_alias_is_dropped_and_the_package_still_reads() {
     assert_eq!(read.aliases, BTreeSet::from(["rb".into()]));
     assert_eq!(read.maintainers, ["tale"]);
 }
+
+fn aliased(name: &str, aliases: &[&str]) -> Package {
+    Package {
+        aliases: aliases.iter().map(|alias| alias.to_string()).collect(),
+        ..package(name)
+    }
+}
+
+#[test]
+fn signed_aliases_name_their_package_without_reading_entries() {
+    let (fixture, root, _, online) = ceremony();
+    let repository = fixture.path("repository");
+    let packages = [aliased("ripgrep", &["rg"]), package("zstd")];
+    sign(&repository, &online, &packages).unwrap();
+
+    // A later run that signs only zstd keeps ripgrep's alias.
+    sign(&repository, &online, &[package("zstd")]).unwrap();
+    let index = fixture.refresh(&root).unwrap();
+    assert_eq!(
+        index.aliases(),
+        BTreeMap::from([("rg".into(), "ripgrep".into())])
+    );
+    assert_eq!(index.canonical("rg").as_deref(), Some("ripgrep"));
+    assert_eq!(index.canonical("ripgrep").as_deref(), Some("ripgrep"));
+    assert_eq!(index.canonical("zstd").as_deref(), Some("zstd"));
+    assert_eq!(index.canonical("nothing"), None);
+}
+
+#[test]
+fn signing_together_refuses_an_alias_naming_a_package_or_claimed_twice() {
+    let (fixture, _, _, online) = ceremony();
+    let repository = fixture.path("repository");
+    let twice = [aliased("ripgrep", &["rg"]), aliased("ripgrep-all", &["rg"])];
+    let claimed = sign(&repository, &online, &twice);
+    assert!(matches!(claimed, Err(Error::Invalid(reason)) if reason.contains("both ripgrep")));
+
+    let shadowing = [aliased("lz4", &["zstd"]), package("zstd")];
+    let shadowing = sign(&repository, &online, &shadowing);
+    assert!(matches!(shadowing, Err(Error::Invalid(reason)) if reason.contains("also a package")));
+}
+
+#[test]
+fn a_package_left_out_of_a_run_gives_up_an_alias_another_claims() {
+    let (fixture, root, _, online) = ceremony();
+    let repository = fixture.path("repository");
+    sign(
+        &repository,
+        &online,
+        &[aliased("ripgrep", &["rg"]), package("zstd")],
+    )
+    .unwrap();
+
+    // ripgrep left the catalog, and a rename keeps zstd's old name as an alias.
+    let next = [
+        aliased("ripgrep-all", &["rg"]),
+        aliased("zstandard", &["zstd"]),
+    ];
+    sign(&repository, &online, &next).unwrap();
+    let index = fixture.refresh(&root).unwrap();
+    assert_eq!(index.canonical("rg").as_deref(), Some("ripgrep-all"));
+    assert_eq!(index.canonical("zstd").as_deref(), Some("zstd"));
+    assert!(index.package("ripgrep").unwrap().is_some());
+}

@@ -1,6 +1,6 @@
 use super::configuration::{configure, link_default_apps};
 use super::github;
-use super::install::{self, Source, Wanted};
+use super::install::{self, LazyIndex, Source, Wanted};
 use super::profile::{self, profile_error};
 use super::HELPER;
 use rootbeer_core::env::{self, legacy_roots, USER};
@@ -78,8 +78,8 @@ pub(crate) fn migrate(args: &Args) -> Result<(), String> {
         let generation = profile::current(&user)?;
         let requests = profile::planned(&generation.packages, requests, false);
         if !requests.is_empty() {
-            let source = &args.source;
-            profile::install_requests(&user, generation, requests, source, None, |name, error| {
+            let index = LazyIndex::new(&args.source);
+            profile::install_requests(&user, generation, requests, &index, None, |name, error| {
                 stuck.push(format!("{name}: {error}"));
                 Ok(())
             })?;
