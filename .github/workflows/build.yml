@@ -63,7 +63,8 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y bubblewrap apparmor-profiles
+          # needrestart would restart the runner's php-fpm, which hangs for 90s
+          sudo NEEDRESTART_SUSPEND=1 apt-get install -y bubblewrap apparmor-profiles
           sudo install -m 0644 /usr/share/apparmor/extra-profiles/bwrap-userns-restrict /etc/apparmor.d/bwrap-userns-restrict
           sudo apparmor_parser --replace /etc/apparmor.d/bwrap-userns-restrict
           bwrap --unshare-user --unshare-pid --unshare-ipc --unshare-net --unshare-uts --die-with-parent --new-session --cap-drop ALL --ro-bind / / /bin/true
