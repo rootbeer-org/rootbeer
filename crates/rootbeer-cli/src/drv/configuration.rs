@@ -44,7 +44,7 @@ pub(crate) fn configure(
         // A machine sharing the configuration may not have the checkout.
         Some(root) if !root.exists() => {
             eprintln!(
-                "warning: {} doesn't exist, so the index serves its packages",
+                "warning: {} doesn't exist. Installing its packages from the index instead",
                 root.display()
             );
             None
@@ -57,19 +57,19 @@ pub(crate) fn configure(
     lock.retain(&name, |package| requests.contains_key(package));
     let kept = reconcile(&lock, &name, &requests, flags).map_err(|error| match error {
         Stale::Missing(package) => format!(
-            "{package} isn't locked for {name} in {}, so run without --locked",
+            "{package} isn't locked for {name} in {}. Run without --locked to add it",
             path.display()
         ),
         Stale::Moved(package, version) => format!(
-            "{package}@{version} in {} no longer answers what's asked for, so run without \
-             --locked",
+            "{package}@{version} in {} doesn't match the configuration. Run without \
+             --locked to update it",
             path.display()
         ),
     })?;
 
     if flags.is_locked && existing.unwrap_or_default() != lock {
         return Err(format!(
-            "{} is stale, so run without --locked",
+            "{} is out of date. Run without --locked to update it",
             path.display()
         ));
     }
@@ -94,7 +94,7 @@ pub(crate) fn configure(
     let mut signed = Signed::new(|package| {
         if flags.is_offline {
             return Err(format!(
-                "{package} needs the signed index, which --offline doesn't allow"
+                "{package} needs the signed index. Run without --offline"
             ));
         }
 
@@ -135,7 +135,7 @@ pub(crate) fn configure(
             }
             Wanted::Release(_) if flags.is_offline => {
                 return Err(format!(
-                    "{package} needs GitHub's release API, which --offline doesn't allow"
+                    "{package} needs GitHub's release API. Run without --offline"
                 ));
             }
             Wanted::Release(request) => {
@@ -218,9 +218,9 @@ pub(crate) fn configure(
                 )?;
                 if key != locked.key {
                     return Err(format!(
-                        "{package} unpacks to {key}, not {} as {} says",
-                        locked.key,
-                        path.display()
+                        "{package} unpacked to {key}, but {} says {}",
+                        path.display(),
+                        locked.key
                     ));
                 }
             }
@@ -281,8 +281,9 @@ fn local_evaluated<'a>(
 
 fn alias(index: &LazyIndex, package: &str) -> Option<String> {
     let canonical = index.get().ok()?.canonical(package)?;
-    (canonical != package)
-        .then(|| format!("{package} is {canonical}, so the configuration should name {canonical}"))
+    (canonical != package).then(|| {
+        format!("{package} is an alias of {canonical}. Write {canonical} in the configuration")
+    })
 }
 
 fn existing_release<'a>(lock: &'a Lock, package: &str, platform: &str) -> Option<&'a Release> {
@@ -328,9 +329,9 @@ fn requests(packages: Vec<PackageRequest>) -> Result<Requests, String> {
         if asked != wanted {
             let reason = match (&asked, &wanted) {
                 (Wanted::Index(_), Wanted::Index(_)) => "at two versions",
-                _ => "from two places",
+                _ => "from two sources",
             };
-            return Err(format!("{name} is asked for {reason}"));
+            return Err(format!("the configuration lists {name} {reason}"));
         }
     }
 
@@ -350,7 +351,7 @@ fn read(path: &Path, is_locked: bool) -> Result<Option<Lock>, String> {
     match Lock::read(path) {
         Ok(lock) => Ok(lock),
         Err(Error::Older { .. }) if is_locked => Err(format!(
-            "{} is from an older rb, so run without --locked to replace it",
+            "{} is from an older rb. Run without --locked to replace it",
             path.display()
         )),
         Err(Error::Older { .. }) => {
@@ -491,10 +492,10 @@ mod tests {
         assert_eq!(accepted["tool-x"], Wanted::Release(release));
 
         let error = super::requests(packages(&["jq", "jq@1.7"])).unwrap_err();
-        assert_eq!(error, "jq is asked for at two versions");
+        assert_eq!(error, "the configuration lists jq at two versions");
 
         let error = super::requests(packages(&["jq", "github:jqlang/jq"])).unwrap_err();
-        assert_eq!(error, "jq is asked for from two places");
+        assert_eq!(error, "the configuration lists jq from two sources");
     }
 
     #[test]

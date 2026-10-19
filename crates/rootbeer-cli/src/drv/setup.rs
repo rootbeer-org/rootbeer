@@ -18,7 +18,7 @@ pub(crate) fn ensure() -> Result<(), String> {
     let group = trusted_group()?;
     let command = format!("sudo {} setup {group}", helper.display());
     if !io::stdin().is_terminal() {
-        return Err(format!("{ROOT} needs setting up, so run `{command}`"));
+        return Err(format!("{ROOT} isn't set up. Run `{command}`"));
     }
 
     eprintln!("rb needs sudo to set up {ROOT} for the {group} group:\n  {command}");
@@ -72,7 +72,7 @@ fn helper() -> Result<PathBuf, String> {
     match helper.is_file() {
         true => Ok(helper),
         false => Err(newer(format!(
-            "{} is missing, so this rb can't set up {ROOT}",
+            "can't set up {ROOT} without {}",
             helper.display()
         ))),
     }
@@ -105,8 +105,8 @@ fn trusted_group() -> Result<String, String> {
     member.map(str::to_string).ok_or_else(|| {
         let helper = helper().map_or("rb-helper".into(), |helper| helper.display().to_string());
         format!(
-            "you aren't in the sudo or wheel group, so set the store up with \
-             `sudo {helper} setup <group>` for a group you trust"
+            "you aren't in the sudo or wheel group. Set up the store for a group you \
+             trust with `sudo {helper} setup <group>`"
         )
     })
 }

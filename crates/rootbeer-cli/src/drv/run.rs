@@ -116,7 +116,7 @@ pub(crate) fn run(args: Args) -> Result<(), String> {
             let relative = package
                 .apps
                 .get(app)
-                .ok_or_else(|| exports(&package.name, "apps", package.apps.keys()))?;
+                .ok_or_else(|| exports(&package.name, "apps", "--app", package.apps.keys()))?;
 
             // Waits for the app to quit, so the process holding its keys
             // lives as long as the app does.
@@ -157,7 +157,7 @@ pub(crate) fn tool(
 ) -> io::Result<BTreeMap<String, PathBuf>> {
     if is_offline {
         return Err(io::Error::other(
-            "it needs the signed index, which --offline doesn't allow",
+            "needs the signed index. Run without --offline",
         ));
     }
 
@@ -229,15 +229,20 @@ fn bin<'a>(package: &'a Installed, asked: Option<&str>) -> Result<&'a str, Strin
     named
         .or(only)
         .map(String::as_str)
-        .ok_or_else(|| exports(&package.name, "commands", &package.bins))
+        .ok_or_else(|| exports(&package.name, "commands", "--bin", &package.bins))
 }
 
-fn exports<'a>(name: &str, kind: &str, names: impl IntoIterator<Item = &'a String>) -> String {
+fn exports<'a>(
+    name: &str,
+    kind: &str,
+    flag: &str,
+    names: impl IntoIterator<Item = &'a String>,
+) -> String {
     let names: Vec<_> = names.into_iter().map(String::as_str).collect();
     match names.is_empty() {
         true => format!("{name} has no {kind}"),
         false => format!(
-            "{name} has these {kind}, so choose one: {}",
+            "{name} has {kind} {}. Choose one with {flag}",
             names.join(", ")
         ),
     }
@@ -265,11 +270,11 @@ mod tests {
         assert_eq!(bin(&package(&["a", "rg"]), Some("a")), Ok("a"));
         assert_eq!(
             bin(&package(&["a", "rg"]), None),
-            Err("ripgrep has these commands, so choose one: a, rg".into())
+            Err("ripgrep has commands a, rg. Choose one with --bin".into())
         );
         assert_eq!(
             bin(&package(&["rg"]), Some("x")),
-            Err("ripgrep has these commands, so choose one: rg".into())
+            Err("ripgrep has commands rg. Choose one with --bin".into())
         );
         assert_eq!(
             bin(&package(&[]), None),

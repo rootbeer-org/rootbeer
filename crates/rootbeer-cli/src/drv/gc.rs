@@ -13,8 +13,8 @@ use std::time::Duration;
 
 #[derive(clap::Args, Debug)]
 pub(crate) struct Args {
-    /// First remove your generations older than this, such as `30d`, except
-    /// each profile's current one
+    /// Also remove your generations older than this, such as `30d`. Each
+    /// profile keeps its current generation
     #[arg(long = "older-than", value_parser = days)]
     older_than: Option<Duration>,
 }

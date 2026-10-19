@@ -100,7 +100,7 @@ fn remove_legacy(legacy: &Path) -> Result<String, String> {
     // Clients from before roots were recorded leave no trace rb can check.
     let entries = fs::read_dir(&users).map_err(|error| {
         format!(
-            "{}: {error}, so rb can't tell whether anyone still uses {}",
+            "{}: {error}. Can't tell whether anyone still uses {}",
             users.display(),
             legacy.display()
         )
@@ -118,7 +118,7 @@ fn remove_legacy(legacy: &Path) -> Result<String, String> {
 
     if !holding.is_empty() {
         return Err(format!(
-            "{} still holds packages for uid {}, so each must run `rb migrate` first",
+            "{} still has packages for uid {}. Those users must run `rb migrate` first",
             legacy.display(),
             holding.join(", ")
         ));
@@ -133,7 +133,7 @@ fn collect(root: &Path) -> Result<String, String> {
     let roots = || {
         rootbeer_profile::roots(&profiles).map_err(|error| match error {
             rootbeer_profile::Error::Newer { .. } => {
-                format!("{error}, so run `rb-helper setup` from a newer rb")
+                format!("{error}. Run `rb-helper setup` from a newer rb")
             }
             error => error.to_string(),
         })
@@ -153,12 +153,8 @@ fn collect(root: &Path) -> Result<String, String> {
 
 fn authorize(root: &Path) -> Result<(), String> {
     let store = root.join("store");
-    rustix::fs::access(&store, Access::WRITE_OK).map_err(|_| {
-        format!(
-            "only users who may write to {} may change it",
-            store.display()
-        )
-    })
+    rustix::fs::access(&store, Access::WRITE_OK)
+        .map_err(|_| format!("you don't have write access to {}", store.display()))
 }
 
 fn parse(key: &str, references: &[String]) -> Result<(Key, BTreeSet<Key>), String> {
@@ -188,7 +184,7 @@ fn profile(root: &Path) -> Result<String, String> {
 
     if !is_root_owned {
         return Err(format!(
-            "{} isn't root's directory, so run `rb-helper setup` again",
+            "{} isn't a root-owned directory. Run `rb-helper setup` again",
             profiles.display()
         ));
     }
@@ -197,7 +193,7 @@ fn profile(root: &Path) -> Result<String, String> {
         Ok(metadata) if metadata.is_dir() && metadata.uid() == uid => {
             return Ok(directory.display().to_string());
         }
-        Ok(_) => return Err(format!("{} isn't your directory", directory.display())),
+        Ok(_) => return Err(format!("{} isn't a directory you own", directory.display())),
         Err(error) if error.kind() != io::ErrorKind::NotFound => {
             return Err(at(&directory)(error));
         }
@@ -287,7 +283,7 @@ fn setup(root: &Path, group: &str) -> Result<String, String> {
     install().map_err(|error| format!("{}: {error}", helper.display()))?;
     Layout::write(root).map_err(|error| error.to_string())?;
     Ok(format!(
-        "installed {}; members of {group} may add to the store",
+        "installed {}. Members of {group} can now add to the store",
         helper.display()
     ))
 }

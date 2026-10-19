@@ -289,7 +289,7 @@ fn build(
             .collect();
         if !missing.is_empty() {
             return Err(format!(
-                "{target} needs dependencies the store and caches lack: {}",
+                "{target} needs dependencies that aren't in the store or a cache: {}",
                 missing.join(", ")
             ));
         }
@@ -716,10 +716,10 @@ fn entries(value: Option<&Value>) -> Option<BTreeSet<(String, String)>> {
     }
 }
 
-const LOCATE: &str = "run from a catalog checkout or pass --catalog and --host";
+const LOCATE: &str = "Run from a catalog checkout or pass --catalog and --host";
 
 fn load(sources: &Sources) -> Result<(Catalog, BTreeMap<Platform, Host>), String> {
-    load_from(&sources.catalog, &sources.host).map_err(|error| format!("{error}; {LOCATE}"))
+    load_from(&sources.catalog, &sources.host).map_err(|error| format!("{error}. {LOCATE}"))
 }
 
 pub(super) fn load_from(

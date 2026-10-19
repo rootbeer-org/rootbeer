@@ -251,7 +251,7 @@ impl<'a> From<&'a Member> for Installed<'a> {
 /// The package name a repository installs under.
 pub(crate) fn named(repository: &str) -> Result<String, String> {
     release_name(repository)
-        .ok_or_else(|| format!("github:{repository} has no name rb can install it under"))
+        .ok_or_else(|| format!("github:{repository}'s repo name isn't a valid package name"))
 }
 
 pub(super) fn select<'a>(
@@ -337,12 +337,12 @@ pub(super) fn resolve_aliases(
 
         let canonical = canonical.unwrap_or_else(|| name.clone());
         if canonical != name {
-            eprintln!("{name} is {canonical}");
+            eprintln!("{name} is an alias of {canonical}");
         }
 
         let asked = resolved.insert(canonical.clone(), wanted.clone());
         if asked.is_some_and(|asked| asked != wanted) {
-            return Err(format!("{canonical} is asked for twice"));
+            return Err(format!("conflicting requests for {canonical}"));
         }
     }
 

@@ -184,7 +184,7 @@ struct Installer<'a, 'b> {
 impl Installer<'_, '_> {
     fn visit(&mut self, name: &str, key: &Key, referrer: Option<&str>) -> Result<(), String> {
         if self.installing.contains(key) {
-            return Err(format!("{name} {key} is in its own references"));
+            return Err(format!("{name} {key} depends on itself"));
         }
 
         if self
@@ -198,7 +198,7 @@ impl Installer<'_, '_> {
 
         let digest = match &mut self.signed {
             Some(signed) => Some(signed.manifest(name, key).map_err(|error| match referrer {
-                Some(referrer) => format!("{error}, though {referrer} references it"),
+                Some(referrer) => format!("{error}, but {referrer} needs it"),
                 None => error,
             })?),
             None => None,
@@ -483,7 +483,7 @@ mod tests {
         let (result, present) = install(&[&zlib, &zstd], vec![signed(&zstd)], &zstd);
         assert_eq!(
             result.unwrap_err(),
-            "zlib isn't in the index, though zstd references it"
+            "zlib isn't in the index, but zstd needs it"
         );
 
         assert_eq!(present, [false, false]);
@@ -497,10 +497,7 @@ mod tests {
         let (result, _) = install(&[&zlib, &zstd], vec![other, signed(&zstd)], &zstd);
         assert_eq!(
             result.unwrap_err(),
-            format!(
-                "zlib {} isn't in the index, though zstd references it",
-                zlib.key
-            )
+            format!("zlib {} isn't in the index, but zstd needs it", zlib.key)
         );
     }
 }
