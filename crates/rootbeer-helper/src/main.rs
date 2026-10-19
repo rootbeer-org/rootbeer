@@ -15,8 +15,10 @@ use std::os::unix::fs::{
 use std::path::Path;
 
 const SHARED: [&str; 3] = ["store", "var/build", "var/log"];
+const LEGACY: &str = "/opt/rootbeer";
 const USAGE: &str = "usage: rb-helper setup <group> | seal <key> <entry> [reference...] | \
-                     pull <key> <entry> <digest> [reference...] < archive | profile | gc";
+                     pull <key> <entry> <digest> [reference...] < archive | profile | gc | \
+                     remove-legacy";
 
 fn main() {
     for (name, _) in std::env::vars_os() {
@@ -45,6 +47,7 @@ fn run() -> Result<String, String> {
 
     match arguments.as_slice() {
         [command, group] if command == "setup" => setup(root, group),
+        [command] if command == "remove-legacy" => remove_legacy(Path::new(LEGACY)),
         [command, key, entry, references @ ..] if command == "seal" => {
             authorize(root)?;
             let (key, references) = parse(key, references)?;
@@ -75,6 +78,54 @@ fn run() -> Result<String, String> {
         }
         _ => Err(USAGE.into()),
     }
+}
+
+/// Removes the old store once `rb migrate` has emptied every user's roots in
+/// it, so nothing anyone runs comes from it.
+fn remove_legacy(legacy: &Path) -> Result<String, String> {
+    if !getuid().is_root() {
+        return Err("remove-legacy must run as root".into());
+    }
+
+    if fs::symlink_metadata(legacy).is_err() {
+        return Ok(format!("{} is already gone", legacy.display()));
+    }
+
+    let users = legacy.join("var/roots");
+    let at = |path: &Path| {
+        let path = path.to_path_buf();
+        move |error: io::Error| format!("{}: {error}", path.display())
+    };
+
+    // Clients from before roots were recorded leave no trace rb can check.
+    let entries = fs::read_dir(&users).map_err(|error| {
+        format!(
+            "{}: {error}, so rb can't tell whether anyone still uses {}",
+            users.display(),
+            legacy.display()
+        )
+    })?;
+
+    let mut holding = Vec::new();
+    for entry in entries {
+        let user = entry.map_err(at(&users))?;
+        let path = user.path();
+        let is_empty = fs::read_dir(&path).map_err(at(&path))?.next().is_none();
+        if !is_empty {
+            holding.push(user.file_name().to_string_lossy().into_owned());
+        }
+    }
+
+    if !holding.is_empty() {
+        return Err(format!(
+            "{} still holds packages for uid {}, so each must run `rb migrate` first",
+            legacy.display(),
+            holding.join(", ")
+        ));
+    }
+
+    fs::remove_dir_all(legacy).map_err(at(legacy))?;
+    Ok(format!("removed {}", legacy.display()))
 }
 
 fn collect(root: &Path) -> Result<String, String> {
