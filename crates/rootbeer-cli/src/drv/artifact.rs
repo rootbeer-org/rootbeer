@@ -34,7 +34,7 @@ pub(super) fn export(sources: &Sources, package: &str, directory: &Path) -> Resu
     let build_of = |key: &Key| match graph.derivations.get(key) {
         Some(Derivation::Build(build)) => Ok(build),
         _ => Err(format!(
-            "{key} isn't a build in the graph, so it can't be exported"
+            "{key} isn't a build in the graph. Only builds can be exported"
         )),
     };
 
@@ -50,7 +50,7 @@ pub(super) fn export(sources: &Sources, package: &str, directory: &Path) -> Resu
         let path = store
             .path(key)
             .map_err(|error| error.to_string())?
-            .ok_or_else(|| format!("{key} isn't built, so run `rb drv build` first"))?;
+            .ok_or_else(|| format!("{key} isn't built. Run `rb drv build` first"))?;
 
         let lines = references
             .iter()
@@ -147,7 +147,7 @@ pub(super) fn import(directory: &Path) -> Result<(), String> {
         for reference in references.keys() {
             if !is_present(&store, reference)? {
                 return Err(format!(
-                    "{key} references {reference}, which is neither exported nor present"
+                    "{key} references {reference}, which isn't exported or in the store"
                 ));
             }
         }
@@ -196,7 +196,10 @@ fn read(directory: &Path) -> Result<Vec<Artifact>, String> {
 
         let key = derivation.key().map_err(|error| error.to_string())?;
         if path.file_name() != Some(key.as_str().as_ref()) {
-            return Err(format!("{} holds the derivation of {key}", path.display()));
+            return Err(format!(
+                "{}'s name doesn't match its derivation key {key}",
+                path.display()
+            ));
         }
 
         let Derivation::Build(build) = derivation else {
@@ -310,7 +313,7 @@ mod tests {
                 "a".repeat(32),
                 zlib.clone(),
                 String::new(),
-                "holds the derivation of",
+                "doesn't match its derivation key",
             ),
             (
                 fetch.key().unwrap().to_string(),

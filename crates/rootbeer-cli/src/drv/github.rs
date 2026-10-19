@@ -52,7 +52,9 @@ struct Asset {
 impl Request {
     pub(crate) fn new(repository: &str, tag: Option<String>) -> Result<Request, String> {
         if !is_repository(repository) {
-            return Err(format!("github:{repository} isn't github:owner/repo"));
+            return Err(format!(
+                "github:{repository} isn't in the form github:owner/repo"
+            ));
         }
 
         Ok(Request {
@@ -107,7 +109,7 @@ pub(crate) fn resolve(
     let version = published.tag_name;
     if !is_version(&version) {
         return Err(format!(
-            "github:{}'s tag {version} isn't a version rb can store",
+            "github:{}'s tag {version} isn't a valid version",
             request.repository
         ));
     }
@@ -131,7 +133,7 @@ pub(crate) fn resolve(
         Some(digest) => Sha256::try_from(digest.to_string()).map_err(|error| error.to_string())?,
         None => {
             eprintln!(
-                "GitHub publishes no sha256 for {}, so rb trusts what it downloads now",
+                "GitHub publishes no sha256 for {}. Trusting the sha256 of this download",
                 asset.name
             );
             download_digest(&asset.browser_download_url)?
@@ -229,7 +231,7 @@ pub(crate) fn install(
         .is_some();
     if is_offline && !is_fetched {
         return Err(format!(
-            "{name} needs {}, which --offline doesn't allow",
+            "{name} needs to download {}. Run without --offline",
             release.url
         ));
     }
@@ -400,10 +402,10 @@ fn select<'a>(
     match candidates.as_slice() {
         [asset] => Ok(asset),
         [] => Err(format!(
-            "no release asset matches {platform}, so name one with `asset`"
+            "no release asset matches {platform}. Name one with `asset`"
         )),
         _ => Err(format!(
-            "release assets {} all match {platform}, so name one with `asset`",
+            "release assets {} all match {platform}. Name one with `asset`",
             candidates
                 .iter()
                 .map(|asset| asset.name.as_str())
@@ -478,14 +480,15 @@ fn bins(asset: &str, paths: Vec<String>) -> Result<BTreeMap<String, String>, Str
         let name = path.rsplit('/').next().unwrap_or(&path).to_string();
         if let Some(other) = bins.insert(name.clone(), path.clone()) {
             return Err(format!(
-                "{asset} has {other} and {path}, so name the bins with `bins`"
+                "{asset} has two executables named {name}: {other} and {path}. Name the bins \
+                 with `bins`"
             ));
         }
     }
 
     match bins.is_empty() {
         true => Err(format!(
-            "{asset} has no executable files, so name the bins with `bins`"
+            "{asset} has no executable files. Name the bins with `bins`"
         )),
         false => Ok(bins),
     }
@@ -546,7 +549,7 @@ mod tests {
         assert!(!has_token("tool-arm64e", "arm64"));
         assert_eq!(
             picked(&["tool-darwin-amd64.tar.gz"], Platform::Aarch64Macos, None).unwrap_err(),
-            "no release asset matches aarch64-macos, so name one with `asset`"
+            "no release asset matches aarch64-macos. Name one with `asset`"
         );
     }
 
@@ -600,7 +603,7 @@ mod tests {
 
         let unmarked = ["tool-linux-amd64.tar.gz", "tool-linux-amd64.zip"];
         let error = picked(&unmarked, Platform::X86_64Linux, Some(Libc::Gnu)).unwrap_err();
-        assert!(error.contains("name one with `asset`"), "{error}");
+        assert!(error.contains("Name one with `asset`"), "{error}");
     }
 
     #[test]
@@ -622,11 +625,11 @@ mod tests {
         let error = bins("a.tar.gz", vec!["a/rg".into(), "b/rg".into()]).unwrap_err();
         assert_eq!(
             error,
-            "a.tar.gz has a/rg and b/rg, so name the bins with `bins`"
+            "a.tar.gz has two executables named rg: a/rg and b/rg. Name the bins with `bins`"
         );
         assert_eq!(
             bins("a.tar.gz", Vec::new()).unwrap_err(),
-            "a.tar.gz has no executable files, so name the bins with `bins`"
+            "a.tar.gz has no executable files. Name the bins with `bins`"
         );
         assert_eq!(format("shfmt_v3.8.0_linux_amd64"), Some(Format::Binary));
         assert_eq!(format("cosign-linux-amd64.bundle"), None);

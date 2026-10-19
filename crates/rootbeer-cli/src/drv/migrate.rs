@@ -62,13 +62,13 @@ struct Ownership {
 /// binaries keep working until a rerun moves it.
 pub(crate) fn migrate(args: &Args) -> Result<(), String> {
     if !env::is_legacy_live() {
-        eprintln!("the old store holds nothing for you");
+        eprintln!("nothing to migrate, /opt/rootbeer has no packages for you");
         return Ok(());
     }
 
     let mut stuck = Vec::new();
     if let Err(error) = configuration(args) {
-        stuck.push(format!("the configuration's packages: {error}"));
+        stuck.push(format!("configuration: {error}"));
     }
 
     let requests = legacy_requests(&mut stuck)?;
@@ -82,7 +82,7 @@ pub(crate) fn migrate(args: &Args) -> Result<(), String> {
         let is_known = |name: &str| generation.packages.contains_key(name);
         let requests =
             install::resolve_aliases(requests, is_known, &index).unwrap_or_else(|error| {
-                stuck.push(format!("the old profile's packages: {error}"));
+                stuck.push(format!("rb use packages: {error}"));
                 BTreeMap::new()
             });
         let requests = profile::planned(&generation.packages, requests, false);
@@ -100,12 +100,14 @@ pub(crate) fn migrate(args: &Args) -> Result<(), String> {
     }
 
     if !stuck.is_empty() {
+        eprintln!("couldn't move:");
         for problem in &stuck {
             eprintln!("  {problem}");
         }
 
         return Err(
-            "the old store keeps what it holds for you until a rerun moves the rest".into(),
+            "nothing was removed from /opt/rootbeer. Fix the above and run `rb migrate` again"
+                .into(),
         );
     }
 
@@ -116,9 +118,11 @@ pub(crate) fn migrate(args: &Args) -> Result<(), String> {
     release_roots()?;
     remove_legacy_state()?;
     write(&env::migrated_path(), b"")?;
-    eprintln!("everything moved, so the old store no longer holds anything for you");
+    eprintln!("moved everything from /opt/rootbeer to /opt/rb");
     if is_legacy_unused() {
-        eprintln!("no one else uses /opt/rootbeer, so `sudo {HELPER} remove-legacy` removes it");
+        eprintln!(
+            "no one uses /opt/rootbeer anymore. Delete it with `sudo {HELPER} remove-legacy`"
+        );
     }
 
     Ok(())
@@ -137,7 +141,7 @@ pub(crate) fn hint() {
         .into_iter()
         .find(|rb| rb.exists());
     let rb = rb.map_or("rb".into(), |rb| rb.display().to_string());
-    eprintln!("/opt/rootbeer still holds packages for you, so run `{rb} migrate` to move them");
+    eprintln!("/opt/rootbeer still has packages for you. Move them with `{rb} migrate`");
 }
 
 /// Runs only the package step of `rb apply`, which also moves
@@ -152,7 +156,7 @@ fn configuration(args: &Args) -> Result<(), String> {
         let root = fs::metadata(legacy_roots().join("configuration"));
         return match root.is_ok_and(|root| root.len() > 0) {
             true => Err(format!(
-                "`rb apply` ran a configuration that isn't at {}, so pass it with --script",
+                "no configuration at {}. Pass the one `rb apply` uses with --script",
                 script.display()
             )),
             false => Ok(()),
@@ -365,7 +369,7 @@ fn remove_legacy_state() -> Result<(), String> {
     // Without HOME it's the working directory, whose entries aren't rb's.
     if state.file_name().is_none_or(|name| name != "rootbeer") {
         return Err(format!(
-            "{} isn't rb's state directory, so set HOME",
+            "{} isn't rb's state directory. Set HOME and run again",
             state.display()
         ));
     }

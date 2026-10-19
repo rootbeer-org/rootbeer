@@ -181,7 +181,7 @@ impl Planner<'_, '_> {
         let derivation = graph.derivations.get(key);
         if self.is_offline {
             return Err(format!(
-                "{key} {} isn't in the store, and --offline doesn't allow getting it",
+                "{key} {} isn't in the store. Run without --offline to fetch it",
                 label(derivation)
             ));
         }
@@ -210,7 +210,7 @@ impl Planner<'_, '_> {
                 .chain(check.dependencies.iter().map(|dependency| &dependency.key))
                 .collect(),
             Some(Derivation::Fetch(_)) => Vec::new(),
-            None => return Err(format!("{key} isn't in what the catalog evaluated")),
+            None => return Err(format!("{key} isn't in the evaluated catalog")),
         };
 
         for need in needs {

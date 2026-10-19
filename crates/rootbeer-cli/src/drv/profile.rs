@@ -39,7 +39,7 @@ pub(crate) fn add(args: &UseArgs) -> Result<(), String> {
         let (name, wanted) = Wanted::parse(request)?;
         let asked = requests.insert(name.clone(), wanted.clone());
         if asked.is_some_and(|asked| asked != wanted) {
-            return Err(format!("{name} is asked for twice"));
+            return Err(format!("conflicting requests for {name}"));
         }
     }
 
@@ -59,7 +59,7 @@ pub(crate) fn add(args: &UseArgs) -> Result<(), String> {
 
     let requests = planned(&generation.packages, requests, args.should_update);
     if requests.is_empty() {
-        eprintln!("{USER} already has everything asked for");
+        eprintln!("nothing to install, your {USER} profile already has these packages");
         return link_apps(&profile);
     }
 
@@ -159,7 +159,7 @@ pub(super) fn install_requests(
     }
 
     if members.is_empty() {
-        eprintln!("{USER} already has the newest of what it asks for");
+        eprintln!("your {USER} profile is already up to date");
         return link_apps(profile);
     }
 
@@ -271,7 +271,7 @@ pub(crate) fn remove(names: &[String]) -> Result<(), String> {
             .is_some_and(|canonical| generation.packages.remove(&canonical).is_some());
 
         if !is_removed {
-            return Err(format!("{name} isn't in {USER}"));
+            return Err(format!("{name} isn't in your {USER} profile"));
         }
     }
 
@@ -284,7 +284,7 @@ pub(crate) fn rollback() -> Result<(), String> {
     let directory = directory(false)?;
     let profile = Profile::open(&directory, USER).map_err(profile_error)?;
     let number = profile.rollback().map_err(profile_error)?;
-    eprintln!("{USER} is now generation {number}");
+    eprintln!("{USER} profile is now generation {number}");
     link_apps(&profile)
 }
 
@@ -317,7 +317,9 @@ pub(crate) fn self_update() -> Result<(), String> {
     let user = Profile::open(&directory, USER).map_err(profile_error)?;
     let generation = current(&user)?;
     if !generation.packages.contains_key("rootbeer") && has_rootbeer(&directory, DEFAULT)? {
-        return Err("your configuration installs rootbeer, so run `rb apply --update`".into());
+        return Err(
+            "your configuration installs rootbeer. Update it with `rb apply --update`".into(),
+        );
     }
 
     let requests = BTreeMap::from([("rootbeer".to_string(), Wanted::Index(None))]);
@@ -378,7 +380,7 @@ pub(super) fn switch(
     };
 
     let number = profile.create(generation, locate).map_err(profile_error)?;
-    eprintln!("{name} is now generation {number}");
+    eprintln!("{name} profile is now generation {number}");
     Ok(())
 }
 
@@ -437,7 +439,7 @@ pub(super) fn directory(should_create: bool) -> Result<PathBuf, String> {
 
     match fs::symlink_metadata(&directory) {
         Ok(metadata) if metadata.is_dir() && metadata.uid() == uid.as_raw() => {}
-        Ok(_) => return Err(format!("{} isn't your directory", directory.display())),
+        Ok(_) => return Err(format!("{} isn't a directory you own", directory.display())),
         Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(at(error)),
         Err(_) if !should_create => return Err(format!("{USER} has no generations")),
         Err(_) if uid.is_root() => {

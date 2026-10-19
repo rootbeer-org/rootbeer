@@ -76,14 +76,13 @@ enum Commands {
     /// Apply the rootbeer configuration
     Apply(apply::Args),
 
-    /// Remove store outputs no generation of any profile on this machine holds
+    /// Remove store outputs that no profile generation on this machine uses
     Gc(drv::gc::Args),
 
     /// Print shell setup that puts your profiles on PATH (sh, Bash, or Zsh)
     Env,
 
-    /// Move your packages from the old /opt/rootbeer store into /opt/rb, then
-    /// release what it holds for you
+    /// Move your packages from the old /opt/rootbeer store to /opt/rb
     Migrate(drv::migrate::Args),
 
     /// View or change the git remote protocol for the source directory

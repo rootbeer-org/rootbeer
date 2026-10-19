@@ -52,7 +52,7 @@ fn targets(
         }
 
         if version.is_none() && catalog.default_version(name, platform).is_none() {
-            eprintln!("{name} has no default version on {platform}, left out");
+            eprintln!("skipping {name}, it has no default version on {platform}");
             continue;
         }
 
