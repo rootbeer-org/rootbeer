@@ -62,13 +62,6 @@ pub fn migrated_path() -> PathBuf {
     crate::state_dir().join("migrated")
 }
 
-/// Where the old `default` profile linked a command, for configuration
-/// entries only the old store can serve.
-pub fn legacy_bin(name: &str) -> Option<PathBuf> {
-    let bin = legacy_profile("default").join("bin").join(name);
-    is_legacy_live().then_some(bin).filter(|bin| bin.exists())
-}
-
 /// The `env.sh` the old store's `default` profile kept, which configurations
 /// from before /opt/rb source.
 pub fn legacy_env_path() -> PathBuf {

@@ -2,6 +2,7 @@ use super::configuration::{configure, link_default_apps};
 use super::github;
 use super::install::{self, Source, Wanted};
 use super::profile::{self, profile_error};
+use super::HELPER;
 use rootbeer_core::env::{self, legacy_roots, USER};
 use rootbeer_core::{Options, PackageLockOptions, Pipeline};
 use rootbeer_profile::Profile;
@@ -11,6 +12,19 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
+
+const LEGACY_USERS: &str = "/opt/rootbeer/var/roots";
+
+// `applications` stays, since profiles still take over the app links it records.
+const LEGACY_STATE: [&str; 7] = [
+    "discovery",
+    "downloads",
+    "indexes",
+    "repositories",
+    "standalone",
+    "store",
+    "tmp",
+];
 
 #[derive(clap::Args, Debug)]
 pub(crate) struct Args {
@@ -53,9 +67,8 @@ pub(crate) fn migrate(args: &Args) -> Result<(), String> {
     }
 
     let mut stuck = Vec::new();
-    match configuration(args) {
-        Ok(skipped) => stuck.extend(skipped),
-        Err(error) => stuck.push(format!("the configuration's packages: {error}")),
+    if let Err(error) = configuration(args) {
+        stuck.push(format!("the configuration's packages: {error}"));
     }
 
     let requests = legacy_requests(&mut stuck)?;
@@ -93,8 +106,13 @@ pub(crate) fn migrate(args: &Args) -> Result<(), String> {
     relink_legacy_user()?;
     rewrite_env_files()?;
     release_roots()?;
+    remove_legacy_state()?;
     write(&env::migrated_path(), b"")?;
     eprintln!("everything moved, so the old store no longer holds anything for you");
+    if is_legacy_unused() {
+        eprintln!("no one else uses /opt/rootbeer, so `sudo {HELPER} remove-legacy` removes it");
+    }
+
     Ok(())
 }
 
@@ -115,8 +133,8 @@ pub(crate) fn hint() {
 }
 
 /// Runs only the package step of `rb apply`, which also moves
-/// `rootbeer.lock` to the schema that step writes. Returns what it skipped.
-fn configuration(args: &Args) -> Result<Vec<String>, String> {
+/// `rootbeer.lock` to the schema that step writes.
+fn configuration(args: &Args) -> Result<(), String> {
     let script = args
         .script
         .clone()
@@ -129,7 +147,7 @@ fn configuration(args: &Args) -> Result<Vec<String>, String> {
                 "`rb apply` ran a configuration that isn't at {}, so pass it with --script",
                 script.display()
             )),
-            false => Ok(Vec::new()),
+            false => Ok(()),
         };
     }
 
@@ -140,6 +158,7 @@ fn configuration(args: &Args) -> Result<Vec<String>, String> {
 
     super::check_lock(&script_dir)?;
     let mut planned = Pipeline::new(options)
+        .with_tools(super::run::tool)
         .plan()
         .map_err(|error| error.to_string())?;
 
@@ -155,7 +174,7 @@ fn configuration(args: &Args) -> Result<Vec<String>, String> {
         link_default_apps()?;
     }
 
-    Ok(configured.skipped)
+    Ok(())
 }
 
 /// What `rb use` asked for in the old `user` profile. A request rb can't
@@ -311,6 +330,46 @@ fn release_roots() -> Result<(), String> {
             .map_err(|error| format!("{}: {error}", directory.display()))?
             .path();
         fs::remove_file(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+    }
+
+    Ok(())
+}
+
+/// Whether every user's directory under `var/roots` is empty, so the old store
+/// holds nothing for anyone. It's always /opt/rootbeer, which is what
+/// `remove-legacy` removes, whatever `ROOTBEER_ROOT` says.
+fn is_legacy_unused() -> bool {
+    let Ok(entries) = fs::read_dir(LEGACY_USERS) else {
+        return false;
+    };
+
+    entries
+        .flatten()
+        .all(|user| fs::read_dir(user.path()).is_ok_and(|mut roots| roots.next().is_none()))
+}
+
+/// What only the old engine kept in the state directory. The old profiles
+/// stay, since shells and older configurations still reach rb and `env.sh`
+/// through them.
+fn remove_legacy_state() -> Result<(), String> {
+    let state = rootbeer_core::state_dir();
+
+    // Without HOME it's the working directory, whose entries aren't rb's.
+    if state.file_name().is_none_or(|name| name != "rootbeer") {
+        return Err(format!(
+            "{} isn't rb's state directory, so set HOME",
+            state.display()
+        ));
+    }
+
+    for name in LEGACY_STATE {
+        let path = state.join(name);
+        match fs::remove_dir_all(&path) {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => {
+                return Err(format!("{}: {error}", path.display()));
+            }
+            _ => {}
+        }
     }
 
     Ok(())

@@ -74,47 +74,14 @@ function rootbeer.link(src, dst) end
 --- @param args? string[] Optional arguments passed to the command.
 function rootbeer.exec(cmd, args) end
 
---- @class rootbeer.PackageSpec
---- @field name string Package name.
---- @field version string Locked package version.
---- @field source rootbeer.PackageSource Locked package source.
---- @field install rootbeer.PackageInstall Package install recipe.
---- @field bins table<string, string> Binary name → relative path in the installed output tree.
---- @field apps? table<string, string> macOS application filename → relative .app bundle path. Apply manages links in ~/Applications.
---- @field output_sha256? string Verified installed-tree hash.
---- @field runtime_dependencies? table<string, rootbeer.PackageSpec> Exact runtime packages keyed by name@version; each requires output_sha256.
-
---- @class rootbeer.PackageSource
---- @field path? string Local directory tree source. The `sha256` is a deterministic tree hash.
---- @field file? string Local source file, usually an archive. The `sha256` is a byte hash.
---- @field url? string HTTPS, digest-pinned `ghcr://`, or `file://` source URL. The `sha256` is a byte hash.
---- @field sha256 string Locked source hash.
-
---- @class rootbeer.PackageInstall
---- @field dmg? boolean Copy declared application bundles from a read-only macOS disk image.
---- @field directory? boolean Install a directory tree source.
---- @field archive? "tar.gz"|"tgz"|"tar.xz"|"txz"|"zip" Install an archive source.
---- @field binary? string Install a raw executable at this relative path.
---- @field strip_prefix? string Relative subdirectory to use as the install root.
-
 --- @class rootbeer.PackageOptions
---- @field source? boolean Build the selected approved release from source instead of using a prebuilt.
---- @field head? boolean Build the declared development branch, resolved to a commit in the lock.
---- @field tag? string Build this literal Git tag from the recipe's source repository.
---- @field rev? string Build this full lowercase Git commit SHA from the recipe's source repository.
---- @field branch? string Build this Git branch, resolved to a commit in the lock.
 --- @field asset? string Exact GitHub release asset filename. Required when platform selection is ambiguous.
 --- @field bins? table<string, string> Binary name → relative path in the GitHub asset. Defaults to executable discovery for archives, or the repository name for raw binaries.
 
 --- @class rootbeer.PackageRequestSpec
---- @field source? boolean Build the selected approved release from source instead of using a prebuilt.
---- @field head? boolean Build the declared development branch, resolved to a commit in the lock.
---- @field tag? string Build this literal Git tag from the recipe's source repository.
---- @field rev? string Build this full lowercase Git commit SHA from the recipe's source repository.
---- @field branch? string Build this Git branch, resolved to a commit in the lock.
 --- @field request string Package name, name@version, or github:owner/repo@tag.
---- @field asset? string Exact release asset filename for an explicit github: request.
---- @field bins? table<string, string> Exported command name → relative path for an explicit github: request.
+--- @field asset? string Exact release asset filename for a github: request.
+--- @field bins? table<string, string> Exported command name → relative path for a github: request.
 
 --- Builds packages from a checkout of recipes, laid out like the package
 --- index with `packages/<name>.lua` and `host.lua`. A name the checkout
@@ -126,15 +93,14 @@ function rootbeer.package_catalog(path) end
 
 --- Installs a command-line tool, such as `"ripgrep"`. Use `"name@version"`
 --- to choose an exact version. Package versions are saved in `rootbeer.lock`.
---- You can also use `github:owner/repo@tag`, or a table describing an exact
---- download and installation.
---- @param spec string|rootbeer.PackageRequestSpec|rootbeer.PackageSpec Package name, source request with options, or exact package specification.
---- @param opts? rootbeer.PackageOptions Source selection for canonical packages, or asset options for explicit `github:` requests.
+--- You can also use `github:owner/repo@tag` for a GitHub release's asset.
+--- @param spec string|rootbeer.PackageRequestSpec Package request, or a request with options.
+--- @param opts? rootbeer.PackageOptions Asset options for `github:` requests.
 function rootbeer.package(spec, opts) end
 
 --- Declares a dense package list in order. Accepts the same entries as package().
 --- Validates every entry before adding operations; errors identify the invalid index.
---- @param specs (string|rootbeer.PackageRequestSpec|rootbeer.PackageSpec)[] Package declarations.
+--- @param specs (string|rootbeer.PackageRequestSpec)[] Package declarations.
 function rootbeer.packages(specs) end
 
 --- Returns the configuration profile's stable binary directory without checking installation.

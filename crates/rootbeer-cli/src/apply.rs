@@ -120,24 +120,6 @@ impl ExecutionHandler for CliHandler {
             OpResult::RemoteUnchanged { url } => {
                 eprintln!("  {} {url} (unchanged)", "skip".dimmed());
             }
-            OpResult::PackageRealized {
-                name,
-                version,
-                store_path,
-            } => {
-                if let Some(store_path) = store_path {
-                    eprintln!(
-                        "  {} {name}@{version} -> {}",
-                        "package".green(),
-                        store_path.display()
-                    );
-                } else {
-                    eprintln!("  {} {name}@{version}", "package".green());
-                }
-            }
-            OpResult::PackageUnchanged { name, version } => {
-                eprintln!("  {} {name}@{version} (unchanged)", "skip".dimmed());
-            }
             OpResult::PackagePlanned { spec } => {
                 eprintln!("  {} {spec}", "package".green());
             }
@@ -187,7 +169,7 @@ pub fn run(args: Args, lua_dir: Option<&PathBuf>) {
         std::process::exit(1);
     }
 
-    let pipeline = rootbeer_core::Pipeline::new(opts);
+    let pipeline = rootbeer_core::Pipeline::new(opts).with_tools(crate::drv::run::tool);
 
     eprintln!(
         "applying ({}){}",
@@ -229,10 +211,6 @@ pub fn run(args: Args, lua_dir: Option<&PathBuf>) {
             eprintln!("{} error: {e}", "✗".red().bold());
             std::process::exit(1);
         });
-
-        for skipped in &configured.skipped {
-            eprintln!("warning: {skipped}, so rb skipped it");
-        }
 
         should_link_apps = configured.should_link_apps;
     }

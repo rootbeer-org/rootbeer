@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use crate::package::{LockedPackage, PackageIntent};
+use crate::package::PackageRequest;
 
 /// Identity location; key material is resolved only when decrypting.
 #[derive(Debug, Clone, PartialEq)]
@@ -115,9 +115,6 @@ pub enum Op {
         url: String,
     },
     Package {
-        intent: PackageIntent,
-    },
-    RealizePackage {
-        package: LockedPackage,
+        request: PackageRequest,
     },
 }

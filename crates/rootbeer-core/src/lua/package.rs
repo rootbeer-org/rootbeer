@@ -1,15 +1,12 @@
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use mlua::{Error as LuaError, Lua, Result as LuaResult, Table, Value};
 
 use super::ctx::Ctx;
 use super::module::Module;
 use super::vm::{profile_bin_path, PackageBins};
-use crate::package::{
-    ArchiveFormat, LockedInstall, LockedPackage, LockedSource, PackageIntent, PackageRequest,
-    Provides,
-};
+use crate::package::PackageRequest;
 use crate::plan::{Op, WriteSource};
 
 pub(crate) struct Package;
@@ -57,9 +54,8 @@ impl Module for Package {
         t.set(
             "package",
             lua.create_function(|lua, (spec, opts): (Value, Option<Table>)| {
-                let parsed = parse_intent(lua, spec, opts)?;
-                append_packages(lua, vec![parsed]);
-                Ok(())
+                let parsed = parse_request(lua, spec, opts)?;
+                append_packages(lua, vec![parsed])
             })?,
         )?;
         t.set(
@@ -70,7 +66,7 @@ impl Module for Package {
                     .into_iter()
                     .enumerate()
                     .map(|(index, spec)| {
-                        parse_intent(lua, spec, None).map_err(|error| {
+                        parse_request(lua, spec, None).map_err(|error| {
                             LuaError::RuntimeError(format!(
                                 "rb.packages entry {}: {error}",
                                 index + 1
@@ -78,8 +74,7 @@ impl Module for Package {
                         })
                     })
                     .collect::<LuaResult<Vec<_>>>()?;
-                append_packages(lua, parsed);
-                Ok(())
+                append_packages(lua, parsed)
             })?,
         )?;
         t.set(
@@ -100,10 +95,7 @@ impl Module for Package {
             lua.create_function(|lua, value: Value| {
                 let bin = String::parse(value)?;
                 validate_command(&bin)?;
-                let bins = lua
-                    .app_data_ref::<PackageBins>()
-                    .expect("PackageBins not set");
-
+                let bins = package_bins(lua)?;
                 if let Some(path) = bins.get(&bin) {
                     return Ok(Some(path.to_string_lossy().to_string()));
                 }
@@ -137,149 +129,91 @@ impl Module for Package {
     }
 }
 
-fn append_packages(lua: &Lua, parsed: Vec<(PackageIntent, Vec<String>)>) {
+fn append_packages(lua: &Lua, parsed: Vec<(PackageRequest, Vec<String>)>) -> LuaResult<()> {
     let cx = Ctx::from(lua);
-    let bins = lua
-        .app_data_ref::<PackageBins>()
-        .expect("PackageBins not set");
-    for (intent, names) in parsed {
-        let is_served = matches!(&intent, PackageIntent::Request(request) if is_served(request));
+    let bins = package_bins(lua)?;
+    for (request, names) in parsed {
         for name in names {
-            // Entries rb can't install stay where the old store put them.
-            let path = match is_served {
-                true => Some(profile_bin_path(&name)),
-                false => crate::env::legacy_bin(&name),
-            };
-            if let Some(path) = path {
-                bins.insert(name, path);
-            }
+            let path = profile_bin_path(&name);
+            bins.insert(name, path);
         }
-        cx.push(Op::Package { intent });
+        cx.push(Op::Package { request });
     }
+
+    Ok(())
 }
 
-/// Whether rb installs `request` from the signed index or a GitHub release.
-fn is_served(request: &PackageRequest) -> bool {
-    let resolver = request.resolver.as_deref();
-    request.source.is_none() && matches!(resolver, None | Some("rootbeer" | "github"))
+fn package_bins(lua: &Lua) -> LuaResult<mlua::AppDataRef<'_, PackageBins>> {
+    lua.app_data_ref::<PackageBins>()
+        .ok_or_else(|| LuaError::RuntimeError("package bins aren't set up".into()))
 }
 
-fn parse_intent(
+fn parse_request(
     lua: &Lua,
     spec: Value,
     opts: Option<Table>,
-) -> LuaResult<(PackageIntent, Vec<String>)> {
-    if opts.is_some() && !matches!(&spec, Value::String(_)) {
-        return Err(LuaError::RuntimeError(
-            "package options require a request string".into(),
-        ));
-    }
-    let cx = Ctx::from(lua);
-    let (request, opts, is_structured) = match spec {
-        Value::String(value) => (value.to_str()?.to_string(), opts, false),
-        Value::Table(table) if !matches!(table.raw_get::<Value>("request")?, Value::Nil) => {
-            fields(
-                &table,
-                &[
-                    "request", "asset", "bins", "source", "head", "tag", "rev", "branch",
-                ],
-            )?;
+) -> LuaResult<(PackageRequest, Vec<String>)> {
+    let (request, opts, allowed) = match spec {
+        Value::String(value) => (value.to_str()?.to_string(), opts, &["asset", "bins"][..]),
+        Value::Table(table) if opts.is_none() => {
             let request = required(&table, "request")?;
-            (request, Some(table), true)
+            (request, Some(table), &["request", "asset", "bins"][..])
         }
-        Value::Table(table) => {
-            let package = parse_package(&cx, table)?;
-            let names = package.provides.bins.keys().cloned().collect();
-            return Ok((PackageIntent::locked(package), names));
+        Value::Table(_) => {
+            return Err(LuaError::RuntimeError(
+                "package options require a request string".into(),
+            ))
         }
         other => {
             return Err(LuaError::RuntimeError(format!(
-                "rb.package expected a package table or request string, got {}",
+                "rb.package expected a request string or table, got {}",
                 other.type_name()
             )))
         }
     };
-    let mut request = PackageRequest::parse(&request);
-    if request.name.trim().is_empty()
-        || request
-            .version
-            .as_ref()
-            .is_some_and(|version| version.trim().is_empty())
-    {
-        return Err(LuaError::RuntimeError(
-            "package request must name a package and a nonempty version when specified".into(),
-        ));
-    }
+
+    let mut request = PackageRequest::parse(&request).map_err(LuaError::RuntimeError)?;
     if let Some(opts) = opts {
-        fields(
-            &opts,
-            if is_structured {
-                &[
-                    "request", "asset", "bins", "source", "head", "tag", "rev", "branch",
-                ]
-            } else {
-                &["asset", "bins", "source", "head", "tag", "rev", "branch"]
-            },
-        )?;
-        let selections = [
-            optional::<bool>(&opts, "source")?
-                .filter(|value| *value)
-                .map(|_| crate::package::SourceSelection::Release),
-            optional::<bool>(&opts, "head")?
-                .filter(|value| *value)
-                .map(|_| crate::package::SourceSelection::Head),
-            optional::<String>(&opts, "tag")?.map(crate::package::SourceSelection::Tag),
-            optional::<String>(&opts, "rev")?.map(crate::package::SourceSelection::Revision),
-            optional::<String>(&opts, "branch")?.map(crate::package::SourceSelection::Branch),
-        ];
-        for selection in selections.into_iter().flatten() {
-            if request.source.is_some() {
+        fields(&opts, allowed)?;
+        let asset = optional::<String>(&opts, "asset")?;
+        let bins = optional::<Table>(&opts, "bins")?;
+        match &mut request {
+            PackageRequest::Release {
+                asset: wanted_asset,
+                bins: wanted_bins,
+                ..
+            } => {
+                if asset.as_ref().is_some_and(|asset| asset.trim().is_empty()) {
+                    return Err(LuaError::RuntimeError(
+                        "package asset must be nonempty".into(),
+                    ));
+                }
+
+                *wanted_asset = asset;
+                if let Some(bins) = bins {
+                    *wanted_bins = parse_bins(bins)?;
+                }
+            }
+            PackageRequest::Index { .. } if asset.is_some() || bins.is_some() => {
                 return Err(LuaError::RuntimeError(
-                    "choose only one source selector".into(),
+                    "package asset and bins options require a github: request".into(),
                 ));
             }
-            request.source = Some(selection);
-        }
-        request.asset = optional(&opts, "asset")?;
-        let bins = optional::<Table>(&opts, "bins")?;
-        if (request.asset.is_some() || bins.is_some())
-            && request.resolver.as_deref() != Some("github")
-        {
-            return Err(LuaError::RuntimeError(
-                "package asset and bins options require the github resolver".into(),
-            ));
-        }
-        if request
-            .asset
-            .as_ref()
-            .is_some_and(|asset| asset.trim().is_empty())
-        {
-            return Err(LuaError::RuntimeError(
-                "package asset must be nonempty".into(),
-            ));
-        }
-        if let Some(bins) = bins {
-            request.bins = parse_provides(bins)?.bins;
+            PackageRequest::Index { .. } => {}
         }
     }
-    if let Some(selection) = &request.source {
-        selection.validate().map_err(LuaError::RuntimeError)?;
-        if request
-            .resolver
-            .as_deref()
-            .is_some_and(|resolver| resolver != "rootbeer")
-            || (request.version.is_some()
-                && !matches!(selection, crate::package::SourceSelection::Release))
-        {
-            return Err(LuaError::RuntimeError("source selectors require a canonical package and cannot combine Git refs with a release version".into()));
-        }
-    }
-    let mut names: Vec<String> = request.bins.keys().cloned().collect();
+
+    let cx = Ctx::from(lua);
+    let mut names: Vec<String> = match &request {
+        PackageRequest::Release { bins, .. } => bins.keys().cloned().collect(),
+        PackageRequest::Index { .. } => Vec::new(),
+    };
     names.extend(request_bins(&cx, &request));
     for name in &names {
         validate_command(name)?;
     }
-    Ok((PackageIntent::request(request), names))
+
+    Ok((request, names))
 }
 
 fn batch_entries(table: Table) -> LuaResult<Vec<Value>> {
@@ -309,67 +243,28 @@ fn batch_entries(table: Table) -> LuaResult<Vec<Value>> {
     Ok(entries.into_values().collect())
 }
 
-/// The commands `rootbeer.lock` recorded for a request rb installs, on this
-/// machine's platform.
+/// The commands `rootbeer.lock` recorded for a request, on this machine's
+/// platform.
 fn request_bins(cx: &Ctx<'_>, request: &PackageRequest) -> Vec<String> {
-    if !is_served(request) {
-        return Vec::new();
-    }
-
-    let name = match request.resolver.as_deref() {
-        Some("github") => rootbeer_profile::release_name(&request.name),
-        _ => Some(request.name.clone()),
+    let name = match request {
+        PackageRequest::Release { repository, .. } => rootbeer_profile::release_name(repository),
+        PackageRequest::Index { name, .. } => Some(name.clone()),
     };
     let Some(name) = name else {
         return Vec::new();
     };
 
     let path = cx.runtime.script_dir.join("rootbeer.lock");
-    let platform = format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS);
-    let lock = match rootbeer_profile::Lock::read(&path) {
-        Ok(Some(lock)) => lock,
-        Err(rootbeer_profile::Error::Older { .. }) => {
-            return legacy_lock_bins(&path, &request.name, &platform)
-        }
-        _ => return Vec::new(),
+    let Ok(Some(lock)) = rootbeer_profile::Lock::read(&path) else {
+        return Vec::new();
     };
 
+    let platform = format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS);
     lock.packages
         .get(&name)
         .and_then(|platforms| platforms.get(&platform))
         .map(|locked| locked.bins.iter().cloned().collect())
         .unwrap_or_default()
-}
-
-/// A lock from before /opt/rb names the commands until the first apply since
-/// replaces it.
-fn legacy_lock_bins(path: &Path, name: &str, platform: &str) -> Vec<String> {
-    let Ok(bytes) = std::fs::read(path) else {
-        return Vec::new();
-    };
-
-    let Ok(lock) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
-        return Vec::new();
-    };
-
-    let prefix = format!("{name}@");
-    let resolutions = lock.get("resolutions").and_then(|value| value.as_object());
-    let package = resolutions
-        .into_iter()
-        .flat_map(|resolutions| resolutions.values())
-        .filter(|resolution| {
-            let system = resolution.pointer("/proof/system");
-            system.and_then(|system| system.as_str()) == Some(platform)
-        })
-        .filter_map(|resolution| resolution.get("package")?.as_str())
-        .find(|package| package.starts_with(&prefix));
-
-    let bins = package
-        .and_then(|package| lock.get("packages")?.get(package))
-        .and_then(|package| package.pointer("/provides/bins")?.as_object());
-    bins.into_iter()
-        .flat_map(|bins| bins.keys().cloned())
-        .collect()
 }
 
 fn fields(table: &Table, allowed: &[&str]) -> LuaResult<()> {
@@ -417,194 +312,7 @@ fn relative_path(path: &str) -> LuaResult<PathBuf> {
     Ok(path)
 }
 
-fn parse_package(cx: &Ctx<'_>, spec: Table) -> LuaResult<LockedPackage> {
-    parse_package_at_depth(cx, spec, 0)
-}
-
-fn parse_package_at_depth(cx: &Ctx<'_>, spec: Table, depth: usize) -> LuaResult<LockedPackage> {
-    if depth >= 64 {
-        return Err(LuaError::RuntimeError(
-            "runtime dependency depth exceeds 64".into(),
-        ));
-    }
-    fields(
-        &spec,
-        &[
-            "name",
-            "version",
-            "source",
-            "install",
-            "bins",
-            "apps",
-            "runtime_dependencies",
-            "output_sha256",
-        ],
-    )?;
-    let name: String = required(&spec, "name")?;
-    validate_command(&name)?;
-    let version: String = required(&spec, "version")?;
-    let source = parse_source(cx, required(&spec, "source")?)?;
-    let install = parse_install(required(&spec, "install")?)?;
-    let mut provides = parse_provides(required(&spec, "bins")?)?;
-    if let Some(apps) = optional::<Table>(&spec, "apps")? {
-        for pair in apps.pairs::<Value, Value>() {
-            let (name, path) = pair?;
-            let name = String::parse(name)?;
-            validate_command(&name)?;
-            let path = relative_path(&String::parse(path)?)?;
-            if !name.ends_with(".app")
-                || name.len() <= 4
-                || path.extension().is_none_or(|extension| extension != "app")
-            {
-                return Err(LuaError::RuntimeError(
-                    "application exports require .app names and bundle paths".into(),
-                ));
-            }
-            provides.apps.insert(name, path);
-        }
-    }
-
-    let mut runtime_dependencies = BTreeMap::new();
-    if let Some(runtime) = optional::<Table>(&spec, "runtime_dependencies")? {
-        for pair in runtime.pairs::<String, Table>() {
-            let (key, spec) = pair?;
-            runtime_dependencies.insert(key, parse_package_at_depth(cx, spec, depth + 1)?);
-        }
-    }
-    let output_sha256: Option<String> = optional(&spec, "output_sha256")?;
-    if output_sha256
-        .as_deref()
-        .is_some_and(|hash| !rootbeer_package::is_sha256(hash))
-    {
-        return Err(LuaError::RuntimeError(
-            "output_sha256 must be a lowercase SHA-256".into(),
-        ));
-    }
-    let package = LockedPackage {
-        name,
-        version,
-        source,
-        install,
-        provides,
-        runtime_dependencies,
-        output_sha256,
-    };
-    rootbeer_package::runtime::closure(&package).map_err(LuaError::RuntimeError)?;
-    Ok(package)
-}
-
-fn parse_source(cx: &Ctx<'_>, source: Table) -> LuaResult<LockedSource> {
-    fields(&source, &["sha256", "path", "file", "url"])?;
-    let variants = ["path", "file", "url"]
-        .into_iter()
-        .map(|key| source.raw_get::<Value>(key))
-        .collect::<LuaResult<Vec<_>>>()?;
-    if variants
-        .iter()
-        .filter(|value| !matches!(value, Value::Nil))
-        .count()
-        != 1
-    {
-        return Err(LuaError::RuntimeError(
-            "package source requires exactly one of path, file, or url".into(),
-        ));
-    }
-    let sha256: String = required(&source, "sha256")?;
-
-    if let Some(path) = optional::<String>(&source, "path")? {
-        return Ok(LockedSource::Path {
-            path: cx.resolve(&path),
-            sha256,
-        });
-    }
-
-    if let Some(file) = optional::<String>(&source, "file")? {
-        return Ok(LockedSource::File {
-            path: cx.resolve(&file),
-            sha256,
-        });
-    }
-
-    if let Some(url) = optional::<String>(&source, "url")? {
-        return Ok(LockedSource::Url { url, sha256 });
-    }
-
-    Err(LuaError::RuntimeError(
-        "package source requires one of `path`, `file`, or `url`".to_string(),
-    ))
-}
-
-fn parse_install(install: Table) -> LuaResult<LockedInstall> {
-    fields(
-        &install,
-        &["binary", "directory", "archive", "dmg", "strip_prefix"],
-    )?;
-    let binary = optional::<String>(&install, "binary")?;
-    let directory = optional::<bool>(&install, "directory")?.unwrap_or(false);
-    let archive = optional::<String>(&install, "archive")?;
-    let is_dmg = optional::<bool>(&install, "dmg")?.unwrap_or(false);
-    if usize::from(binary.is_some())
-        + usize::from(directory)
-        + usize::from(archive.is_some())
-        + usize::from(is_dmg)
-        != 1
-    {
-        return Err(LuaError::RuntimeError(
-            "package install requires exactly one of directory, archive, binary, or dmg".into(),
-        ));
-    }
-    let strip_prefix = optional::<String>(&install, "strip_prefix")?
-        .map(|path| relative_path(&path))
-        .transpose()?;
-
-    if is_dmg {
-        if strip_prefix.is_some() {
-            return Err(LuaError::RuntimeError(
-                "DMG install uses declared app paths, not strip_prefix".into(),
-            ));
-        }
-        return Ok(LockedInstall::Dmg);
-    }
-
-    if let Some(path) = binary {
-        if strip_prefix.is_some() {
-            return Err(LuaError::RuntimeError(
-                "binary install cannot use strip_prefix".to_string(),
-            ));
-        }
-        return Ok(LockedInstall::Binary {
-            path: relative_path(&path)?,
-        });
-    }
-
-    if directory {
-        return Ok(LockedInstall::Directory { strip_prefix });
-    }
-
-    if let Some(archive) = archive {
-        let format = match archive.as_str() {
-            "tar.gz" | "tgz" => ArchiveFormat::TarGz,
-            "tar.xz" | "txz" => ArchiveFormat::TarXz,
-            "zip" => ArchiveFormat::Zip,
-            other => {
-                return Err(LuaError::RuntimeError(format!(
-                    "unsupported package archive format `{other}`"
-                )));
-            }
-        };
-
-        return Ok(LockedInstall::Archive {
-            format,
-            strip_prefix,
-        });
-    }
-
-    Err(LuaError::RuntimeError(
-        "package install requires `directory`, `archive`, or `binary`".to_string(),
-    ))
-}
-
-fn parse_provides(bins: Table) -> LuaResult<Provides> {
+fn parse_bins(bins: Table) -> LuaResult<BTreeMap<String, PathBuf>> {
     let mut out = BTreeMap::new();
     for pair in bins.pairs::<Value, Value>() {
         let (name, path) = pair?;
@@ -613,10 +321,7 @@ fn parse_provides(bins: Table) -> LuaResult<Provides> {
         out.insert(name, relative_path(&String::parse(path)?)?);
     }
 
-    Ok(Provides {
-        apps: Default::default(),
-        bins: out,
-    })
+    Ok(out)
 }
 
 trait PackageField: Sized {
@@ -641,18 +346,6 @@ impl PackageField for Table {
             Value::Table(value) => Ok(value),
             other => Err(LuaError::RuntimeError(format!(
                 "expected table, got {}",
-                other.type_name()
-            ))),
-        }
-    }
-}
-
-impl PackageField for bool {
-    fn parse(value: Value) -> LuaResult<Self> {
-        match value {
-            Value::Boolean(value) => Ok(value),
-            other => Err(LuaError::RuntimeError(format!(
-                "expected boolean, got {}",
                 other.type_name()
             ))),
         }
