@@ -64,7 +64,7 @@ To try a recipe from your own configuration before it's published, see
 
 ## CI and publication
 
-pdr CI plans every default target against `ghcr.io/rootbeer-org/store` and builds
+pdr CI plans every declared version against `ghcr.io/rootbeer-org/store` and builds
 only what the store lacks, level by level on each platform. A failed package
 holds back only what depends on it.
 
