@@ -299,9 +299,11 @@ fn merge(
         return Err(invalid("an entry isn't an object"));
     };
 
-    let is_dated = package.updated.is_some();
+    // Only the signer dates an entry.
+    merged.remove("added");
+    merged.remove("updated");
     let Some(previous) = previous else {
-        stamp(&mut merged, !is_dated, now);
+        stamp(&mut merged, true, now);
         return Ok(merged);
     };
 
@@ -374,7 +376,7 @@ fn merge(
     }
 
     let is_changed = listed(&merged) != was;
-    stamp(&mut merged, is_changed && !is_dated, now);
+    stamp(&mut merged, is_changed, now);
     Ok(merged)
 }
 
@@ -499,19 +501,19 @@ mod tests {
     }
 
     #[test]
-    fn dates_an_entry_brings_win_over_the_clock() {
+    fn dates_an_entry_brings_are_ignored() {
         let previous = merge(None, &zstd(&["1.0"]), 100).unwrap();
-        let mut backfilled = zstd(&["2.0"]);
-        backfilled.added = Some(5);
-        backfilled.updated = Some(6);
+        let mut dated = zstd(&["1.0"]);
+        dated.added = Some(5);
+        dated.updated = Some(6);
 
         assert_eq!(
-            dates(&merge(Some(previous), &backfilled, 300).unwrap()),
-            (Some(5), Some(6))
+            dates(&merge(Some(previous), &dated, 300).unwrap()),
+            (Some(100), Some(100))
         );
         assert_eq!(
-            dates(&merge(None, &backfilled, 300).unwrap()),
-            (Some(5), Some(6))
+            dates(&merge(None, &dated, 300).unwrap()),
+            (Some(300), Some(300))
         );
     }
 }
