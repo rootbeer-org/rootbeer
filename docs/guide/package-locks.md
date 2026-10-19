@@ -1,51 +1,24 @@
 # Updates and offline use
 
-Rootbeer remembers resolved versions so repeated installs do not unexpectedly
-change your tools. `rb run` and `rb use` save requests in Rootbeer's state directory;
-Lua configurations save them in `rootbeer.lock` alongside `init.lua`.
+Rootbeer keeps the versions it installed so your tools don't change unexpectedly.
+`rb use` records them in your user profile's generations; Lua configurations save
+them in `rootbeer.lock` alongside `init.lua`. `rb run` records nothing and uses
+the index's current default each time.
 
-`--update` refreshes package metadata, not the download cache. Unchanged signed
-index snapshots and checksum-pinned archives are reused. Downloads without an
-upstream checksum use HTTP ETag or Last-Modified validation when the server
-supports it; a changed response replaces the cached content. Existing downloads
-without these validators need one fetch to record them. Servers without validators
-still require a download to detect changes.
-
-When resolution returns identical package inputs, Rootbeer retains the prior
-output hash and verifies the installed store entry instead of unpacking it again.
-Changed source hashes, install layouts, exports, or runtime dependencies prevent
-that reuse. Cached contents remain checksum-verified.
-
-## Update tools installed with run or use
-
-Refresh a request before running it, or update selected installed packages:
+## Update tools installed with use
 
 ```sh
-rb run jq --update -- --version
 rb use --update jq ripgrep
+rb use --update
 ```
 
-`rb use --update` updates the packages you name and keeps other installed tools.
-`rb run --update` refreshes its process's packages without changing your installed
-user profile. Both commands share cached request resolutions, so a later
-`rb use jq` can use the version refreshed by `rb run jq --update`.
+`rb use --update` moves the packages you name, or every package with no names, to
+what the index has now, keeping your other tools. An exact request such as
+`jq@1.8.2` pins that version, including with `--update`, though it can move to a
+rebuild of the same version. Packages built from a local checkout are left alone
+unless you name them.
 
-An exact request such as `jq@1.8.2` keeps that upstream version, including with
-`--update`; its packaging or download details may change. These commands do not
-read or modify your configuration's `rootbeer.lock`.
-
-### Run or install offline
-
-After resolving and downloading a request on this machine:
-
-```sh
-rb run jq --offline -- --version
-rb use --offline jq
-```
-
-Offline use requires both the saved request and its installed or cached contents.
-For `rb run -p`, every requested package must be cached. A different version or
-request may need an online run first. `--offline` and `--update` cannot be combined.
+These commands do not read or modify your configuration's `rootbeer.lock`.
 
 ## Update a Lua configuration
 
@@ -53,61 +26,46 @@ request may need an online run first. `--offline` and `--update` cannot be combi
 rb apply --update
 ```
 
-This refreshes unpinned packages declared in your configuration and saves the
-results in `rootbeer.lock`. Review and commit that file alongside `init.lua`.
-Exact versions in your configuration stay fixed, though packaging details may change.
+This refreshes packages declared in your configuration and saves the results in
+`rootbeer.lock`. Review and commit that file alongside `init.lua`. Exact versions
+in your configuration stay fixed.
 
 | Command | Versions and lockfile | Package network access |
 | --- | --- | --- |
-| `rb apply` | Preserve unchanged resolutions; add, remove, or resolve explicitly changed declarations. | Allowed when needed. |
-| `rb apply --update` | Refresh existing resolutions, respecting explicit version pins. | Allowed; verified downloads are reused. |
-| `rb apply --locked` | Require an existing matching lock; never write it. | Allowed to obtain locked artifacts. |
-| `rb apply --offline` | Reconcile using cached resolutions and metadata; fail if required data is unavailable. | None. |
-| `rb apply --locked --offline` | Require an existing matching lock and cached contents. | None. |
+| `rb apply` | Keep locked entries that still answer their declarations; resolve new or changed ones. | Allowed when needed. |
+| `rb apply --update` | Resolve every declaration again, respecting explicit version pins. | Allowed. |
+| `rb apply --locked` | Require a matching lock; never write it. | Allowed to fetch locked outputs. |
+| `rb apply --offline` | Resolve nothing new; fail if a locked output isn't in the store. | None. |
+| `rb apply --locked --offline` | Require a matching lock and every locked output in the store. | None. |
 
 `--locked` and `--offline` are independent. `--update` conflicts with either.
 Adding a package during plain apply does not upgrade unrelated packages. Removing
-packages updates the lock, including when the final package is removed. Changing
-an explicit version or index pin can resolve the affected declarations again.
+packages updates the lock, including when the final package is removed.
 
-Offline reconciliation can reuse matching lock entries, saved standalone request
-resolutions, and verified cached binary index snapshots. Resolving an uncached
-GitHub request or a source build requires an online run first.
+A lock from an older `rb` is replaced on the next apply without `--locked`. A
+lock written by a newer `rb` makes Rootbeer run that newer release instead.
 
-Lockfiles are written atomically, and identical contents are not rewritten.
-Malformed JSON or unresolved merge conflicts fail with the filename and parse
-location in every mode, including `--update`; resolve the conflict explicitly.
+## Update Rootbeer
 
-`rb self-update` (also available as `rb update`) selects the latest published Rootbeer package from the signed index,
-rather than the separate nightly download channel:
-
-- Standalone installations replace only their `rb` executable, atomically.
-- Installations made with `rb use rootbeer` switch the user profile to the updated
-  package, preserving the original version or source selection and other packages.
-- Lua-managed installations direct you to `rb apply --update`; they never change
-  your configuration lock implicitly. Explicit version pins remain unchanged.
-
-Run the command through the owning profile. Direct store paths and unrecognized
-symlinks cannot self-update.
-
-A matching configuration lock remains usable after upgrading `rb`.
+`rb self-update` (also `rb update`) installs the latest `rootbeer` package from
+the signed index into your user profile. A pinned version stays pinned. If your
+Lua configuration installs Rootbeer, it directs you to `rb apply --update`
+instead and never changes your lock implicitly.
 
 ## What offline mode covers
 
-A saved lock alone is not enough: package contents must already be on the machine.
-Rootbeer reports missing contents instead of downloading them. Cached contents can
-remain usable even if the original download is no longer available.
+`--offline` never contacts the signed index or GitHub, so a saved lock alone is
+not enough: package outputs must already be in `/opt/rb`. Rootbeer reports what's
+missing instead of downloading it. This includes the 1Password CLI that
+[`rb.secret.op`](/reference/secrets) installs, so secret providers that need it
+fail offline.
 
 Offline mode controls package resolution and downloads. A tool launched by
 `rb run`, or a command in your Lua configuration, can still access the network.
 
 ## Using multiple machines
 
-A configuration lockfile covers one platform. Applying on a different platform
-rewrites it for that machine; `--locked` refuses this change.
-[Profiles](/guide/profiles) can choose packages per machine, but cannot make one
-lockfile cover multiple platforms.
-
-Keep a checkout and lock on each machine when you need to preserve different
-platforms' resolutions. Standalone `rb run` and `rb use` caches are local to each
-machine; resolving there selects that platform's packages.
+`rootbeer.lock` keeps separate entries for each platform. Applying on another
+platform adds that platform's entries and leaves the others alone; `--locked`
+fails if this platform has none yet. [Profiles](/guide/profiles) can choose
+packages per machine.

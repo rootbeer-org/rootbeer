@@ -9,17 +9,19 @@ needs `curl` (or `wget`) and `tar`.
 
 ```sh
 sh -c "$(curl -fsSL https://rbpkg.com/rb.sh)"
-eval "$("$HOME/.local/state/rootbeer/profiles/user/current/bin/rb" env)"
+eval "$("/opt/rb/profiles/$(id -u)/user/bin/rb" env)"
 ```
 
 The installer downloads a bootstrap `rb`, which installs the published `rootbeer` package
 into your user profile; from then on `rb` updates itself with `rb self-update`. Add the
 `eval` line to your shell profile to keep installed commands on `PATH`.
 
-Packages live in a store shared by every user at `/opt/rootbeer/store`. The first command
-that needs it asks for `sudo` once per machine to create it, printing the exact commands
-first; without a terminal it prints them and exits instead. Other users on the machine
-need no `sudo`. A later Rootbeer update asks again only if it needs a newer store helper.
+Packages live in a store shared by every user at `/opt/rb`. The first command
+that needs it asks for `sudo` once per machine to set it up, printing the exact
+command first; without a terminal it prints it and exits instead. Members of the
+admin group (`admin` on macOS, `sudo` or `wheel` on Linux) can then install
+without `sudo`. A later Rootbeer update asks again only if it needs a newer store
+helper.
 
 Intel macOS is unsupported.
 
@@ -48,7 +50,7 @@ command. Add these lines to `~/.bashrc` for Bash or `~/.zshrc` for Zsh to make
 your tools available in new terminals:
 
 ```sh
-eval "$("$HOME/.local/state/rootbeer/profiles/user/current/bin/rb" env)"
+eval "$("/opt/rb/profiles/$(id -u)/user/bin/rb" env)"
 ```
 
 See [using packages](/guide/packages) for exact versions, additional commands,
@@ -96,7 +98,7 @@ modules, and keep settings in Git.
 
 Run `rb self-update` to update Rootbeer through the signed package index. If Rootbeer
 is declared in your Lua configuration, use `rb apply --update` instead.
-To update tools installed with `rb use`, name them explicitly:
+To update tools installed with `rb use`, name them, or omit names to update all:
 
 ```sh
 rb use --update jq ripgrep
@@ -105,12 +107,17 @@ rb use --update jq ripgrep
 Use `rb apply --update` for packages declared in Lua. See
 [updates and offline use](/guide/package-locks) for saved versions and locks.
 
+If you installed Rootbeer when it used `/opt/rootbeer`, run `rb migrate` once to
+move your packages into `/opt/rb`.
+
 ## Uninstall
 
-Remove the `eval` line from your shell profile, then delete your Rootbeer state:
+Remove the `eval` line from your shell profile, then delete your Rootbeer state
+and profiles:
 
 ```sh
-rm -rf ~/.local/state/rootbeer ~/.local/share/rootbeer ~/.rootbeer
+rm -rf ~/.local/state/rootbeer ~/.local/share/rootbeer
+sudo rm -rf "/opt/rb/profiles/$(id -u)"
 ```
 
 Your configuration in `~/.config/rootbeer` and any files it applied stay in place;
@@ -119,5 +126,5 @@ Rootbeer added to `~/Applications`. Once no other user on the machine uses Rootb
 remove the shared store:
 
 ```sh
-sudo rm -rf /opt/rootbeer
+sudo rm -rf /opt/rb
 ```

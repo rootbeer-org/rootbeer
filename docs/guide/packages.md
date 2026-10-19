@@ -14,23 +14,21 @@ rb run ripgrep -- --hidden TODO .
 ```
 
 Arguments after `--` go to the tool. Its commands are available on PATH for that
-process and its children; your current shell stays unchanged. Downloads are cached
-for later runs.
+process and its children; your current shell stays unchanged. Its packages stay in
+the store for later runs until `rb gc` removes them.
 
 ### Package names and commands
 
 A package name identifies what to install. Its commands are the executables you
-run: the `ripgrep` package provides `rg`. Package aliases are alternate names for
-requesting the same package; `rg` is also a declared alias of `ripgrep`.
+run: the `ripgrep` package provides `rg`.
 
 ```sh
-rb run rg -- --version
+rb run ripgrep -- --version
 rb run xz --bin xzdec -- --version
 ```
 
-Rootbeer chooses a command matching your request or the canonical package name,
-then the only command if the package exports just one. Use `--bin` to select
-another exported command. The package browser lists commands and aliases separately.
+Rootbeer runs the command named after the package, or the only command if the
+package exports just one. Use `--bin` to select another exported command.
 
 Add `-p` for each additional package the command needs. For example, benchmark
 `jq` with `hyperfine`:
@@ -60,9 +58,6 @@ To keep a declared app export available in `~/Applications`, install its package
 rb use bobrwm
 ```
 
-If you installed Bobrwm before app exports were added, run `rb self-update`, then
-`rb use bobrwm --update` to refresh its package metadata.
-
 Or declare `rb.package("bobrwm")` in Lua and run `rb apply`. Both manage a
 `~/Applications/Bobrwm.app` symlink into the verified package store. Existing apps
 are never overwritten; a conflicting app or unmanaged link makes installation fail.
@@ -71,29 +66,10 @@ stored bundle; different versions conflict. Rootbeer does not configure login
 items or grant app permissions.
 
 Remove a package from your user profile with `rb unuse bobrwm`. This removes its
-owned app link when no other profile needs it, while retaining cached package files.
+owned app link when no other profile needs it, while its files stay in the store.
 For Lua-managed apps, remove the declaration and run `rb apply`.
 
-`rb gc` deletes store entries that no user profile or configuration still uses, and
-prints each one it removes. Entries added in the last hour are kept.
-
 ## Keep tools installed
-
-### Install an individually signed package
-
-Given a signed record and a publisher key you trust:
-
-```sh
-rb use tool@1.2.3 --record ./package.json --public-key "$PUBLISHER_PUBLIC_KEY"
-```
-
-`--record` also accepts an immutable `ghcr://owner/repository@sha256:<digest>`
-reference. Rootbeer checks the signature, exact package version, platform, archive,
-and installed contents without loading the catalog. Obtain the public key separately
-from the package download. This path currently supports source-built packages without
-package dependencies; discovery and automatic updates are not part of it.
-
-### Install from the catalog
 
 ```sh
 rb use jq ripgrep
@@ -106,7 +82,12 @@ that package while keeping your other tools. The commands stay available in late
 terminals once you add [shell setup](#set-up-your-shell).
 
 This profile is independent of `init.lua` and `rb apply`. Its commands take
-precedence when both profiles provide the same name.
+precedence when both profiles provide the same name. `rb rollback` switches it
+back to its previous generation, and `rb generations` lists them.
+
+`rb gc` deletes store outputs that no generation of any profile on the machine
+still holds, and prints each one it removes. `rb gc --older-than 30d` first
+deletes your generations older than 30 days, except each profile's current one.
 
 ## Declare tools in your configuration
 
@@ -127,15 +108,14 @@ rg --version
 Commit `init.lua` and the resulting `rootbeer.lock` to keep the configuration and
 resolved package versions together.
 
-Entries can be request strings, request tables with GitHub options, or exact
-package specifications. The list must be dense: no missing indexes or named keys.
+Entries are request strings or request tables with GitHub options. The list
+must be dense: no missing indexes or named keys.
 Rootbeer validates the whole list before adding operations and identifies a bad
 entry by its index. `rb.package(...)` accepts one entry when you only need one.
 
 Keep platform and profile selection in normal Lua, using `rb.host` or
 [`rb.profile.when`](/guide/profiles). See [other sources](/guide/package-sources)
-for request tables and the [API reference](/reference/core#rootbeer-packages)
-for exact specifications.
+for request tables and the [API reference](/reference/core#rootbeer-packages).
 
 ### Run a declared command during apply
 
@@ -154,7 +134,7 @@ returns `nil` when unavailable. It never searches the host PATH.
 
 ## Choose a version
 
-An unversioned request selects the catalog's default for your platform when first
+An unversioned request selects the index's default for your platform when first
 resolved. This is usually the newest packaged release; platforms an upstream has
 dropped can have an older default. The package browser shows retained versions
 and their platform support, so you can choose an exact release:
@@ -168,8 +148,8 @@ The same syntax works in Lua: `rb.package("jq@1.8.2")`. Explicit versions never
 fall back to another release. A retained version is available for selection;
 it does not necessarily become the default.
 
-Repeated runs and installs reuse saved resolutions. Use `--update` to refresh
-unversioned requests; exact versions stay fixed. See
+`rb run` uses the current default each time. `rb use` and `rb apply` keep what
+they installed until you pass `--update`, and exact versions stay fixed. See
 [updates and offline use](/guide/package-locks) for each workflow.
 
 ## Set up your shell
@@ -177,7 +157,7 @@ unversioned requests; exact versions stay fixed. See
 Add these lines to `~/.bashrc` for Bash or `~/.zshrc` for Zsh:
 
 ```sh
-eval "$("$HOME/.local/state/rootbeer/profiles/user/current/bin/rb" env)"
+eval "$("/opt/rb/profiles/$(id -u)/user/bin/rb" env)"
 ```
 
 This runs `rb` from your user profile, where the installer puts it, and adds
@@ -192,44 +172,8 @@ Rootbeer installs prebuilt command-line tools on Apple silicon macOS and on Linu
 ARM64 and x86-64. Intel macOS is unsupported. Filter the package browser for your
 platform; support varies by version
 and does not imply compatibility with every OS release or Linux distribution.
-Installation does not compile packages locally.
+Installing from the index never compiles locally.
 
-For tools outside the catalog, see [other package sources](/guide/package-sources).
-Catalog packages may also export macOS app bundles. For other desktop apps and
+For tools outside the index, see [other package sources](/guide/package-sources).
+Index packages may also export macOS app bundles. For other desktop apps and
 service integration, use [Homebrew](/modules/brew) or another system package manager.
-
-## Source builds and development revisions
-
-Source-capable packages prefer a matching published binary. If the pinned index
-has no binary for the requested version and platform, Rootbeer builds its source
-recipe locally. Prebuilt-only packages reject source requests.
-
-```lua
-rb.package("jq")                         -- Prefer the published binary.
-rb.package("jq@1.8.2", { source = true }) -- Build the approved release.
-rb.package("zlib", { head = true })      -- Pin the development branch to a commit.
-rb.package("zlib", { tag = "v1.3.2" })   -- Resolve a Git tag to a commit.
-rb.package("zlib", { rev = "<full 40-character commit SHA>" })
-```
-
-Choose one source selector. Git selectors cannot be combined with `@version`.
-The recipe must declare its Git repository; a release archive alone does not
-promise that development checkouts can be built. Source builds use the recipe's
-build commands and require its toolchain on the host.
-
-Standalone installs and commands accept the same selections:
-
-```sh
-rb use jq --source
-rb use zlib --head
-rb use zlib --tag v1.3.2
-rb run jq --source -- --version
-```
-
-`@HEAD`, `@tag:<tag>`, `@branch:<branch>`, and `@rev:<commit>` also work in package
-request strings. HEAD follows the recipe's declared branch, or the repository's
-default branch. Tags and branches are resolved to immutable commits before building.
-The lock records the requested selector, resolved commit, archive checksum, recipe,
-and build identity. Ordinary apply and offline replay reuse that lock; `--update`
-explicitly resolves moving references again. Source and prebuilt requests have
-distinct lock fingerprints.

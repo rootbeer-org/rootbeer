@@ -2,53 +2,57 @@ Rootbeer is a rust library and command line tool that executes a user-provided
 lua script in a sandboxed environment, creating a system configuration. Think of
 it akin to a dotfile manager like home-manager or chezmoi.
 
-- `crates/rootbeer-cli`: The command line tool the user interacts with
+- `crates/rootbeer-cli`: The `rb` command line tool, including the hidden
+  `rb drv` commands package maintainers and CI use
 - `crates/rootbeer-core`: The core library that runs the lua script
-- `crates/rootbeer-store-legacy`: Today's `/opt/rootbeer` store and its `rb-store`
-  helper, kept for the current pipeline and deleted at cutover
-- `crates/rootbeer-package`: Package models, recipe parsing, graph, resolution, and installation
-- `crates/rootbeer-build`: Build plans, backend phases, execution, and build caching
-- `crates/rootbeer-packaging`: Discovery, qualification, signing, and publication
-- `crates/rootbeer-forge`: The package-maintainer CLI (`rootbeer-forge`)
 - `crates/rootbeer-drv`: Derivations and their keys. Pure: values in, values out,
   no IO, no side effects, no global state.
+- `crates/rootbeer-eval`: Evaluates Lua recipes into derivations and package
+  metadata
+- `crates/rootbeer-sandbox`: Realizes a derivation into the store, building in a
+  Seatbelt or Bubblewrap sandbox and scanning outputs for references
+- `crates/rootbeer-cache`: Moves store outputs to and from an OCI registry
+  (`ghcr.io/rootbeer-org/store`)
+- `crates/rootbeer-store`: The shared `/opt/rb` store and its output database
+- `crates/rootbeer-helper`: `rb-helper`, the setuid helper at
+  `/opt/rb/libexec/rb-helper` that sets up the store and lets trusted users
+  write to it
+- `crates/rootbeer-profile`: Per-user profiles and generations under
+  `/opt/rb/profiles/<uid>`, `rootbeer.lock`, and GC roots
 - `crates/rootbeer-trust`: Reads the signed package index from a TUF repository
   (through `tough`), so a client believes only what the index's keys signed
 - `crates/rootbeer-bootstrap`: The frozen protocol for fetching a verified rb new
   enough to run a command (first installs, and state written by a newer rb). Changes
-  are additive only, and it must never depend on catalog, repository, build, or
-  store crates.
+  are additive only, and it must never depend on another rootbeer crate.
 
 New crates use Rust edition 2024.
 
 Code comments (including doc comments) wrap at 80 columns and never use
 semicolons or colons. Split the thought into separate sentences instead.
 
-Configuration must not depend on the build or packaging crates. Backends produce
-phases for the shared build executor. Coordinate recipe schema changes with the index repository and its engine pin.
+Configuration must not depend on the package crates. `rootbeer-core` depends
+only on `rootbeer-profile`, and the CLI hands it package installation, so it
+never depends on store, trust, cache, eval, or sandbox. Coordinate recipe schema
+changes (`rootbeer-eval`) with pdr and its `.github/rb-engine-revision` pin.
 
 Agent skills live in `.agents/skills/` and are model-agnostic. Use
 `.agents/skills/adversarial-review` after writing a new crate or module.
 
-Production package recipes belong exclusively in `rootbeer-index/packages/`.
-Rootbeer contains generic package tooling and regression tests; never embed or
-duplicate production recipes in this repository.
+Production package recipes belong exclusively in pdr's `packages/`
+(`rootbeer-org/pdr`). Rootbeer contains generic package tooling and regression
+tests; never embed or duplicate production recipes in this repository.
 
 ## Package CI and Publication
 
-- Verify changed package inputs once on each supported platform, then promote
-  those exact verified artifacts through merge and publication without rebuilding.
-- Reuse verified results for unaffected packages. Scope invalidation to changed
-  recipes, dependencies, relevant backend/executor behavior, and build environments;
-  an unrelated engine change must not force a full-catalog rebuild.
-- Do not run a cold baseline build merely to warm caches before a PR, or stack
-  baseline, PR, and post-merge full builds for the same publication. Check artifact
-  promotion eligibility and cache reuse before triggering expensive CI.
-- Retry only failed or affected work, preserving completed results. Reserve full
-  requalification for scheduled/explicit rechecks or changes that actually affect
-  the entire catalog. Never bypass integrity or provenance checks to save CI time.
-- If current tooling prevents reuse, identify and fix that limitation rather than
-  treating repeated full builds as a routine prerequisite for adding packages.
+- pdr CI plans every default target against `ghcr.io/rootbeer-org/store` and
+  builds only what the store lacks. PRs build and check. Pushes to main build
+  again and publish, then `rootbeer-org/index` signs the new entries.
+- Rootbeer's deploy workflow releases the `rootbeer` package the index signed
+  through the bootstrap channel (`rbpkg.com/bootstrap/v1/<platform>.json`).
+- Derivation keys decide reuse. Never loosen a key to improve cache hits unless
+  the omitted input provably can't change the output. A new `rootbeer-drv` field
+  must be optional and omitted at its default, or every key changes.
+- Never bypass integrity or provenance checks to save CI time.
 
 User configuration is provided through a layering system in the core library,
 where the base fundamentals (such as symlinking files, creating new files,

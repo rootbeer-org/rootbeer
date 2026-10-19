@@ -8,146 +8,78 @@ declarative interface.
 
 | Crate | Owns |
 |---|---|
-| `rootbeer-store-legacy` | Content hashing, normalized trees, and storage (the current `/opt/rootbeer` store, deleted at cutover) |
-| `rootbeer-package` | Package/recipe models, Lua recipe parsing, dependency graphs, resolution, verified downloads and installation |
-| `rootbeer-build` | Resolved build plans, backend phases, process execution, and persistent build results |
-| `rootbeer-packaging` | Release discovery, qualification, bundling, signing, and publication |
-| `rootbeer-core` | Configuration Lua, operation plans, lock adapters, profiles, and apply |
-| `rootbeer-cli` | The `rb` configuration and package-consumption CLI |
-| `rootbeer-forge` | The package-maintainer CLI |
+| `rootbeer-cli` | The `rb` command, including the hidden `rb drv` maintainer commands |
+| `rootbeer-core` | Configuration Lua, operation plans, and apply |
+| `rootbeer-drv` | Derivations and their keys. Pure, with no IO |
+| `rootbeer-eval` | Lua recipes into derivations and package metadata |
+| `rootbeer-sandbox` | Fetching, building, and checking a derivation in a sandbox |
+| `rootbeer-cache` | Store outputs to and from an OCI registry |
+| `rootbeer-store` | The shared `/opt/rb` store and its output database |
+| `rootbeer-helper` | `rb-helper`, the setuid helper that writes to the store |
+| `rootbeer-profile` | Profiles, generations, `rootbeer.lock`, and GC roots |
+| `rootbeer-trust` | The signed TUF package index |
+| `rootbeer-bootstrap` | The frozen protocol for fetching a newer `rb` |
 
-`rootbeer-core` depends on package and store APIs. It does not depend on the
-build or packaging crates. Both applications share the package runtime;
-compilation and publishing belong to the maintainer application.
+`rootbeer-core` depends only on `rootbeer-profile`. The CLI hands it package
+installation (`tools::Install`), so configuration never depends on the store,
+trust, cache, eval, or sandbox crates. `rootbeer-bootstrap` depends on no other
+Rootbeer crate.
 
-A build plan owns its recipes and resolved binary inputs. Execution never
-re-resolves package metadata. Autotools, Zig, Rust, and Custom backend modules produce
-phases consumed by one executor. Graph planning, receipt validation, and cache
-closure selection share the same dependency model.
+## Packages
 
-Dependency edges distinguish build tools from link libraries. A library’s build
-tools stay out of its consumers’ environments; link dependencies propagate
-headers and libraries. Explicit runtime edges pin the installed dependency closure;
-`link_runtime` contributes both link inputs and runtime installation. Existing
-string dependencies retain their combined transitive exports.
+A recipe in [pdr](https://github.com/rootbeer-org/pdr) evaluates
+(`rootbeer-eval`) to a derivation. Its key is the hash of its encoding, so an
+identical key always means an identical output. `rootbeer-sandbox` realizes a
+derivation: it fetches and verifies inputs, builds in Seatbelt on macOS or
+Bubblewrap on Linux (with no network unless the derivation fetches), runs the
+recipe's checks, and scans the output for store references. `rootbeer-cache` publishes outputs to
+`ghcr.io/rootbeer-org/store`, keyed by derivation key.
 
-Release discovery currently handles GitHub binary assets; source builds still
-require explicit versions and source hashes.
+The registry is untrusted storage. The [index](./package-hosting) signs each
+package's versions with the key and manifest digest of every output, and
+`rootbeer-trust` verifies it through `tough`. Installing pulls an output and its
+references by those signed digests. GitHub release requests and local recipe
+checkouts (`rb.package_catalog`) bypass the index and are recorded as such in
+profiles and locks.
 
-Source output qualification statically audits ELF and Mach-O loader references.
-Bundled libraries resolve through package-relative search paths, while external
-runtime references must resolve within the declared closure or the OS-runtime
-baseline. The audit runs before package checks, on cache hits, and when bundling
-source receipts.
+## Store and profiles
 
-The store lives at `/opt/rootbeer/store` (`ROOTBEER_ROOT` overrides the root for tests
-and CI); per-user state stays in `~/.local/state/rootbeer`. `layout.json` in the root
-records the layout version so a newer `rb` migrates an older one.
+The store lives at `/opt/rb`, shared by every user without a daemon:
 
-`/opt/rootbeer` is owned by root and shared by every user without a daemon. Users
-insert through `rb-store`, a small setuid-root helper installed at
-`/opt/rootbeer/bin/rb-store` by the one-time sudo setup. `rb` streams the tree to it on
-stdin (`rootbeer_store_legacy::stream`); the helper never opens a path the caller names,
-rejects entries that escape the tree, and files what it wrote under its own hash, so it
-needs no trust in the caller. An overridden root, or `rb` running as root, writes
-directly. Root-owned entries are trusted without rehashing on use, since only the
-helper can create them; entries the caller could have written are verified every time.
+| Path | Holds |
+|---|---|
+| `store/` | Outputs, each named by its key |
+| `var/db.sqlite` | Which outputs are present and what they reference |
+| `var/layout.json` | Layout and helper versions |
+| `libexec/rb-helper` | The setuid helper |
+| `profiles/<uid>/` | Each user's `default` and `user` profiles |
 
-The helper has a release (`helper::RELEASE`, bumped on any change) separate from the
-stream protocols it reads (`helper::PROTOCOLS`). The sudo setup records what the
-installed binary reports (`rb-store version`) in `layout.json`. `rb` reinstalls its own
-helper, with one sudo prompt, only when the installed one lacks the protocol `rb` sends
-or is below `helper::MINIMUM_RELEASE`; a newer helper is never downgraded, so helpers
-keep reading older protocols.
+The first command that needs the store runs `sudo rb-helper setup <group>`
+once per machine. It creates the directories, installs the helper, and lets the
+group (`admin` on macOS, `sudo` or `wheel` on Linux) add to the store. Members
+then write through the helper: `seal` registers an output built in place, `pull`
+unpacks an archive from stdin and checks its digest, `profile` creates the
+caller's profile directory, and `gc` collects. Root writes directly.
 
-Garbage collection works from roots rather than scanning references. Each user owns
-`/opt/rootbeer/var/roots/<uid>/` (created by `rb-store roots`, so no one can claim
-another user's directory), with one file per owner (`user`, `configuration`) listing
-the store entry names that owner's runtime closure needs. `rb use`, `rb unuse`, and
-`rb apply` rewrite their root after activating; any command that touches the store
-first writes whichever of the caller's roots are missing from what is installed. `rb gc` (`rb-store gc` for a shared
-store) deletes every entry no root lists, under the root's `.lock`. Entries younger
-than an hour are kept, which covers an install that has committed an entry but not yet
-written its root. Deletion renames the entry first so a partly deleted tree never
-looks sealed. Cached `rb run` environments are not roots; they fetch again after
-collection.
+`var/layout.json` records `LAYOUT` and `HELPER_VERSION`. A newer helper makes
+`rb` run setup again. A layout newer than this `rb` understands makes it relaunch
+into a newer released one through `rootbeer-bootstrap`.
 
-Runtime dependencies live in separate content-addressed store entries. Receipts
-and package locks carry exact recursive runtime facts; realization verifies the
-whole closure even when the requested output is cached. Loader-relative sibling
-references survive store relocation. Lockfiles expose all retained store paths
-for garbage collection roots. The build audit checks declared sibling entries
-without consulting the host's library search paths.
+Each profile is a symlink to its current generation, a directory of links into
+the store plus a `generation.json` manifest. `rb apply` installs into `default`,
+and `rb use` into `user`, which wins on `PATH`. `rb rollback` and
+`rb generations` act on `user`.
 
-The current executor builds for its own host. Cross-compilation remains separate work. Build environment locks pin declared executable
-bytes, SDK/toolchain trees, and variables, and verification precedes cache
-lookup. Pinned builds use a declared tool path. They still require a host image
-identity for OS runtime inputs. Optional isolation uses macOS Seatbelt or Linux
-Bubblewrap to deny host networking, restrict reads, and make declared inputs
-read-only. Compilation, tests, tool probes, and cache-hit checks share this boundary.
-Source and Cargo dependency acquisition happen before offline compilation. Source export caching goes through the same executor.
+Garbage collection works from roots. `rb gc` reads every generation of every
+user's profiles, plus the keys of running `rb run` commands and of tools `rb`
+holds for itself, and removes every output nothing live references. Installs and
+builds hold `var/gc.lock` shared, so collection waits for them.
+`rb gc --older-than 30d` first drops your older generations, except each
+profile's current one.
 
-## Rust packages
-
-Use `build.backend = "rust"` with `build.rust.packages` selecting explicit Cargo
-workspace packages. `features`, `no_default_features`, and `environment` configure
-features and compile-time application values. `outputs.bins` selects installed
-executables. The executor owns release mode, job limits, Cargo directories, and
-locked/offline behavior; recipes cannot override those through Rust settings.
-
-The source archive must contain `Cargo.lock`. Cargo vendors its locked dependencies
-in a network-enabled acquisition phase, reusing Cargo's download cache. Build and
-test phases use the private vendor configuration and `--frozen`. Cargo owns registry
-checksum and Git revision verification. Isolation applies after acquisition;
-upstream build scripts never run in the acquisition phase.
-
-Host builds resolve the active Rust sysroot before entering the extracted source,
-then pin its Cargo/rustc executables and library tree in the build receipt and cache
-identity. Repository rustup overrides cannot select a different compiler during the
-build. Explicit environment locks must declare `cargo`, `rustc`, and a
-`rust-libraries` input pointing to that toolchain's `lib` directory. No rustup proxy
-or developer Cargo home is used by build phases. CI selects an exact toolchain.
-
-## Build scheduling and recovery
-
-Catalog export uses the dependency scheduler in `rootbeer-build`; packaging owns
-qualification and publication. `--workers` remains the maximum number of package
-operations. `--jobs` is the compiler budget shared by source operations. Binary
-imports occupy a worker but do not reserve compiler slots. Ready source operations
-share the available slots; priority follows the longest remaining dependency chain.
-Each operation reports its allocation and elapsed time. Failures block dependants
-while independent work can finish and save verified results.
-
-Allocations remain fixed for an operation. This does not resize running compilers,
-parallelize the steps of one recipe, or impose a memory limit. Single-package build
-plans still walk dependencies in order. Those are explicit limits of this bounded
-scheduler, not requirements before adding more packages.
-
-### Existing tools
-
-| Tool | Decision |
-| --- | --- |
-| [GNU jobserver via the Rust crate](https://docs.rs/jobserver/latest/jobserver/) | Reuse when backends explicitly support cooperative job allocation. Do not inject into arbitrary custom commands. |
-| [Make/Ninja](https://ninja-build.org/manual.html#_gnu_jobserver_support) | Continue using upstream build tools for compilation. Ninja's Unix jobserver support needs FIFO transport and no explicit `-j`; existing recipes pass explicit job counts. |
-| [sccache](https://github.com/mozilla/sccache) | Candidate for compiler caching across changed source builds. It cannot replace verified package-output caching. No mandatory launcher or remote service in this change. |
-| [ccache](https://ccache.dev/manual/latest.html) | Suitable for C/C++ compiler caching, but not a replacement for dependency planning, qualification, or publication. |
-
-Keep the existing content-addressed build results, receipts, and GitHub Actions
-cache transport. Do not loosen build-cache identities to improve hit rates without
-proving that the omitted inputs cannot change outputs. A compiler-cache rollout
-needs measured benefit and explicit toolchain configuration; it does not block
-HTTP/3 or subsequent package ports.
-
-HTTP downloads retry transient failures up to five times with exponential backoff
-and jitter. `Retry-After` seconds and dates are respected; requests that require a
-wait longer than one minute fail rather than retry prematurely. Integrity failures
-and permanent HTTP errors are not retried.
-
-Index CI keeps restoration, timed export, and cache saving in separate steps.
-The export deadline is 55 minutes inside a 75-minute job, leaving time for setup
-and recovery. Cache saving uses `!cancelled()` so failures can retain completed
-results while explicit cancellation remains effective. Partial bundles never pass
-publication. Workflow configuration changes still require main-branch verification.
+`rb migrate` moves a user's packages from the old `/opt/rootbeer` store into
+`/opt/rb`. Once every user's `var/roots` there is empty,
+`sudo /opt/rb/libexec/rb-helper remove-legacy` deletes it.
 
 ## Layer 1 — Rust Primitives
 
@@ -326,7 +258,7 @@ The selection is automatic: `cargo build` (debug) always uses the filesystem,
 `cargo build --release` uses embedded. Passing `--lua-dir` to the CLI forces
 filesystem loading in either mode.
 
-See [Packaging](./packaging) for distribution-specific build instructions.
+See [Distributing Rootbeer](./distribution) for distribution-specific build instructions.
 
 ## Adding a New Module
 
@@ -373,14 +305,14 @@ new provider through `fetch_label`.
 
 ## Internal runtime tools
 
-Providers use the per-pipeline `ToolRuntime` in `crates/rootbeer-core/src/tools.rs`
-for packaged executables. Pass a pinned `PackageRequest` and exported command
-name to `command()`; the provider owns that declaration, while package recipes
-remain in their registry. The returned `Command` uses an absolute store path.
+Providers get packaged executables from the per-pipeline `ToolRuntime` in
+`crates/rootbeer-core/src/tools.rs`. Pass a package name, exact version, and
+command to `command()`. The returned `Command` runs an absolute store path.
 
-Preparation uses the standalone package resolver, download cache, and verified
-realizer without activating a user profile. All exports from a prepared package
-are reused for that pipeline, including across Lua evaluation and apply. Failed
-preparation can be retried. Package offline mode is inherited from the pipeline;
-provider network access and authentication remain the provider's responsibility.
-No secret values are cached by this runtime. See `one_password.rs` for a consumer.
+The CLI supplies the installer (`tools::Install`). It installs the exact version
+from the signed index into `/opt/rb` without touching any profile, and holds it
+from GC while `rb` runs. A package is installed once per pipeline and shared
+across Lua evaluation and apply. A failed install can be retried. `--offline`
+can't install, since it needs the signed index. Provider network access and
+authentication remain the provider's responsibility, and no secret values are
+cached. See `one_password.rs` for a consumer.
