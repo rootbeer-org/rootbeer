@@ -156,6 +156,54 @@ impl Index {
         names
     }
 
+    /// Each alias the signed targets record, and the package it names. An
+    /// alias that is also a package or names two packages is left out.
+    pub fn aliases(&self) -> BTreeMap<String, String> {
+        let names: BTreeSet<String> = self.names().into_iter().collect();
+        let mut owners = BTreeMap::<String, BTreeSet<&str>>::new();
+        for (target, data) in self.repository.all_targets() {
+            let Some(name) = target.raw().strip_suffix(".json") else {
+                continue;
+            };
+
+            let listed = data
+                .custom
+                .get("aliases")
+                .and_then(|value| value.as_array());
+            for alias in listed
+                .into_iter()
+                .flatten()
+                .filter_map(|value| value.as_str())
+            {
+                owners.entry(alias.to_string()).or_default().insert(name);
+            }
+        }
+
+        owners
+            .into_iter()
+            .filter(|(alias, _)| is_package_name(alias) && !names.contains(alias))
+            .filter_map(|(alias, owners)| match owners.len() {
+                1 => Some((alias, owners.first()?.to_string())),
+                _ => None,
+            })
+            .filter(|(_, name)| names.contains(name))
+            .collect()
+    }
+
+    /// The package `name` installs, which is itself unless it's an alias.
+    pub fn canonical(&self, name: &str) -> Option<String> {
+        let path = format!("{name}.json");
+        let is_listed = self
+            .repository
+            .all_targets()
+            .any(|(target, _)| target.raw() == path);
+
+        match is_listed {
+            true => Some(name.to_string()),
+            false => self.aliases().remove(name),
+        }
+    }
+
     pub fn package(&self, name: &str) -> Result<Option<Package>, Error> {
         outside_runtime()?;
         if !is_package_name(name) {

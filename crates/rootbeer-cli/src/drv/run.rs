@@ -1,6 +1,6 @@
 use super::cache::{self, Signed};
 use super::github;
-use super::install::{self, Source, Wanted};
+use super::install::{self, LazyIndex, Source, Wanted};
 use super::profile::{directory, profile_error};
 use super::this_platform;
 use rootbeer_drv::Key;
@@ -36,6 +36,8 @@ pub(crate) struct Args {
 
 struct Installed {
     name: String,
+    /// What the command line called it, which may be an alias
+    asked: String,
     key: Key,
     path: PathBuf,
     bins: BTreeSet<String>,
@@ -52,20 +54,25 @@ pub(crate) fn run(args: Args) -> Result<(), String> {
     let (mut store, is_root) = install::open_store()?;
     let _held = store.hold().map_err(|error| error.to_string())?;
     let source = Source::default();
-    let mut index = None;
+    let index = LazyIndex::new(&source);
     let mut signed = Signed::new(|name| {
-        let index = match &mut index {
-            Some(index) => index,
-            None => index.insert(install::open_index(&source, is_root)?),
-        };
-        index.package(name).map_err(|error| error.to_string())
+        index
+            .get()?
+            .package(name)
+            .map_err(|error| error.to_string())
     });
     let cache = source.cache();
     let platform = this_platform()?;
 
     let mut installed = Vec::new();
     for request in std::iter::once(&args.package).chain(&args.packages) {
-        let (name, wanted) = Wanted::parse(request)?;
+        let (asked, wanted) = Wanted::parse(request)?;
+        let name = match &wanted {
+            Wanted::Index(_) => index.get()?.canonical(&asked),
+            _ => None,
+        }
+        .unwrap_or_else(|| asked.clone());
+
         let (key, bins, apps) = match &wanted {
             Wanted::Release(request) => {
                 let resolved =
@@ -91,6 +98,7 @@ pub(crate) fn run(args: Args) -> Result<(), String> {
 
         installed.push(Installed {
             name,
+            asked,
             key,
             path,
             bins,
@@ -208,7 +216,10 @@ fn search_path(installed: &[Installed]) -> Result<OsString, String> {
 fn bin<'a>(package: &'a Installed, asked: Option<&str>) -> Result<&'a str, String> {
     let named = match asked {
         Some(asked) => package.bins.get(asked),
-        None => package.bins.get(&package.name),
+        None => package
+            .bins
+            .get(&package.asked)
+            .or_else(|| package.bins.get(&package.name)),
     };
 
     let only = (asked.is_none() && package.bins.len() == 1)
@@ -239,6 +250,7 @@ mod tests {
     fn package(bins: &[&str]) -> Installed {
         Installed {
             name: "ripgrep".into(),
+            asked: "ripgrep".into(),
             key: "a".repeat(32).parse().unwrap(),
             path: "/opt/rb/store/x".into(),
             bins: bins.iter().map(|bin| bin.to_string()).collect(),

@@ -66,10 +66,12 @@ async fn sign_into(repository: &Path, key: &Path, packages: &[Package]) -> Resul
     })];
 
     let mut previous = BTreeMap::new();
+    let mut listed = BTreeMap::new();
     let (mut editor, version) = match is_fresh(&metadata)? {
         true => (RepositoryEditor::new(newest).await.map_err(tuf)?, 1),
         false => {
             let current = current(&roots, &metadata, &targets).await?;
+            listed = listed_targets(&current);
             for package in packages {
                 let name = TargetName::new(format!("{}.json", package.name)).map_err(tuf)?;
                 let Some(stream) = current.read_target(&name).await.map_err(tuf)? else {
@@ -103,6 +105,7 @@ async fn sign_into(repository: &Path, key: &Path, packages: &[Package]) -> Resul
     let staging = tempfile::tempdir().map_err(|error| Error::Invalid(error.to_string()))?;
     let now = Timestamp::now().as_second();
     let mut staged = Vec::new();
+    let mut aliases = BTreeMap::new();
 
     for package in packages {
         let merged = merge(previous.remove(&package.name), package, now)?;
@@ -111,17 +114,54 @@ async fn sign_into(repository: &Path, key: &Path, packages: &[Package]) -> Resul
         let json =
             serde_json::to_vec(&merged).map_err(|error| Error::Invalid(error.to_string()))?;
 
-        serde_json::from_slice::<Package>(&json)
+        let read = serde_json::from_slice::<Package>(&json)
             .map_err(|error| Error::Invalid(format!("{name} after merging: {error}")))?;
 
         fs::write(&path, json).map_err(|error| at(&path, error))?;
-        let target = Target::from_path(&path)
+        let mut target = Target::from_path(&path)
             .await
             .map_err(|error| Error::Invalid(error.to_string()))?;
+
+        // Clients resolve an alias from the signed targets, without reading
+        // every entry.
+        if !read.aliases.is_empty() {
+            target
+                .custom
+                .insert("aliases".into(), serde_json::json!(read.aliases));
+        }
+
+        aliases.insert(package.name.clone(), read.aliases);
 
         let name = TargetName::new(name).map_err(tuf)?;
         editor.add_target(name.clone(), target).map_err(tuf)?;
         staged.push((path, name));
+    }
+
+    check_aliases(&aliases)?;
+
+    // A package missing from this run, such as one pdr dropped, gives up an
+    // alias a signed one now claims, so publishing never wedges on it.
+    let claimed: BTreeSet<&String> = aliases.keys().chain(aliases.values().flatten()).collect();
+    for (name, mut target) in listed {
+        let own = aliases_of(&target);
+        let kept: BTreeSet<String> = own
+            .iter()
+            .filter(|alias| !claimed.contains(alias))
+            .cloned()
+            .collect();
+        if aliases.contains_key(&name) || kept == own {
+            continue;
+        }
+
+        match kept.is_empty() {
+            true => target.custom.remove("aliases"),
+            false => target
+                .custom
+                .insert("aliases".into(), serde_json::json!(kept)),
+        };
+
+        let name = TargetName::new(format!("{name}.json")).map_err(tuf)?;
+        editor.add_target(name, target).map_err(tuf)?;
     }
 
     let version = version
@@ -194,6 +234,57 @@ impl Transport for Pinned {
 
         FilesystemTransport.fetch(url).await
     }
+}
+
+/// Each package the repository lists, by name.
+fn listed_targets(repository: &Repository) -> BTreeMap<String, Target> {
+    let mut listed = BTreeMap::new();
+    for (name, target) in repository.all_targets() {
+        let Some(name) = name.raw().strip_suffix(".json") else {
+            continue;
+        };
+
+        if is_package_name(name) {
+            listed.insert(name.to_string(), target.clone());
+        }
+    }
+
+    listed
+}
+
+fn aliases_of(target: &Target) -> BTreeSet<String> {
+    target
+        .custom
+        .get("aliases")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect()
+}
+
+/// Among the packages signed together, an alias must name one package, and
+/// never shadow a package's own name.
+fn check_aliases(aliases: &BTreeMap<String, BTreeSet<String>>) -> Result<(), Error> {
+    let mut owners = BTreeMap::new();
+    for (name, listed) in aliases {
+        for alias in listed {
+            if aliases.contains_key(alias) {
+                return Err(Error::Invalid(format!(
+                    "{name} has the alias {alias}, which is also a package"
+                )));
+            }
+
+            if let Some(other) = owners.insert(alias, name) {
+                return Err(Error::Invalid(format!(
+                    "{alias} is an alias of both {other} and {name}"
+                )));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn merge(

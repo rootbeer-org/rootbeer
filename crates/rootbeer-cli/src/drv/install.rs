@@ -8,6 +8,7 @@ use rootbeer_profile::{release_name, Locked, Member, Release};
 use rootbeer_store::{Store, ROOT};
 use rootbeer_trust::{Index, Output, Package};
 use sha2::{Digest, Sha256};
+use std::cell::OnceCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -84,12 +85,13 @@ pub(super) fn install(args: &Args) -> Result<(), String> {
         }
         None => {
             let index = open_index(&args.source, is_root)?;
+            let (asked, version) = request(&args.package);
+            let name = index.canonical(asked).unwrap_or_else(|| asked.to_string());
             let mut signed =
                 Signed::new(|name| index.package(name).map_err(|error| error.to_string()));
-            let (name, version) = request(&args.package);
-            let (_, output) = select(signed.package(name)?, version, this_platform()?)?;
+            let (_, output) = select(signed.package(&name)?, version, this_platform()?)?;
             let key = output.key.clone();
-            cache::install_into(&cache, &mut store, is_root, name, &key, Some(&mut signed))?;
+            cache::install_into(&cache, &mut store, is_root, &name, &key, Some(&mut signed))?;
             key
         }
     };
@@ -288,6 +290,63 @@ pub(super) fn open_index(source: &Source, is_root: bool) -> Result<Index, String
     let datastore = datastore(&root, is_root)?;
     Index::refresh(&root, url, &datastore, source.is_http_allowed)
         .map_err(|error| error.to_string())
+}
+
+/// The signed index, opened the first time something needs it.
+pub(super) struct LazyIndex<'a> {
+    source: &'a Source,
+    index: OnceCell<Index>,
+}
+
+impl<'a> LazyIndex<'a> {
+    pub(super) fn new(source: &'a Source) -> Self {
+        LazyIndex {
+            source,
+            index: OnceCell::new(),
+        }
+    }
+
+    pub(super) fn source(&self) -> &'a Source {
+        self.source
+    }
+
+    pub(super) fn get(&self) -> Result<&Index, String> {
+        if let Some(index) = self.index.get() {
+            return Ok(index);
+        }
+
+        let index = open_index(self.source, rustix::process::geteuid().is_root())?;
+        Ok(self.index.get_or_init(|| index))
+    }
+}
+
+/// Renames each index request that names an alias to the package it names,
+/// so a profile records one name per package. Only a request `is_known`
+/// doesn't recognize opens the index.
+pub(super) fn resolve_aliases(
+    requests: BTreeMap<String, Wanted>,
+    is_known: impl Fn(&str) -> bool,
+    index: &LazyIndex,
+) -> Result<BTreeMap<String, Wanted>, String> {
+    let mut resolved = BTreeMap::new();
+    for (name, wanted) in requests {
+        let canonical = match matches!(wanted, Wanted::Index(_)) && !is_known(&name) {
+            true => index.get()?.canonical(&name),
+            false => None,
+        };
+
+        let canonical = canonical.unwrap_or_else(|| name.clone());
+        if canonical != name {
+            eprintln!("{name} is {canonical}");
+        }
+
+        let asked = resolved.insert(canonical.clone(), wanted.clone());
+        if asked.is_some_and(|asked| asked != wanted) {
+            return Err(format!("{canonical} is asked for twice"));
+        }
+    }
+
+    Ok(resolved)
 }
 
 /// Each trusted root keeps its own metadata, so another index's newer root
