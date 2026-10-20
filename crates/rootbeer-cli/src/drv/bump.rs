@@ -66,18 +66,17 @@ pub(super) fn bump(args: &Args) -> Result<(), String> {
     let original =
         fs::read_to_string(&path).map_err(|error| format!("{}: {error}", path.display()))?;
     let recipe = Recipe::read(&original).map_err(|error| format!("{}: {error}", path.display()))?;
-    if recipe
+    let declared_block = recipe
         .versions
         .iter()
-        .any(|(declared, _)| declared == version)
-    {
-        return print(&Bumped {
-            name,
-            version,
-            added: false,
-            digests: BTreeMap::new(),
-            dropped: Vec::new(),
-        });
+        .find(|(declared, _)| declared == version)
+        .map(|(_, span)| &original[span.clone()]);
+
+    let recorded = declared_block.and_then(|block| recipe.commit_of(block));
+    if let Some((recorded, commit)) = recorded.zip(commit).filter(|(a, b)| a != b) {
+        return Err(format!(
+            "{name}@{version} is declared at commit {recorded}, not {commit}"
+        ));
     }
 
     let declared = catalog.platforms(name);
@@ -93,9 +92,29 @@ pub(super) fn bump(args: &Args) -> Result<(), String> {
         return Err(format!("{name} doesn't declare {platform}"));
     }
 
+    // A declared version gains only the platforms it lacks, such as one whose
+    // download appeared after the version was added.
+    let missing: Vec<Platform> = platforms
+        .iter()
+        .copied()
+        .filter(|platform| declared_block.is_none_or(|block| !recipe.has_digest(block, *platform)))
+        .collect();
+
+    let is_default =
+        |platform: &Platform| catalog.default_version(name, *platform) == Some(version);
+    if declared_block.is_some() && missing.is_empty() && platforms.iter().all(is_default) {
+        return print(&Bumped {
+            name,
+            version,
+            added: false,
+            digests: BTreeMap::new(),
+            dropped: Vec::new(),
+        });
+    }
+
     let mut digests = BTreeMap::new();
     let mut by_url = BTreeMap::<String, Sha256>::new();
-    for &platform in &platforms {
+    for &platform in &missing {
         let at = |error: String| format!("{name}@{version} on {platform}: {error}");
         let download = catalog
             .download(name, version, commit, args.serial, platform)
@@ -284,7 +303,11 @@ impl<'a> Recipe<'a> {
             .iter()
             .map(|(version, span)| (version.clone(), self.text[span.clone()].to_string()))
             .collect();
-        blocks.insert(entry.version.to_string(), self.render(entry));
+        let block = match blocks.get(entry.version) {
+            Some(block) => self.extend(block, entry.digests)?,
+            None => self.render(entry),
+        };
+        blocks.insert(entry.version.to_string(), block);
 
         let dropped = match keep {
             Some(keep) => newest_beyond(&blocks, keep, &kept, self.unit),
@@ -299,6 +322,49 @@ impl<'a> Recipe<'a> {
         let span = table(&text, self.unit, "versions")?;
         text.replace_range(span, &blocks.into_values().collect::<String>());
         Ok((text, dropped))
+    }
+
+    /// A declared version's block with digests added for platforms it lacks.
+    fn extend(&self, block: &str, digests: &BTreeMap<Platform, Sha256>) -> Result<String, String> {
+        let [three, four] = [3, 4].map(|depth| self.unit.repeat(depth));
+        let open = format!("\n{three}digests = {{\n");
+        let close = format!("\n{three}}},\n");
+        let start = block
+            .find(&open)
+            .map(|at| at + open.len())
+            .ok_or("its version has no digests table")?;
+        let end = block[start - 1..]
+            .find(&close)
+            .map(|at| start + at)
+            .ok_or("its version's digests table never closes")?;
+
+        let mut lines = BTreeMap::new();
+        for line in block[start..end].lines() {
+            let platform = line
+                .strip_prefix(&format!("{four}[\""))
+                .and_then(|rest| rest.split_once("\"] = \""))
+                .map(|(platform, _)| platform.to_string())
+                .ok_or_else(|| format!("rb can't edit the line `{line}`"))?;
+            lines.insert(platform, format!("{line}\n"));
+        }
+
+        for (platform, digest) in digests {
+            let line = format!("{four}[\"{platform}\"] = \"{}\",\n", digest.as_str());
+            lines.entry(platform.to_string()).or_insert(line);
+        }
+
+        let table = lines.into_values().collect::<String>();
+        Ok(format!("{}{table}{}", &block[..start], &block[end..]))
+    }
+
+    fn has_digest(&self, block: &str, platform: Platform) -> bool {
+        block.contains(&format!("\n{}[\"{platform}\"] = \"", self.unit.repeat(4)))
+    }
+
+    fn commit_of<'b>(&self, block: &'b str) -> Option<&'b str> {
+        let line = format!("\n{}commit = \"", self.unit.repeat(3));
+        let start = block.find(&line)? + line.len();
+        block[start..].split_once('"').map(|(commit, _)| commit)
     }
 
     fn render(&self, entry: &Entry) -> String {
@@ -521,6 +587,34 @@ mod tests {
         let depended = BTreeSet::from(["1.10.0"]);
         let (_, dropped) = recipe.with(&entry, &macos, Some(1), &depended).unwrap();
         assert!(dropped.is_empty());
+    }
+
+    #[test]
+    fn a_declared_version_gains_a_platform_that_arrived_later() {
+        let recipe = Recipe::read(RECIPE).unwrap();
+        let (_, span) = &recipe.versions[0];
+        let block = &RECIPE[span.clone()];
+        assert!(recipe.has_digest(block, Platform::Aarch64Macos));
+        assert!(!recipe.has_digest(block, Platform::X86_64Linux));
+
+        let linux = [Platform::X86_64Linux];
+        let digests = digests(&linux);
+        let entry = Entry {
+            version: "1.10.0",
+            digests: &digests,
+            commit: None,
+            serial: None,
+        };
+
+        let (text, dropped) = recipe.with(&entry, &linux, None, &BTreeSet::new()).unwrap();
+        assert!(dropped.is_empty());
+        assert!(text.contains(&format!(
+            "        [\"1.10.0\"] = {{\n            digests = {{\n                [\"aarch64-macos\"] = \"aa\",\n                [\"x86_64-linux\"] = \"{}\",\n            }},\n        }},\n",
+            "c".repeat(64)
+        )));
+        assert!(text.contains(r#"default_version = "1.10.0","#));
+        assert!(text.contains(r#"default_version = "1.9.0","#));
+        assert_eq!(recipe.commit_of(block), None);
     }
 
     #[test]

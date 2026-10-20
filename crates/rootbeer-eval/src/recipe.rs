@@ -28,13 +28,28 @@ pub(crate) struct Recipe {
     pub shared: Spec,
     pub platforms: BTreeMap<Platform, PlatformSpec>,
     pub versions: BTreeMap<String, Version>,
+    #[serde(skip)]
+    pub has_commit_placeholder: bool,
 }
 
-/// Discovery settings for a version from an upstream source.
-#[derive(Deserialize)]
-pub(crate) struct Upstream {
+/// Where a recipe finds new versions, and how a version names its tag there.
+/// Only `tag` and `separator` reach a derivation, through `{tag}`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Upstream {
+    /// A GitHub repository as `owner/repo`.
+    pub github: Option<String>,
+    /// A git repository's HTTPS URL.
+    pub git: Option<String>,
+    /// The GitHub repository's numeric ID, which a rename keeps and a new
+    /// repository under the same name doesn't.
+    pub repository_id: Option<u64>,
+    /// The tag template around `{version}`. Just the version when unset.
     pub tag: Option<String>,
+    /// What stands for each `.` of the version in its tag.
     pub separator: Option<String>,
+    /// Tags that fit the template but aren't releases.
+    #[serde(default)]
+    pub exclude_tags: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -364,6 +379,24 @@ impl Upstream {
             .as_deref()
             .unwrap_or("{version}")
             .replace("{version}", &version)
+    }
+
+    /// The version a tag names, when the tag is exactly what `tag_for` makes
+    /// of that version.
+    pub fn version_of(&self, tag: &str) -> Option<String> {
+        let (prefix, suffix) = self
+            .tag
+            .as_deref()
+            .unwrap_or("{version}")
+            .split_once("{version}")?;
+        let version = tag.strip_prefix(prefix)?.strip_suffix(suffix)?;
+        let version = match &self.separator {
+            Some(separator) if !separator.is_empty() => version.replace(separator, "."),
+            _ => version.to_string(),
+        };
+
+        let is_exact = !version.is_empty() && self.tag_for(&version) == tag;
+        is_exact.then_some(version)
     }
 }
 

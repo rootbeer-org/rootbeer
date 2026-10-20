@@ -89,7 +89,11 @@ fn metadata_never_reaches_a_key() {
         let source = source
             .replace("Find entries", "Find files")
             .replace("\"MIT\"", "\"0BSD\"")
-            .replace("{ \"fnd\" }", "{}");
+            .replace("{ \"fnd\" }", "{}")
+            .replace(
+                "repository_id = 1234,",
+                r#"repository_id = 5678, exclude_tags = { "v1" }, git = "https://example.com/f.git","#,
+            );
 
         (file, source)
     });
@@ -383,4 +387,56 @@ fn serial_fills_templates_and_must_be_recorded() {
         error.contains("`{serial}` needs the version to record its serial"),
         "{error}"
     );
+}
+
+#[test]
+fn upstreams_group_platforms_and_map_tags_back_to_versions() {
+    let recipe = format!(
+        r#"return {{
+            name = "split", description = "", homepage = "", default_license = "MIT",
+            upstream = {{ github = "example/split", tag = "split-{{version}}", separator = "_" }},
+            prebuilt = {{ url = "https://example.com/{{commit}}/split-{{tag}}.tar.gz" }},
+            platforms = {{
+                ["aarch64-linux"] = {{ default_version = "1.0" }},
+                ["aarch64-macos"] = {{ default_version = "1.0", upstream = {{ git = "https://example.com/mac.git", exclude_tags = {{ "1.1" }} }} }},
+                ["x86_64-linux"] = {{ default_version = "1.0" }},
+            }},
+            versions = {{ ["1.0"] = {{ digests = {{ ["x86_64-linux"] = "{}" }} }} }},
+        }}"#,
+        "0".repeat(64)
+    );
+
+    let catalog = Catalog::parse([("split.lua", recipe.as_str())]).unwrap();
+    let upstreams = catalog.upstreams("split");
+    let [(macos, own), (linux, shared)] = upstreams.as_slice() else {
+        panic!("{upstreams:?}");
+    };
+
+    assert_eq!(linux, &[Platform::Aarch64Linux, Platform::X86_64Linux]);
+    assert_eq!(shared.github.as_deref(), Some("example/split"));
+    assert_eq!(macos, &[Platform::Aarch64Macos]);
+    assert_eq!(
+        (own.git.as_deref(), own.exclude_tags.as_slice()),
+        (
+            Some("https://example.com/mac.git"),
+            ["1.1".to_string()].as_slice()
+        )
+    );
+
+    for (tag, version) in [
+        ("split-8_10_0", Some("8.10.0")),
+        ("split-8_11_0-rc1", Some("8.11.0-rc1")),
+        ("split-8.10.0", None),
+        ("split-", None),
+        ("other-8_10_0", None),
+    ] {
+        assert_eq!(shared.version_of(tag).as_deref(), version, "{tag}");
+    }
+    assert_eq!(own.version_of("2.0").as_deref(), Some("2.0"));
+
+    assert!(catalog.has_commit_placeholder("split"));
+    let fixtures = Catalog::parse(FIXTURES).unwrap();
+    assert!(!fixtures.has_commit_placeholder("finder"));
+    assert!(fixtures.upstreams("libz").is_empty());
+    assert_eq!(fixtures.upstreams("finder")[0].1.repository_id, Some(1234));
 }

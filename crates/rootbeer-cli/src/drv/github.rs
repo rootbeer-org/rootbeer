@@ -5,6 +5,7 @@ use rootbeer_drv::{
 };
 use rootbeer_profile::{is_repository, Libc, Release};
 use rootbeer_store::Store;
+use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use sha2::Digest;
 use std::collections::BTreeMap;
@@ -34,16 +35,18 @@ pub(crate) struct Resolved {
 }
 
 #[derive(Deserialize)]
-struct ApiRelease {
+pub(super) struct ApiRelease {
     tag_name: String,
     #[serde(default)]
-    draft: bool,
-    assets: Vec<Asset>,
+    pub(super) draft: bool,
+    #[serde(default)]
+    pub(super) prerelease: bool,
+    pub(super) assets: Vec<Asset>,
 }
 
 #[derive(Deserialize)]
-struct Asset {
-    name: String,
+pub(super) struct Asset {
+    pub(super) name: String,
     browser_download_url: String,
     #[serde(default)]
     digest: Option<String>,
@@ -270,7 +273,39 @@ fn published(request: &Request) -> Result<ApiRelease, String> {
         None => ("latest".to_string(), "no published release".to_string()),
     };
 
-    let url = format!("{API}/repos/{}/releases/{endpoint}", request.repository);
+    let path = format!("/repos/{}/releases/{endpoint}", request.repository);
+    let release: Option<ApiRelease> = api(&path)?;
+    match release {
+        Some(release) if !release.draft && !release.tag_name.is_empty() => Ok(release),
+        _ => Err(format!("github:{} has {missing}", request.repository)),
+    }
+}
+
+/// The release GitHub publishes for `tag`, if any.
+pub(super) fn release(repository: &str, tag: &str) -> Result<Option<ApiRelease>, String> {
+    api(&format!(
+        "/repos/{repository}/releases/tags/{}",
+        encode(tag)
+    ))
+}
+
+/// A repository's numeric ID, which a rename keeps and a new repository under
+/// the same name doesn't.
+pub(super) fn repository_id(repository: &str) -> Result<u64, String> {
+    #[derive(Deserialize)]
+    struct Repository {
+        id: u64,
+    }
+
+    let found: Option<Repository> = api(&format!("/repos/{repository}"))?;
+    found
+        .map(|found| found.id)
+        .ok_or_else(|| format!("github:{repository} doesn't exist"))
+}
+
+/// A GitHub API response, or none when GitHub has nothing at `path`.
+fn api<T: DeserializeOwned>(path: &str) -> Result<Option<T>, String> {
+    let url = format!("{API}{path}");
     let mut call = agent(QUERY)
         .get(&url)
         .header("Accept", "application/vnd.github+json");
@@ -279,26 +314,23 @@ fn published(request: &Request) -> Result<ApiRelease, String> {
         call = call.header("Authorization", format!("Bearer {token}"));
     }
 
-    let response = call.call().map_err(|error| match error {
-        ureq::Error::StatusCode(404) => format!("github:{} has {missing}", request.repository),
-        ureq::Error::StatusCode(403 | 429) if token.is_empty() => format!(
-            "GitHub refused {url}, likely its rate limit for anonymous requests, so set \
-             GITHUB_TOKEN"
-        ),
-        error => format!("{url}: {error}"),
-    })?;
+    let response = match call.call() {
+        Ok(response) => response,
+        Err(ureq::Error::StatusCode(404)) => return Ok(None),
+        Err(ureq::Error::StatusCode(403 | 429)) if token.is_empty() => {
+            return Err(format!(
+                "GitHub refused {url}, likely its rate limit for anonymous requests, so set \
+                 GITHUB_TOKEN"
+            ));
+        }
+        Err(error) => return Err(format!("{url}: {error}")),
+    };
 
     let body = response
         .into_body()
         .read_to_string()
         .map_err(|error| format!("{url}: {error}"))?;
-    let release: ApiRelease =
-        serde_json::from_str(&body).map_err(|error| format!("{url}: {error}"))?;
-    if release.draft || release.tag_name.is_empty() {
-        return Err(format!("github:{} has {missing}", request.repository));
-    }
-
-    Ok(release)
+    serde_json::from_str(&body).map_err(|error| format!("{url}: {error}"))
 }
 
 /// The sha256 GitHub publishes for a release asset, or the hash of a download
@@ -342,6 +374,7 @@ pub(super) fn download_digest(url: &str) -> Result<Sha256, String> {
 
 fn agent(limit: Duration) -> ureq::Agent {
     ureq::Agent::config_builder()
+        .https_only(true)
         .timeout_connect(Some(STALL))
         .timeout_recv_body(Some(STALL))
         .timeout_global(Some(limit))
