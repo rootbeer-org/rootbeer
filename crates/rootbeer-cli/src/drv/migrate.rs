@@ -11,6 +11,7 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::{self, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path, PathBuf};
 
 const LEGACY_USERS: &str = "/opt/rootbeer/var/roots";
@@ -121,11 +122,24 @@ pub(crate) fn migrate(args: &Args) -> Result<(), String> {
     eprintln!("moved everything from /opt/rootbeer to /opt/rb");
     if is_legacy_unused() {
         eprintln!(
-            "no one uses /opt/rootbeer anymore. Delete it with `sudo {HELPER} remove-legacy`"
+            "no one uses /opt/rootbeer anymore. Delete it with `sudo {} remove-legacy`",
+            helper().display()
         );
     }
 
     Ok(())
+}
+
+/// The helper beside this rb, which knows `remove-legacy` even when the
+/// installed one predates it, since only a store layout change installs a new
+/// one.
+fn helper() -> PathBuf {
+    std::env::current_exe()
+        .and_then(fs::canonicalize)
+        .map(|rb| rb.with_file_name("rb-helper"))
+        .ok()
+        .filter(|helper| helper.is_file())
+        .unwrap_or_else(|| PathBuf::from(HELPER))
 }
 
 /// Printed while the old store may still hold something for the caller. It
@@ -376,12 +390,30 @@ fn remove_legacy_state() -> Result<(), String> {
 
     for name in LEGACY_STATE {
         let path = state.join(name);
-        match fs::remove_dir_all(&path) {
+        match writable(&path).and_then(|()| fs::remove_dir_all(&path)) {
             Err(error) if error.kind() != io::ErrorKind::NotFound => {
                 return Err(format!("{}: {error}", path.display()));
             }
             _ => {}
         }
+    }
+
+    Ok(())
+}
+
+/// Lets the owner remove everything under `path`. Go makes its module cache
+/// read-only, and the old store kept one under `downloads`.
+fn writable(path: &Path) -> io::Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.is_dir() {
+        return Ok(());
+    }
+
+    let mut permissions = metadata.permissions();
+    permissions.set_mode(permissions.mode() | 0o700);
+    fs::set_permissions(path, permissions)?;
+    for entry in fs::read_dir(path)? {
+        writable(&entry?.path())?;
     }
 
     Ok(())
@@ -506,5 +538,22 @@ mod tests {
                 "schema": 1,
             })
         );
+    }
+
+    #[test]
+    fn a_read_only_tree_like_go_s_module_cache_becomes_removable() {
+        let root = tempfile::tempdir().unwrap();
+        let module = root.path().join("downloads/go/example.com@v1.0.0");
+        fs::create_dir_all(&module).unwrap();
+        fs::write(module.join("go.mod"), "module example.com").unwrap();
+        for path in [module.as_path(), module.parent().unwrap()] {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o555)).unwrap();
+        }
+
+        let downloads = root.path().join("downloads");
+        assert!(fs::remove_dir_all(&downloads).is_err());
+        writable(&downloads).unwrap();
+        fs::remove_dir_all(&downloads).unwrap();
+        assert!(!downloads.exists());
     }
 }
