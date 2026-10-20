@@ -4,6 +4,7 @@ mod cache;
 mod catalog;
 mod configuration;
 pub(crate) mod gc;
+mod git;
 mod github;
 mod index;
 mod install;
@@ -14,6 +15,7 @@ pub(crate) mod profile;
 pub(crate) mod run;
 pub(crate) mod search;
 pub(crate) mod setup;
+mod updates;
 
 pub(crate) use configuration::{check_lock, configure, link_default_apps};
 
@@ -95,6 +97,8 @@ enum Command {
     /// Add a version to a recipe as its default, pinning each platform's
     /// download, and drop versions beyond --keep
     Bump(bump::Args),
+    /// Find newer upstream versions for recipes, as JSON lines for rb drv bump
+    Updates(updates::Args),
     /// Print the verified package index as JSON, for tools like the package
     /// browser
     Catalog {
@@ -203,6 +207,7 @@ pub fn run(args: Args) {
         } => index::sign(&repository, &key, entries.as_deref()),
         Command::Install(args) => install::install(&args),
         Command::Bump(args) => bump::bump(&args),
+        Command::Updates(args) => updates::updates(&args),
         Command::Catalog { source } => catalog::catalog(&source),
     };
 

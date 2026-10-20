@@ -9,6 +9,7 @@ mod backend;
 mod recipe;
 mod template;
 
+pub use recipe::Upstream;
 use recipe::{DependencyKind as RecipeKind, Recipe};
 use rootbeer_drv::{Dependency, DependencyKind, Derivation, Key, Platform, output_path};
 use serde::Deserialize;
@@ -136,8 +137,9 @@ impl Catalog {
                 message,
             };
 
-            let recipe = recipe::load::<Recipe>(file, source)
+            let mut recipe = recipe::load::<Recipe>(file, source)
                 .map_err(|error| parse_error(error.to_string()))?;
+            recipe.has_commit_placeholder = source.contains("{commit}");
             if recipes.contains_key(&recipe.name) {
                 return Err(parse_error(format!("{} is declared twice", recipe.name)));
             }
@@ -164,6 +166,11 @@ impl Catalog {
             .collect()
     }
 
+    /// Every recipe's name, in order.
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.recipes.keys().map(String::as_str)
+    }
+
     pub fn contains(&self, name: &str) -> bool {
         self.recipes.contains_key(name)
     }
@@ -174,6 +181,36 @@ impl Catalog {
             .get(name)
             .map(|recipe| recipe.platforms.keys().copied().collect())
             .unwrap_or_default()
+    }
+
+    /// Each upstream a recipe finds new versions in, with the platforms that
+    /// look there. A platform's own upstream replaces the recipe's.
+    pub fn upstreams(&self, name: &str) -> Vec<(Vec<Platform>, &Upstream)> {
+        let Some(recipe) = self.recipes.get(name) else {
+            return Vec::new();
+        };
+
+        let mut upstreams: Vec<(Vec<Platform>, &Upstream)> = Vec::new();
+        for (platform, spec) in &recipe.platforms {
+            let Some(upstream) = spec.upstream.as_ref().or(recipe.upstream.as_ref()) else {
+                continue;
+            };
+
+            match upstreams.iter_mut().find(|(_, seen)| *seen == upstream) {
+                Some((platforms, _)) => platforms.push(*platform),
+                None => upstreams.push((vec![*platform], upstream)),
+            }
+        }
+
+        upstreams
+    }
+
+    /// Whether a recipe's source names `{commit}`, so each of its versions
+    /// records the commit it builds from.
+    pub fn has_commit_placeholder(&self, name: &str) -> bool {
+        self.recipes
+            .get(name)
+            .is_some_and(|recipe| recipe.has_commit_placeholder)
     }
 
     /// Where a version the recipe doesn't declare yet would download from, so
