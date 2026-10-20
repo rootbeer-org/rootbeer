@@ -122,3 +122,20 @@ jobs:
               --annotation "org.opencontainers.image.revision=$GITHUB_SHA" \
               "rb-$target" "rb-helper-$target"
           done
+      # pdr's hourly run catches a missed request, and a red run here would
+      # hide this commit from it.
+      - name: Mint a token to ask pdr for the update
+        id: app
+        continue-on-error: true
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.ROOTBEER_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.ROOTBEER_BOT_PRIVATE_KEY }}
+          owner: rootbeer-org
+          repositories: pdr
+          permission-actions: write
+      - name: Ask pdr to package this commit
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: gh workflow run rootbeer.yml --repo rootbeer-org/pdr --field sha="$GITHUB_SHA"
