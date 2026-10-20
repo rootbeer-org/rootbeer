@@ -122,11 +122,24 @@ pub(crate) fn migrate(args: &Args) -> Result<(), String> {
     eprintln!("moved everything from /opt/rootbeer to /opt/rb");
     if is_legacy_unused() {
         eprintln!(
-            "no one uses /opt/rootbeer anymore. Delete it with `sudo {HELPER} remove-legacy`"
+            "no one uses /opt/rootbeer anymore. Delete it with `sudo {} remove-legacy`",
+            helper().display()
         );
     }
 
     Ok(())
+}
+
+/// The helper beside this rb, which knows `remove-legacy` even when the
+/// installed one predates it, since only a store layout change installs a new
+/// one.
+fn helper() -> PathBuf {
+    std::env::current_exe()
+        .and_then(fs::canonicalize)
+        .map(|rb| rb.with_file_name("rb-helper"))
+        .ok()
+        .filter(|helper| helper.is_file())
+        .unwrap_or_else(|| PathBuf::from(HELPER))
 }
 
 /// Printed while the old store may still hold something for the caller. It
