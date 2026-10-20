@@ -253,6 +253,30 @@ fn entries_are_refused_unless_signed_as_served_and_named_for_themselves() {
 }
 
 #[test]
+fn entries_read_as_published_with_the_targets_version_and_expiry() {
+    let mut grown = serde_json::to_value(package("zstd")).unwrap();
+    grown["funding"] = "https://github.com/sponsors/facebook".into();
+    let fixture = Fixture::new();
+    let key = fixture.key("key");
+    let root = fixture.root(1, &key, &key);
+    let entries = [
+        ("zstd", serde_json::to_vec(&grown).unwrap()),
+        ("lz4", entry(&package("zstd"))),
+    ];
+    fixture.publish(&entries, 3, &key, days(7));
+    let index = fixture.refresh(&root).unwrap();
+
+    assert_eq!(index.entry("zstd").unwrap(), Some(grown));
+    assert_eq!(index.entry("brotli").unwrap(), None);
+    let error = index.entry("lz4").unwrap_err();
+    assert!(matches!(&error, Error::Invalid(reason) if reason.ends_with("describes zstd")));
+
+    assert_eq!(index.targets_version(), 3);
+    let expires = index.targets_expires();
+    assert!(days(29) < expires && expires <= days(30), "{expires}");
+}
+
+#[test]
 fn unknown_platforms_are_dropped_and_digests_checked() {
     let platform = |name: &str| serde_json::json!({ "key": "a".repeat(32), "manifest": format!("sha256:{}", "0".repeat(64)), "x": name });
 

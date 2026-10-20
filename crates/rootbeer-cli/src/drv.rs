@@ -1,6 +1,7 @@
 mod artifact;
 mod bump;
 mod cache;
+mod catalog;
 mod configuration;
 pub(crate) mod gc;
 mod github;
@@ -94,6 +95,12 @@ enum Command {
     /// Add a version to a recipe as its default, pinning each platform's
     /// download, and drop versions beyond --keep
     Bump(bump::Args),
+    /// Print the verified package index as JSON, for tools like the package
+    /// browser
+    Catalog {
+        #[command(flatten)]
+        source: install::Source,
+    },
     /// Print, as JSON levels, the packages CI must build because no cache has them
     Plan {
         /// Each `name` or `name@version`, or every declared version when none
@@ -196,6 +203,7 @@ pub fn run(args: Args) {
         } => index::sign(&repository, &key, entries.as_deref()),
         Command::Install(args) => install::install(&args),
         Command::Bump(args) => bump::bump(&args),
+        Command::Catalog { source } => catalog::catalog(&source),
     };
 
     if let Err(error) = result {

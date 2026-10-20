@@ -204,7 +204,33 @@ impl Index {
         }
     }
 
+    /// The signed targets' version, which grows with every signing.
+    pub fn targets_version(&self) -> u64 {
+        self.repository.targets().signed.version.get()
+    }
+
+    /// When the signed targets expire unless signed again.
+    pub fn targets_expires(&self) -> jiff::Timestamp {
+        self.repository.targets().signed.expires
+    }
+
     pub fn package(&self, name: &str) -> Result<Option<Package>, Error> {
+        Ok(self.read(name)?.map(|(_, package)| package))
+    }
+
+    /// The signed entry for `name` exactly as published, so fields this client
+    /// doesn't know pass through. It must still read as the package `name`.
+    pub fn entry(&self, name: &str) -> Result<Option<serde_json::Value>, Error> {
+        let Some((bytes, _)) = self.read(name)? else {
+            return Ok(None);
+        };
+
+        serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|error| Error::Invalid(format!("{name}.json: {error}")))
+    }
+
+    fn read(&self, name: &str) -> Result<Option<(Vec<u8>, Package)>, Error> {
         outside_runtime()?;
         if !is_package_name(name) {
             return Err(Error::Name(format!("{name:?} isn't a package name")));
@@ -231,7 +257,7 @@ impl Index {
             return Err(Error::Invalid(format!("{path} describes {}", package.name)));
         }
 
-        Ok(Some(package))
+        Ok(Some((bytes, package)))
     }
 }
 
