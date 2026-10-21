@@ -251,7 +251,7 @@ impl Catalog {
                 prebuilt.chain(build)
             })
             .filter(|dependency| dependency.package == name)
-            .map(|dependency| dependency.version.as_str())
+            .filter_map(|dependency| dependency.version.as_deref())
             .collect()
     }
 
@@ -331,7 +331,7 @@ impl<'a> Evaluation<'a> {
             .map_err(recipe_error)?;
 
         self.stack.push(target.clone());
-        let dependencies = self.dependencies(&mut resolved, target.platform);
+        let dependencies = self.dependencies(&mut resolved, target);
         self.stack.pop();
 
         let (dependencies, linked) = dependencies?;
@@ -368,8 +368,9 @@ impl<'a> Evaluation<'a> {
     fn dependencies(
         &mut self,
         resolved: &mut recipe::Resolved<'a>,
-        platform: Platform,
+        target: &Target,
     ) -> Result<(Vec<Dependency>, Vec<String>), Error> {
+        let platform = target.platform;
         let declared = match (&resolved.spec.prebuilt, &resolved.spec.build) {
             (Some(prebuilt), _) => prebuilt.dependencies.as_slice(),
             (None, Some(build)) => build.dependencies.as_slice(),
@@ -379,9 +380,24 @@ impl<'a> Evaluation<'a> {
         let mut dependencies = Vec::new();
         let mut linked = Vec::new();
         for declared in declared {
+            let version = match &declared.version {
+                Some(version) => version.clone(),
+                None => self
+                    .catalog
+                    .default_version(&declared.package, platform)
+                    .ok_or_else(|| Error::Recipe {
+                        target: target.clone(),
+                        message: format!(
+                            "{} has no default version on {platform} to depend on",
+                            declared.package
+                        ),
+                    })?
+                    .to_string(),
+            };
+
             let key = self.package(&Target {
                 name: declared.package.clone(),
-                version: declared.version.clone(),
+                version: version.clone(),
                 platform,
             })?;
 
@@ -392,7 +408,7 @@ impl<'a> Evaluation<'a> {
                 RecipeKind::Runtime => &[DependencyKind::Runtime],
             };
 
-            let path = output_path(&key, &declared.package, &declared.version, "out")
+            let path = output_path(&key, &declared.package, &version, "out")
                 .display()
                 .to_string();
             if matches!(declared.kind, RecipeKind::LinkRuntime) && self.shared.contains(&key) {

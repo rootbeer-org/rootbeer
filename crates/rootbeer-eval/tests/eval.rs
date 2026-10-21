@@ -440,3 +440,65 @@ fn upstreams_group_platforms_and_map_tags_back_to_versions() {
     assert!(fixtures.upstreams("libz").is_empty());
     assert_eq!(fixtures.upstreams("finder")[0].1.repository_id, Some(1234));
 }
+
+#[test]
+fn an_unpinned_dependency_follows_its_default() {
+    let fixtures = |gopher: &str, go: &str| {
+        FIXTURES.map(|(file, source)| match file {
+            "gopher.lua" => (file, gopher.to_string()),
+            "go.lua" => (file, go.to_string()),
+            _ => (file, source.to_string()),
+        })
+    };
+    let keys = |fixtures: [(&str, String); 13]| {
+        let files: Vec<(&str, &str)> = fixtures
+            .iter()
+            .map(|(file, source)| (*file, source.as_str()))
+            .collect();
+        build_keys(&files, "test")
+    };
+
+    let gopher = include_str!("fixtures/gopher.lua");
+    let go = include_str!("fixtures/go.lua");
+    let unpinned = gopher.replace(r#"version = "1.27.1", "#, "");
+    assert_ne!(unpinned, gopher);
+
+    // Following the default builds exactly what pinning the default built.
+    assert_eq!(keys(fixtures(gopher, go)), keys(fixtures(&unpinned, go)));
+
+    // A newer default rekeys only what follows it.
+    let newer = go.replace(
+        "\t\t\tdefault_version = \"1.27.1\",",
+        "\t\t\tdefault_version = \"1.27.3\",",
+    )
+    .replace(
+        "\t\t[\"1.27.1\"] = {",
+        "\t\t[\"1.27.3\"] = {\n\t\t\tdigests = {\n\t\t\t\t[\"x86_64-linux\"] = \"5555555555555555555555555555555555555555555555555555555555555555\",\n\t\t\t},\n\t\t},\n\t\t[\"1.27.1\"] = {",
+    );
+    let label = "gopher@0.4.0-x86_64-linux";
+    let before = keys(fixtures(&unpinned, go));
+    let pinned = keys(fixtures(gopher, &newer));
+    let following = keys(fixtures(&unpinned, &newer));
+    assert_eq!(pinned[label], before[label]);
+    assert_ne!(following[label], before[label]);
+
+    // Nothing to follow is an error that names the package.
+    let defaultless = newer.replace("\t\t\tdefault_version = \"1.27.3\",\n", "");
+    let files = fixtures(&unpinned, &defaultless);
+    let catalog = Catalog::parse(files.iter().map(|(file, source)| (*file, source.as_str())));
+    let error = match catalog {
+        Ok(catalog) => catalog
+            .evaluate(
+                &hosts("test"),
+                &[Target {
+                    name: "gopher".into(),
+                    version: "0.4.0".into(),
+                    platform: Platform::X86_64Linux,
+                }],
+            )
+            .unwrap_err()
+            .to_string(),
+        Err(error) => error.to_string(),
+    };
+    assert!(error.contains("go") && error.contains("default"), "{error}");
+}

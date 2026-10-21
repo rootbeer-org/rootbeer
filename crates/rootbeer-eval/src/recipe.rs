@@ -171,7 +171,9 @@ pub(crate) enum Backend {
 #[serde(deny_unknown_fields)]
 pub(crate) struct Dependency {
     pub package: String,
-    pub version: String,
+    /// Unset follows the package's default on the platform, so moving a
+    /// toolchain's default rebuilds what depends on it.
+    pub version: Option<String>,
     pub kind: DependencyKind,
 }
 
