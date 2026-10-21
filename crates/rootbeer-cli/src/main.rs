@@ -1,11 +1,18 @@
 mod apply;
 mod cd;
+mod configuration;
 mod drv;
 mod edit;
+mod gc;
 mod init;
+mod migrate;
 mod newer;
+mod package;
+mod profile;
 mod progress;
 mod remote;
+mod run;
+mod search;
 mod typegen;
 
 use std::path::PathBuf;
@@ -44,13 +51,13 @@ enum Commands {
     Licenses,
 
     /// Run a package's command without installing it into a profile
-    Run(drv::run::Args),
+    Run(run::Args),
 
     /// Search the signed package index by name
-    Search(drv::search::Args),
+    Search(search::Args),
 
     /// Install packages into your user profile, without a Lua configuration
-    Use(drv::profile::UseArgs),
+    Use(profile::UseArgs),
 
     /// Remove packages from your user profile
     Unuse {
@@ -77,13 +84,13 @@ enum Commands {
     Apply(apply::Args),
 
     /// Remove store outputs that no profile generation on this machine uses
-    Gc(drv::gc::Args),
+    Gc(gc::Args),
 
     /// Print shell setup that puts your profiles on PATH (sh, Bash, or Zsh)
     Env,
 
     /// Move your packages from the old /opt/rootbeer store to /opt/rb
-    Migrate(drv::migrate::Args),
+    Migrate(migrate::Args),
 
     /// View or change the git remote protocol for the source directory
     Remote(remote::Args),
@@ -124,14 +131,14 @@ fn main() {
             init::run(args);
             Ok(())
         }
-        Commands::Run(args) => drv::run::run(args),
-        Commands::Search(args) => drv::search::search(&args),
-        Commands::Use(args) => drv::profile::add(&args)
-            .and_then(|()| drv::profile::keep_rootbeer())
-            .inspect(|()| drv::migrate::hint()),
-        Commands::Unuse { names } => drv::profile::remove(&names),
-        Commands::Rollback => drv::profile::rollback(),
-        Commands::Generations => drv::profile::generations(),
+        Commands::Run(args) => run::run(args),
+        Commands::Search(args) => search::search(&args),
+        Commands::Use(args) => profile::add(&args)
+            .and_then(|()| profile::keep_rootbeer())
+            .inspect(|()| migrate::hint()),
+        Commands::Unuse { names } => profile::remove(&names),
+        Commands::Rollback => profile::rollback(),
+        Commands::Generations => profile::generations(),
         Commands::Cd => {
             cd::run();
             Ok(())
@@ -144,17 +151,17 @@ fn main() {
             apply::run(args, cli.lua_dir.as_ref());
             Ok(())
         }
-        Commands::Gc(args) => drv::gc::run(&args),
+        Commands::Gc(args) => gc::run(&args),
         Commands::Env => {
             print!("{}", rootbeer_core::env::contents());
             Ok(())
         }
-        Commands::Migrate(args) => drv::migrate::migrate(&args),
+        Commands::Migrate(args) => migrate::migrate(&args),
         Commands::Remote(args) => {
             remote::run(args);
             Ok(())
         }
-        Commands::SelfUpdate => drv::profile::self_update(),
+        Commands::SelfUpdate => profile::self_update(),
         Commands::Drv(args) => {
             drv::run(args);
             Ok(())

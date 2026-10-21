@@ -1,4 +1,5 @@
-use super::{git, github, load, Sources};
+use super::{git, load, Sources};
+use crate::package::github;
 use rootbeer_drv::Platform;
 use rootbeer_eval::{Catalog, Upstream};
 use rootbeer_profile::is_repository;

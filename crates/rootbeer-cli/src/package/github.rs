@@ -35,18 +35,18 @@ pub(crate) struct Resolved {
 }
 
 #[derive(Deserialize)]
-pub(super) struct ApiRelease {
+pub(crate) struct ApiRelease {
     tag_name: String,
     #[serde(default)]
-    pub(super) draft: bool,
+    pub(crate) draft: bool,
     #[serde(default)]
-    pub(super) prerelease: bool,
-    pub(super) assets: Vec<Asset>,
+    pub(crate) prerelease: bool,
+    pub(crate) assets: Vec<Asset>,
 }
 
 #[derive(Deserialize)]
-pub(super) struct Asset {
-    pub(super) name: String,
+pub(crate) struct Asset {
+    pub(crate) name: String,
     browser_download_url: String,
     #[serde(default)]
     digest: Option<String>,
@@ -282,7 +282,7 @@ fn published(request: &Request) -> Result<ApiRelease, String> {
 }
 
 /// The release GitHub publishes for `tag`, if any.
-pub(super) fn release(repository: &str, tag: &str) -> Result<Option<ApiRelease>, String> {
+pub(crate) fn release(repository: &str, tag: &str) -> Result<Option<ApiRelease>, String> {
     api(&format!(
         "/repos/{repository}/releases/tags/{}",
         encode(tag)
@@ -291,7 +291,7 @@ pub(super) fn release(repository: &str, tag: &str) -> Result<Option<ApiRelease>,
 
 /// A repository's numeric ID, which a rename keeps and a new repository under
 /// the same name doesn't.
-pub(super) fn repository_id(repository: &str) -> Result<u64, String> {
+pub(crate) fn repository_id(repository: &str) -> Result<u64, String> {
     #[derive(Deserialize)]
     struct Repository {
         id: u64,
@@ -335,7 +335,7 @@ fn api<T: DeserializeOwned>(path: &str) -> Result<Option<T>, String> {
 
 /// The sha256 GitHub publishes for a release asset, or the hash of a download
 /// when it publishes none.
-pub(super) fn asset_digest(repository: &str, tag: &str, name: &str) -> Result<Sha256, String> {
+pub(crate) fn asset_digest(repository: &str, tag: &str, name: &str) -> Result<Sha256, String> {
     let request = Request {
         repository: repository.to_string(),
         tag: Some(tag.to_string()),
@@ -360,7 +360,7 @@ pub(super) fn asset_digest(repository: &str, tag: &str, name: &str) -> Result<Sh
     }
 }
 
-pub(super) fn download_digest(url: &str) -> Result<Sha256, String> {
+pub(crate) fn download_digest(url: &str) -> Result<Sha256, String> {
     let response = agent(DOWNLOAD)
         .get(url)
         .call()

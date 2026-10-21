@@ -1,11 +1,11 @@
-use super::cache::{self, Signed};
-use super::github;
-use super::install::{self, LazyIndex, Source, Wanted};
-use super::local;
 use super::profile::{
     applications, check_apps, current, directory, is_same, link_apps, profile_error, switch,
 };
-use super::this_platform;
+use crate::package::cache::{self, Signed};
+use crate::package::github;
+use crate::package::install::{self, LazyIndex, Source, Wanted};
+use crate::package::local;
+use crate::package::this_platform;
 use rootbeer_core::env::{profiles, DEFAULT};
 use rootbeer_core::package::PackageRequest;
 use rootbeer_core::PackageLockOptions;

@@ -1,5 +1,6 @@
-use super::cache::{self, Caches};
-use super::{load, target, Sources};
+use super::{load, Sources};
+use crate::package::cache::{self, Caches};
+use crate::package::target;
 use rootbeer_drv::{DependencyKind, Derivation, Key, Platform};
 use rootbeer_eval::{Catalog, Graph, Target};
 use serde::Serialize;

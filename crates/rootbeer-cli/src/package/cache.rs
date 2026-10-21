@@ -8,7 +8,7 @@ use std::io::{self, Read};
 use std::process::{Command, Stdio};
 
 #[derive(clap::Args, Debug)]
-pub(super) struct Registry {
+pub(crate) struct Registry {
     #[arg(long)]
     registry: String,
     #[arg(long, default_value = "rootbeer-org/store")]
@@ -18,13 +18,13 @@ pub(super) struct Registry {
 }
 
 impl Registry {
-    pub(super) fn cache(&self) -> Cache {
+    pub(crate) fn cache(&self) -> Cache {
         open(&self.registry, &self.namespace, self.is_http_allowed)
     }
 }
 
 type Fetch<'a> = Box<dyn FnMut(&str) -> Result<Option<Package>, String> + 'a>;
-pub(super) struct Signed<'a> {
+pub(crate) struct Signed<'a> {
     fetch: Fetch<'a>,
     packages: BTreeMap<String, Option<Package>>,
     /// Why the index couldn't be read, so later lookups fail the same way
@@ -33,7 +33,7 @@ pub(super) struct Signed<'a> {
 }
 
 impl<'a> Signed<'a> {
-    pub(super) fn new(fetch: impl FnMut(&str) -> Result<Option<Package>, String> + 'a) -> Self {
+    pub(crate) fn new(fetch: impl FnMut(&str) -> Result<Option<Package>, String> + 'a) -> Self {
         Signed {
             fetch: Box::new(fetch),
             packages: BTreeMap::new(),
@@ -41,7 +41,7 @@ impl<'a> Signed<'a> {
         }
     }
 
-    pub(super) fn package(&mut self, name: &str) -> Result<&Package, String> {
+    pub(crate) fn package(&mut self, name: &str) -> Result<&Package, String> {
         self.find(name)?
             .ok_or_else(|| format!("{name} isn't in the index"))
     }
@@ -84,7 +84,7 @@ impl<'a> Signed<'a> {
 }
 
 #[derive(clap::Args, Debug)]
-pub(super) struct Caches {
+pub(crate) struct Caches {
     #[arg(long, requires = "namespaces")]
     registry: Option<String>,
     #[arg(long = "from", requires = "registry")]
@@ -94,7 +94,7 @@ pub(super) struct Caches {
 }
 
 impl Caches {
-    pub(super) fn open(&self) -> Vec<Cache> {
+    pub(crate) fn open(&self) -> Vec<Cache> {
         let Some(registry) = &self.registry else {
             return Vec::new();
         };
@@ -121,7 +121,7 @@ pub(super) fn open(registry: &str, namespace: &str, is_http_allowed: bool) -> Ca
     cache
 }
 
-pub(super) fn find<'a>(
+pub(crate) fn find<'a>(
     caches: &'a [Cache],
     name: &str,
     key: &Key,
@@ -135,7 +135,7 @@ pub(super) fn find<'a>(
     Ok(None)
 }
 
-pub(super) fn install_into(
+pub(crate) fn install_into(
     cache: &Cache,
     store: &mut Store,
     is_root: bool,
@@ -154,7 +154,7 @@ pub(super) fn install_into(
     installer.visit(name, key, None)
 }
 
-pub(super) fn references_first(
+pub(crate) fn references_first(
     store: &Store,
     key: &Key,
     seen: &mut BTreeSet<Key>,
@@ -240,7 +240,7 @@ impl Installer<'_, '_> {
     }
 }
 
-pub(super) fn helper_pull(
+pub(crate) fn helper_pull(
     key: &Key,
     entry: &str,
     digest: &str,
