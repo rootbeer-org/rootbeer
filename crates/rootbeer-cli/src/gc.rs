@@ -1,5 +1,5 @@
 use super::profile::{directory, profile_error};
-use super::HELPER;
+use crate::package::HELPER;
 use rootbeer_core::env::{profiles, ON_PATH};
 use rootbeer_drv::STORE_ROOT;
 use rootbeer_profile::Profile;
@@ -20,7 +20,7 @@ pub(crate) struct Args {
 }
 
 pub(crate) fn run(args: &Args) -> Result<(), String> {
-    super::setup::ensure()?;
+    crate::package::setup::ensure()?;
     let is_root = getuid().is_root();
     let collector = match is_root {
         true => STORE_ROOT,

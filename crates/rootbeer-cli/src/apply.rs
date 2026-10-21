@@ -164,12 +164,12 @@ pub fn run(args: Args, lua_dir: Option<&PathBuf>) {
         opts.lua_dir = lua_dir.clone();
     }
 
-    if let Err(e) = crate::drv::check_lock(&script_dir) {
+    if let Err(e) = crate::configuration::check_lock(&script_dir) {
         eprintln!("{} error: {e}", "✗".red().bold());
         std::process::exit(1);
     }
 
-    let pipeline = rootbeer_core::Pipeline::new(opts).with_tools(crate::drv::run::tool);
+    let pipeline = rootbeer_core::Pipeline::new(opts).with_tools(crate::run::tool);
 
     eprintln!(
         "applying ({}){}",
@@ -199,14 +199,14 @@ pub fn run(args: Args, lua_dir: Option<&PathBuf>) {
     let mut should_link_apps = false;
     if !args.dry_run {
         let catalog = planned.package_catalog().map(Path::to_path_buf);
-        let configured = crate::drv::configure(
+        let configured = crate::configuration::configure(
             planned.take_packages(),
             catalog.as_deref(),
             &script_dir,
             &package_lock,
             &Default::default(),
         )
-        .and_then(|configured| crate::drv::profile::keep_rootbeer().map(|()| configured))
+        .and_then(|configured| crate::profile::keep_rootbeer().map(|()| configured))
         .unwrap_or_else(|e| {
             eprintln!("{} error: {e}", "✗".red().bold());
             std::process::exit(1);
@@ -228,7 +228,7 @@ pub fn run(args: Args, lua_dir: Option<&PathBuf>) {
             }
 
             if should_link_apps && !has_failed {
-                if let Err(e) = crate::drv::link_default_apps() {
+                if let Err(e) = crate::configuration::link_default_apps() {
                     eprintln!("{} error: {e}", "✗".red().bold());
                     std::process::exit(1);
                 }
@@ -239,7 +239,7 @@ pub fn run(args: Args, lua_dir: Option<&PathBuf>) {
                 "✓".green().bold(),
                 report.results.len()
             );
-            crate::drv::migrate::hint();
+            crate::migrate::hint();
         }
         Err(e) => {
             eprintln!("{} error: {e}", "✗".red().bold());

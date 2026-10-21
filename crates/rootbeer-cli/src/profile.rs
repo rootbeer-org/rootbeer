@@ -1,8 +1,9 @@
-use super::cache::{self, Signed};
-use super::github;
-use super::install::{self, LazyIndex, Source, Wanted};
-use super::local::{self, Evaluated};
-use super::{migrate, this_platform, HELPER};
+use super::migrate;
+use crate::package::cache::{self, Signed};
+use crate::package::github;
+use crate::package::install::{self, LazyIndex, Source, Wanted};
+use crate::package::local::{self, Evaluated};
+use crate::package::{this_platform, HELPER};
 use rootbeer_core::env::{profiles, DEFAULT, USER};
 use rootbeer_profile::{Generation, Member, Profile};
 use rootbeer_store::{Store, ROOT};
@@ -452,7 +453,7 @@ pub(super) fn directory(should_create: bool) -> Result<PathBuf, String> {
                 .map_err(at)?;
         }
         Err(_) => {
-            super::setup::ensure()?;
+            crate::package::setup::ensure()?;
             let status = Command::new(HELPER)
                 .arg("profile")
                 .stdout(Stdio::null())
