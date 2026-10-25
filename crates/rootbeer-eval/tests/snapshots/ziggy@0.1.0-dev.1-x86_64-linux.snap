@@ -8,7 +8,7 @@ sha256: 9999999999999999999999999999999999999999999999999999999999999999
 urls:
   - https://example.com/ziggy/archive/294212ebd35f5b755062186a66bcfd6436d3627a.tar.gz
 
-# resgrjb4ocopxcw3xphx7sao7wnfd6fz
+# xvwyw4p2habl6royfcz4rvpdpvabkj6x
 kind: build
 name: ziggy-vendor
 version: 0.1.0-dev.1
@@ -25,11 +25,12 @@ script: |
   tar -xzf "${source}" -C .
   cd ziggy-294212ebd35f5b755062186a66bcfd6436d3627a
   mkdir -p "${TMPDIR}/zig/tmp"
-  zig build --fetch=all --global-cache-dir "${TMPDIR}/zig"
+  export ZIG_GLOBAL_CACHE_DIR="${TMPDIR}/zig" ZIG_LOCAL_CACHE_DIR="${TMPDIR}/zig-cache"
+  zig build --fetch=all
   mkdir -p "${TMPDIR}/zig/p"
   cp -R "${TMPDIR}/zig/p" "${out}"
 
-# 7a56375ynsz2ytkjqzo5h63g66rxbnng
+# op5vxkgp5mljbf5qpkjgxk7xobwgnvxa
 kind: build
 name: ziggy
 version: 0.1.0-dev.1
@@ -37,7 +38,7 @@ platform: x86_64-linux
 sandbox: linux-v1
 inputs:
   source: btesvzirtlgwsyo7zmq7pfbwwgw25enj
-  vendor: resgrjb4ocopxcw3xphx7sao7wnfd6fz
+  vendor: xvwyw4p2habl6royfcz4rvpdpvabkj6x
 dependencies:
   - zig (build) lhibbzbghj2fv4vkznnwakwemakfbvxy
 env:
@@ -52,4 +53,4 @@ script: |
   mkdir zig-global-cache
   cp -R "${vendor}" zig-global-cache/p
   chmod -R u+w zig-global-cache/p
-  zig build --prefix "${out}" --cache-dir zig-cache --global-cache-dir zig-global-cache "-j${jobs}" -Doptimize=ReleaseSafe -Dversion=0.1.0-dev.1
+  zig build --prefix "${out}" "-j${jobs}" -Doptimize=ReleaseSafe -Dversion=0.1.0-dev.1
