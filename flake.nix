@@ -26,11 +26,13 @@
         let
           craneLib = inputs.crane.mkLib pkgs;
 
-          # build.rs embeds the stdlib; `rb licenses` embeds licenses/.
-          luaFilter = path: _type: builtins.match ".*(lua|licenses)/.*" path != null;
+          # Cargo embeds these. build.rs embeds the stdlib, `rb licenses` embeds
+          # licenses/, tests embed fixtures/, and `rb drv install` embeds the
+          # trusted root.json.
+          embedFilter = path: _type: builtins.match ".*/(lua|licenses|fixtures)/.*|.*/root\\.json" path != null;
           src = lib.cleanSourceWith {
             src = ./.;
-            filter = path: type: (luaFilter path type) || (craneLib.filterCargoSources path type);
+            filter = path: type: (embedFilter path type) || (craneLib.filterCargoSources path type);
           };
 
           commonArgs = {
