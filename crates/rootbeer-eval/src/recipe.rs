@@ -47,7 +47,8 @@ pub struct Upstream {
     pub tag: Option<String>,
     /// What stands for each `.` of the version in its tag.
     pub separator: Option<String>,
-    /// Tags that fit the template but aren't releases.
+    /// Tags that fit the template but aren't releases. Each is a glob, so
+    /// `v5.?[13579].*` leaves out every odd minor.
     #[serde(default)]
     pub exclude_tags: Vec<String>,
 }

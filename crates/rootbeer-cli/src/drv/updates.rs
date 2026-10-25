@@ -1,4 +1,5 @@
 use super::{git, github, load, Sources};
+use globset::{Glob, GlobSetBuilder};
 use rootbeer_drv::Platform;
 use rootbeer_eval::{Catalog, Upstream};
 use rootbeer_profile::is_repository;
@@ -167,7 +168,7 @@ impl Checker<'_> {
             let tags = git::tags(&self.agent, &repository)
                 .or_else(|_| git::tags(&self.agent, &repository))
                 .map_err(error)?;
-            let candidates = candidates(upstream, tags);
+            let candidates = candidates(upstream, tags).map_err(error)?;
             let mut is_verified = false;
             for (platform, current) in currents {
                 let newer = newer(&candidates, &current).map_err(error)?;
@@ -325,10 +326,20 @@ fn locate(upstream: &Upstream) -> Result<(String, Option<&str>), Problem> {
 }
 
 /// The stable versions tags name, newest first.
-fn candidates(upstream: &Upstream, tags: Vec<git::Tag>) -> Vec<Candidate> {
+fn candidates(upstream: &Upstream, tags: Vec<git::Tag>) -> Result<Vec<Candidate>, String> {
+    let mut excluded = GlobSetBuilder::new();
+    for pattern in &upstream.exclude_tags {
+        let glob = Glob::new(pattern)
+            .map_err(|err| format!("its excluded tag {pattern} isn't a valid glob ({err})"))?;
+        excluded.add(glob);
+    }
+    let excluded = excluded
+        .build()
+        .map_err(|err| format!("its excluded tags don't form a glob set ({err})"))?;
+
     let mut candidates: Vec<Candidate> = tags
         .into_iter()
-        .filter(|tag| !upstream.exclude_tags.contains(&tag.name))
+        .filter(|tag| !excluded.is_match(&tag.name))
         .filter_map(|tag| {
             let version = upstream.version_of(&tag.name)?;
             Some(Candidate {
@@ -341,7 +352,7 @@ fn candidates(upstream: &Upstream, tags: Vec<git::Tag>) -> Vec<Candidate> {
         .collect();
 
     candidates.sort_by(|a, b| (&b.numbers, &b.version).cmp(&(&a.numbers, &a.version)));
-    candidates
+    Ok(candidates)
 }
 
 /// The candidates newer than `current`, newest first. Two tags naming one
@@ -466,7 +477,8 @@ mod tests {
                 "v8_12_0",
                 "curl-8_2",
             ]),
-        );
+        )
+        .unwrap();
 
         let found: Vec<&Candidate> = found.iter().collect();
         assert_eq!(versions(&found), ["8.10.0", "8.9.1", "8.2"]);
@@ -475,16 +487,28 @@ mod tests {
     }
 
     #[test]
+    fn excluded_tags_are_globs() {
+        let perl = upstream("v{version}", None, &["v5.?[13579].*"]);
+        let found = candidates(&perl, tags(&["v5.44.1", "v5.45.4", "v5.46.0", "v5.47.0"])).unwrap();
+        let found: Vec<&Candidate> = found.iter().collect();
+        assert_eq!(versions(&found), ["5.46.0", "5.44.1"]);
+
+        let broken = upstream("v{version}", None, &["v5.[13"]);
+        assert!(candidates(&broken, tags(&["v5.44.1"])).is_err());
+    }
+
+    #[test]
     fn newer_versions_compare_by_number_and_equal_ones_are_ambiguous() {
         let plain = upstream("v{version}", None, &[]);
-        let found = candidates(&plain, tags(&["v1.10", "v1.9.0", "v1.2.0", "v2026.01.05"]));
+        let found =
+            candidates(&plain, tags(&["v1.10", "v1.9.0", "v1.2.0", "v2026.01.05"])).unwrap();
 
         let newer_than =
             |current: &str| newer(&found, &numbers(current).unwrap()).map(|newer| versions(&newer));
         assert_eq!(newer_than("1.9").unwrap(), ["2026.01.05", "1.10"]);
         assert_eq!(newer_than("2026.1.5.0").unwrap(), Vec::<String>::new());
 
-        let both = candidates(&plain, tags(&["v1.3", "v1.3.0"]));
+        let both = candidates(&plain, tags(&["v1.3", "v1.3.0"])).unwrap();
         assert_eq!(
             newer(&both, &numbers("1.2").unwrap()).unwrap_err(),
             "tags v1.3 and v1.3.0 name the same version, so which to take is unclear"
