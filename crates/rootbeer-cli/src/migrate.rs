@@ -1,8 +1,8 @@
 use super::configuration::{configure, link_default_apps};
-use super::github;
-use super::install::{self, LazyIndex, Source, Wanted};
 use super::profile::{self, profile_error};
-use super::HELPER;
+use crate::package::github;
+use crate::package::install::{self, LazyIndex, Source, Wanted};
+use crate::package::HELPER;
 use rootbeer_core::env::{self, legacy_roots, USER};
 use rootbeer_core::{Options, PackageLockOptions, Pipeline};
 use rootbeer_profile::Profile;
@@ -168,7 +168,7 @@ fn configuration(args: &Args) -> Result<(), String> {
     options.profile = args.profile.clone();
     let script_dir = options.script_dir.clone();
 
-    super::check_lock(&script_dir)?;
+    super::configuration::check_lock(&script_dir)?;
     let mut planned = Pipeline::new(options)
         .with_tools(super::run::tool)
         .plan()

@@ -1,8 +1,8 @@
-use super::cache::{self, Signed};
-use super::github;
-use super::install::{self, LazyIndex, Source, Wanted};
 use super::profile::{directory, profile_error};
-use super::this_platform;
+use crate::package::cache::{self, Signed};
+use crate::package::github;
+use crate::package::install::{self, LazyIndex, Source, Wanted};
+use crate::package::this_platform;
 use rootbeer_drv::Key;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;

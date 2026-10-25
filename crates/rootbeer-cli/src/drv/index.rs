@@ -1,5 +1,5 @@
-use super::cache::Registry;
 use super::{load, Sources};
+use crate::package::cache::Registry;
 use rootbeer_drv::{Key, Platform};
 use rootbeer_eval::{Graph, Target};
 use rootbeer_trust::{Output, Package};

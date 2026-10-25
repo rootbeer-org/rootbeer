@@ -1,4 +1,5 @@
-use super::{github, load, parse_platform, Sources};
+use super::{load, Sources};
+use crate::package::{github, parse_platform};
 use rootbeer_drv::{is_version, Platform, Sha256};
 use rootbeer_eval::Target;
 use serde::Serialize;

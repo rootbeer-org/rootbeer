@@ -1,4 +1,4 @@
-use super::install::{self, Source};
+use crate::package::install::{self, Source};
 use rustix::process::geteuid;
 use serde::Serialize;
 use serde_json::Value;

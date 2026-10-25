@@ -1,5 +1,5 @@
-use super::install::{self, Source};
-use super::this_platform;
+use crate::package::install::{self, Source};
+use crate::package::this_platform;
 use rustix::process::geteuid;
 use std::collections::BTreeSet;
 

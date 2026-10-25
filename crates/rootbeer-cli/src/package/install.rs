@@ -17,7 +17,7 @@ const INDEX: &str = "https://index.rbpkg.com/";
 const TRUSTED_ROOT: &[u8] = include_bytes!("root.json");
 
 #[derive(clap::Args, Debug)]
-pub(super) struct Args {
+pub(crate) struct Args {
     /// `name` or `name@version`, defaulting to the platform's default
     /// version. With `--key`, the name the output was pushed under
     package: String,
@@ -61,12 +61,12 @@ impl Default for Source {
 }
 
 impl Source {
-    pub(super) fn cache(&self) -> Cache {
+    pub(crate) fn cache(&self) -> Cache {
         cache::open(&self.registry, &self.namespace, self.is_http_allowed)
     }
 }
 
-pub(super) fn install(args: &Args) -> Result<(), String> {
+pub(crate) fn install(args: &Args) -> Result<(), String> {
     let (mut store, is_root) = open_store()?;
     let _held = store.hold().map_err(|error| error.to_string())?;
     let cache = args.source.cache();
@@ -105,7 +105,7 @@ pub(super) fn install(args: &Args) -> Result<(), String> {
     Ok(())
 }
 
-pub(super) fn open_store() -> Result<(Store, bool), String> {
+pub(crate) fn open_store() -> Result<(Store, bool), String> {
     super::setup::ensure()?;
     let is_root = rustix::process::geteuid().is_root();
     if is_root {
@@ -254,7 +254,7 @@ pub(crate) fn named(repository: &str) -> Result<String, String> {
         .ok_or_else(|| format!("github:{repository}'s repo name isn't a valid package name"))
 }
 
-pub(super) fn select<'a>(
+pub(crate) fn select<'a>(
     package: &'a Package,
     version: Option<&str>,
     platform: Platform,
@@ -280,7 +280,7 @@ pub(super) fn select<'a>(
     Ok((version.to_string(), output))
 }
 
-pub(super) fn open_index(source: &Source, is_root: bool) -> Result<Index, String> {
+pub(crate) fn open_index(source: &Source, is_root: bool) -> Result<Index, String> {
     let root = match &source.root {
         Some(path) => fs::read(path).map_err(|error| format!("{}: {error}", path.display()))?,
         None => TRUSTED_ROOT.to_vec(),
@@ -293,24 +293,24 @@ pub(super) fn open_index(source: &Source, is_root: bool) -> Result<Index, String
 }
 
 /// The signed index, opened the first time something needs it.
-pub(super) struct LazyIndex<'a> {
+pub(crate) struct LazyIndex<'a> {
     source: &'a Source,
     index: OnceCell<Index>,
 }
 
 impl<'a> LazyIndex<'a> {
-    pub(super) fn new(source: &'a Source) -> Self {
+    pub(crate) fn new(source: &'a Source) -> Self {
         LazyIndex {
             source,
             index: OnceCell::new(),
         }
     }
 
-    pub(super) fn source(&self) -> &'a Source {
+    pub(crate) fn source(&self) -> &'a Source {
         self.source
     }
 
-    pub(super) fn get(&self) -> Result<&Index, String> {
+    pub(crate) fn get(&self) -> Result<&Index, String> {
         if let Some(index) = self.index.get() {
             return Ok(index);
         }
@@ -323,7 +323,7 @@ impl<'a> LazyIndex<'a> {
 /// Renames each index request that names an alias to the package it names,
 /// so a profile records one name per package. Only a request `is_known`
 /// doesn't recognize opens the index.
-pub(super) fn resolve_aliases(
+pub(crate) fn resolve_aliases(
     requests: BTreeMap<String, Wanted>,
     is_known: impl Fn(&str) -> bool,
     index: &LazyIndex,
