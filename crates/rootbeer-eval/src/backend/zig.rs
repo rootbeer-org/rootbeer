@@ -4,22 +4,11 @@ use crate::template::Values;
 use std::collections::BTreeMap;
 
 pub(super) fn build(values: &Values, build: &Build) -> Result<Script, String> {
-    let zig = [
-        "zig",
-        "build",
-        "--prefix",
-        "{prefix}",
-        "--cache-dir",
-        "zig-cache",
-        "--global-cache-dir",
-        "zig-global-cache",
-        "-j{jobs}",
-    ]
-    .map(String::from);
+    let zig = ["zig", "build", "--prefix", "{prefix}", "-j{jobs}"].map(String::from);
 
     // Zig finds each package in the global cache by its hash, so a build
-    // with the vendored packages there never fetches. The compilers it spawns
-    // read the cache from the environment, not the flags.
+    // with the vendored packages there never fetches. Zig 0.17 dropped the
+    // cache flags, and every release reads the environment.
     Ok(Script {
         env: BTreeMap::new(),
         phases: Phases {
@@ -43,7 +32,8 @@ pub(super) fn vendor() -> Script {
             // Zig stages a zip download in the cache's tmp/ without creating it.
             build: lines(&[
                 r#"mkdir -p "${TMPDIR}/zig/tmp""#,
-                r#"zig build --fetch=all --global-cache-dir "${TMPDIR}/zig""#,
+                r#"export ZIG_GLOBAL_CACHE_DIR="${TMPDIR}/zig" ZIG_LOCAL_CACHE_DIR="${TMPDIR}/zig-cache""#,
+                "zig build --fetch=all",
                 r#"mkdir -p "${TMPDIR}/zig/p""#,
                 r#"cp -R "${TMPDIR}/zig/p" "${out}""#,
             ]),
