@@ -2083,6 +2083,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "data-encoding",
+ "globset",
  "owo-colors",
  "rootbeer-bootstrap",
  "rootbeer-cache",
