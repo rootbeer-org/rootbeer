@@ -303,6 +303,29 @@ pub(super) fn repository_id(repository: &str) -> Result<u64, String> {
         .ok_or_else(|| format!("github:{repository} doesn't exist"))
 }
 
+/// When a commit was committed, as GitHub's UTC timestamp.
+pub(super) fn committed(repository: &str, commit: &str) -> Result<String, String> {
+    #[derive(Deserialize)]
+    struct Found {
+        commit: Commit,
+    }
+
+    #[derive(Deserialize)]
+    struct Commit {
+        committer: Committer,
+    }
+
+    #[derive(Deserialize)]
+    struct Committer {
+        date: String,
+    }
+
+    let found: Option<Found> = api(&format!("/repos/{repository}/commits/{commit}"))?;
+    found
+        .map(|found| found.commit.committer.date)
+        .ok_or_else(|| format!("github:{repository} has no commit {commit}"))
+}
+
 /// A GitHub API response, or none when GitHub has nothing at `path`.
 fn api<T: DeserializeOwned>(path: &str) -> Result<Option<T>, String> {
     let url = format!("{API}{path}");
