@@ -9,8 +9,8 @@ mod backend;
 mod recipe;
 mod template;
 
-pub use recipe::Upstream;
 use recipe::{DependencyKind as RecipeKind, Recipe};
+pub use recipe::{Rolling, Upstream};
 use rootbeer_drv::{Dependency, DependencyKind, Derivation, Key, Platform, output_path};
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};

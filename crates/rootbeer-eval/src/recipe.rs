@@ -51,6 +51,21 @@ pub struct Upstream {
     /// `v5.?[13579].*` leaves out every odd minor.
     #[serde(default)]
     pub exclude_tags: Vec<String>,
+    /// A tag upstream moves to each new build, followed instead of version
+    /// tags.
+    pub rolling: Option<Rolling>,
+    /// Whether an update's PR merges itself once its checks pass.
+    #[serde(default, rename = "automerge")]
+    pub should_automerge: bool,
+}
+
+/// A rolling tag, whose builds are versioned by the commit it names.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Rolling {
+    pub tag: String,
+    /// What each build's version starts with, before `+` and its commit.
+    pub version: String,
 }
 
 #[derive(Deserialize)]

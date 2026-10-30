@@ -1,7 +1,7 @@
 use super::{git, github, load, Sources};
 use globset::{Glob, GlobSetBuilder};
 use rootbeer_drv::Platform;
-use rootbeer_eval::{Catalog, Upstream};
+use rootbeer_eval::{Catalog, Rolling, Upstream};
 use rootbeer_profile::is_repository;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -31,6 +31,10 @@ enum Line {
         platforms: Vec<Platform>,
         #[serde(skip_serializing_if = "Option::is_none")]
         commit: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        serial: Option<u64>,
+        #[serde(rename = "automerge", skip_serializing_if = "std::ops::Not::not")]
+        should_automerge: bool,
     },
     Error {
         name: String,
@@ -42,20 +46,39 @@ enum Line {
     },
 }
 
-/// A stable version an upstream tag names.
+/// A stable version an upstream tag names, or the build a rolling tag names.
 #[derive(Debug)]
 struct Candidate {
     numbers: Vec<u64>,
     version: String,
     tag: String,
     commit: String,
+    serial: Option<u64>,
+    is_rolling: bool,
+}
+
+/// A platform's advance to a version.
+#[derive(Clone)]
+struct Advance {
+    platform: Platform,
+    version: String,
+    commit: String,
+    serial: Option<u64>,
 }
 
 /// What a run needs of a GitHub release.
 #[derive(Clone)]
 struct Release {
-    is_stable: bool,
+    is_draft: bool,
+    is_prerelease: bool,
     assets: BTreeSet<String>,
+}
+
+impl Release {
+    /// A rolling tag's release is usually a prerelease, and still its builds.
+    fn is_published(&self, is_rolling: bool) -> bool {
+        !self.is_draft && (is_rolling || !self.is_prerelease)
+    }
 }
 
 struct Checker<'a> {
@@ -146,9 +169,25 @@ impl Checker<'_> {
             return Err(skipped("it declares no upstream".into()));
         }
 
+        let should_automerge = upstreams
+            .iter()
+            .any(|(_, upstream)| upstream.should_automerge);
         let mut advanced = Vec::new();
         for (platforms, upstream) in upstreams {
             let (repository, github) = locate(upstream).map_err(problem)?;
+            if let Some(rolling) = &upstream.rolling {
+                let Some(github) = github else {
+                    return Err(error(
+                        "its rolling upstream needs a github repository".into(),
+                    ));
+                };
+
+                advanced.extend(
+                    self.rolling(name, platforms, upstream, rolling, github)
+                        .map_err(problem)?,
+                );
+                continue;
+            }
 
             let currents = platforms
                 .into_iter()
@@ -186,18 +225,88 @@ impl Checker<'_> {
                         .is_available(name, github, candidate, platform)
                         .map_err(problem)?;
                     if is_available {
-                        advanced.push((
-                            platform,
-                            candidate.version.clone(),
-                            candidate.commit.clone(),
-                        ));
+                        advanced.push(Advance::to(platform, candidate));
                         break;
                     }
                 }
             }
         }
 
-        Ok(group(name, advanced, catalog.has_commit_placeholder(name)))
+        Ok(group(
+            name,
+            advanced,
+            catalog.has_commit_placeholder(name),
+            should_automerge,
+        ))
+    }
+
+    /// The platforms that advance to the build a rolling tag names now. The
+    /// build is versioned by its commit and ordered by when it was committed.
+    fn rolling(
+        &self,
+        name: &str,
+        platforms: Vec<Platform>,
+        upstream: &Upstream,
+        rolling: &Rolling,
+        github: &str,
+    ) -> Result<Vec<Advance>, Problem> {
+        let error = Problem::Error;
+        if upstream.tag.is_some()
+            || upstream.separator.is_some()
+            || !upstream.exclude_tags.is_empty()
+        {
+            return Err(error(
+                "its rolling upstream follows one tag, so tag, separator, and exclude_tags \
+                 don't apply"
+                    .into(),
+            ));
+        }
+
+        let repository = format!("https://github.com/{github}.git");
+        let tags = git::tags(&self.agent, &repository)
+            .or_else(|_| git::tags(&self.agent, &repository))
+            .map_err(error)?;
+        let commit = tags
+            .into_iter()
+            .find(|tag| tag.name == rolling.tag)
+            .map(|tag| tag.commit)
+            .ok_or_else(|| error(format!("its rolling tag {} doesn't exist", rolling.tag)))?;
+
+        let version = format!("{}+{}", rolling.version, &commit[..12]);
+        let behind: Vec<Platform> = platforms
+            .into_iter()
+            .filter(|&platform| self.catalog.default_version(name, platform) != Some(&version))
+            .collect();
+        if behind.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        self.verify(Some(github), upstream.repository_id)
+            .map_err(error)?;
+        let committed = github::committed(github, &commit).map_err(error)?;
+        let serial = serial(&committed).ok_or_else(|| {
+            error(format!(
+                "commit {commit} has the unexpected date {committed}"
+            ))
+        })?;
+
+        let candidate = Candidate {
+            numbers: Vec::new(),
+            version,
+            tag: rolling.tag.clone(),
+            commit,
+            serial: Some(serial),
+            is_rolling: true,
+        };
+
+        let mut advanced = Vec::new();
+        for platform in behind {
+            if self.is_available(name, Some(github), &candidate, platform)? {
+                advanced.push(Advance::to(platform, &candidate));
+            }
+        }
+
+        Ok(advanced)
     }
 
     /// Fails when the GitHub repository at the upstream's name isn't the one
@@ -230,7 +339,7 @@ impl Checker<'_> {
             let release = self
                 .release(repository, &candidate.tag)
                 .map_err(Problem::Error)?;
-            if release.is_some_and(|release| !release.is_stable) {
+            if release.is_some_and(|release| !release.is_published(candidate.is_rolling)) {
                 return Ok(false);
             }
         }
@@ -238,7 +347,13 @@ impl Checker<'_> {
         let version = &candidate.version;
         let download = self
             .catalog
-            .download(name, version, Some(&candidate.commit), None, platform)
+            .download(
+                name,
+                version,
+                Some(&candidate.commit),
+                candidate.serial,
+                platform,
+            )
             .map_err(|error| {
                 Problem::Skipped(format!(
                     "{version} on {platform} has no download rb can find: {error}"
@@ -252,8 +367,9 @@ impl Checker<'_> {
         let release = self
             .release(&asset.repository, &asset.tag)
             .map_err(Problem::Error)?;
-        Ok(release
-            .is_some_and(|release| release.is_stable && release.assets.contains(&asset.asset)))
+        Ok(release.is_some_and(|release| {
+            release.is_published(candidate.is_rolling) && release.assets.contains(&asset.asset)
+        }))
     }
 
     fn release(&self, repository: &str, tag: &str) -> Result<Option<Release>, String> {
@@ -263,7 +379,8 @@ impl Checker<'_> {
         }
 
         let release = github::release(repository, tag)?.map(|release| Release {
-            is_stable: !release.draft && !release.prerelease,
+            is_draft: release.draft,
+            is_prerelease: release.prerelease,
             assets: release.assets.into_iter().map(|asset| asset.name).collect(),
         });
         self.lock().insert(key, release.clone());
@@ -347,6 +464,8 @@ fn candidates(upstream: &Upstream, tags: Vec<git::Tag>) -> Result<Vec<Candidate>
                 version,
                 tag: tag.name,
                 commit: tag.commit,
+                serial: None,
+                is_rolling: false,
             })
         })
         .collect();
@@ -395,30 +514,55 @@ fn numbers(version: &str) -> Option<Vec<u64>> {
     Some(numbers)
 }
 
+/// A commit date like `2026-10-30T00:57:35Z` as the serial `20261030005735`.
+fn serial(date: &str) -> Option<u64> {
+    let digits: String = date.chars().filter(char::is_ascii_digit).collect();
+    (digits.len() == 14).then(|| digits.parse().ok()).flatten()
+}
+
 /// One update line per version, naming every platform that advances to it.
 /// Platforms that would build from different commits get their own lines.
-fn group(name: &str, advanced: Vec<(Platform, String, String)>, has_commit: bool) -> Vec<Line> {
-    let mut versions: BTreeMap<(String, Option<String>), Vec<Platform>> = BTreeMap::new();
-    for (platform, version, commit) in advanced {
-        let commit = has_commit.then_some(commit);
+fn group(
+    name: &str,
+    advanced: Vec<Advance>,
+    has_commit: bool,
+    should_automerge: bool,
+) -> Vec<Line> {
+    type Key = (String, Option<String>, Option<u64>);
+    let mut versions: BTreeMap<Key, Vec<Platform>> = BTreeMap::new();
+    for advance in advanced {
+        let commit = has_commit.then_some(advance.commit);
         versions
-            .entry((version, commit))
+            .entry((advance.version, commit, advance.serial))
             .or_default()
-            .push(platform);
+            .push(advance.platform);
     }
 
     versions
         .into_iter()
-        .map(|((version, commit), mut platforms)| {
+        .map(|((version, commit, serial), mut platforms)| {
             platforms.sort_by_key(|platform| platform.to_string());
             Line::Update {
                 name: name.to_string(),
                 version,
                 platforms,
                 commit,
+                serial,
+                should_automerge,
             }
         })
         .collect()
+}
+
+impl Advance {
+    fn to(platform: Platform, candidate: &Candidate) -> Advance {
+        Advance {
+            platform,
+            version: candidate.version.clone(),
+            commit: candidate.commit.clone(),
+            serial: candidate.serial,
+        }
+    }
 }
 
 impl Line {
@@ -443,6 +587,8 @@ mod tests {
             tag: Some(tag.into()),
             separator: separator.map(String::from),
             exclude_tags: exclude.iter().map(|tag| tag.to_string()).collect(),
+            rolling: None,
+            should_automerge: false,
         }
     }
 
@@ -521,10 +667,16 @@ mod tests {
 
     #[test]
     fn platforms_that_advance_together_share_a_line() {
+        let advance = |platform, commit: &str| Advance {
+            platform,
+            version: "1.1".into(),
+            commit: commit.into(),
+            serial: None,
+        };
         let advanced = vec![
-            (Platform::X86_64Linux, "1.1".to_string(), "a".to_string()),
-            (Platform::Aarch64Macos, "1.1".to_string(), "b".to_string()),
-            (Platform::Aarch64Linux, "1.1".to_string(), "a".to_string()),
+            advance(Platform::X86_64Linux, "a"),
+            advance(Platform::Aarch64Macos, "b"),
+            advance(Platform::Aarch64Linux, "a"),
         ];
 
         let line = |platforms: Vec<Platform>, commit: Option<&str>| Line::Update {
@@ -532,10 +684,12 @@ mod tests {
             version: "1.1".into(),
             platforms,
             commit: commit.map(String::from),
+            serial: None,
+            should_automerge: false,
         };
 
         assert_eq!(
-            group("tool", advanced.clone(), false),
+            group("tool", advanced.clone(), false, false),
             [line(
                 vec![
                     Platform::Aarch64Linux,
@@ -546,7 +700,7 @@ mod tests {
             )]
         );
         assert_eq!(
-            group("tool", advanced, true),
+            group("tool", advanced, true, false),
             [
                 line(
                     vec![Platform::Aarch64Linux, Platform::X86_64Linux],
@@ -555,5 +709,37 @@ mod tests {
                 line(vec![Platform::Aarch64Macos], Some("b")),
             ]
         );
+    }
+
+    #[test]
+    fn a_rolling_build_records_its_serial_and_may_merge_itself() {
+        let advanced = vec![Advance {
+            platform: Platform::Aarch64Macos,
+            version: "0.1.0-main+2838e7cfa851".into(),
+            commit: "2838e7cfa8513e37f603bad6f20b34c3e760f983".into(),
+            serial: serial("2026-10-30T00:57:35Z"),
+        }];
+
+        let lines = group("tool", advanced, true, true);
+        assert_eq!(
+            serde_json::to_string(&lines[0]).unwrap(),
+            r#"{"name":"tool","version":"0.1.0-main+2838e7cfa851","platforms":["aarch64-macos"],"commit":"2838e7cfa8513e37f603bad6f20b34c3e760f983","serial":20261030005735,"automerge":true}"#
+        );
+
+        assert_eq!(serial("2026-10-30"), None);
+    }
+
+    #[test]
+    fn only_a_rolling_tag_takes_builds_from_a_prerelease() {
+        let release = |is_draft, is_prerelease| Release {
+            is_draft,
+            is_prerelease,
+            assets: BTreeSet::new(),
+        };
+
+        assert!(release(false, false).is_published(false));
+        assert!(!release(false, true).is_published(false));
+        assert!(release(false, true).is_published(true));
+        assert!(!release(true, false).is_published(true));
     }
 }
