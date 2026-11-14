@@ -148,7 +148,7 @@ impl<'a, F: FnMut(&str, &Key) -> Result<bool, String>> Planner<'a, F> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rootbeer_drv::{Build, Dependency};
+    use rootbeer_drv::{Build, Dependency, DependencyKind};
     use rootbeer_eval::{Metadata, Package};
 
     fn add(
