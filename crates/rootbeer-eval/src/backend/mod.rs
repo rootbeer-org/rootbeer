@@ -171,7 +171,11 @@ impl Package<'_> {
     }
 
     /// Checks run the recipe's commands and confirm that outputs exist.
-    pub(crate) fn check(&self, target: &Key) -> Result<Option<Check>, String> {
+    pub(crate) fn check(
+        &self,
+        target: &Key,
+        dependencies: Vec<Dependency>,
+    ) -> Result<Option<Check>, String> {
         let values = &self.resolved.values;
         let commands = self.resolved.spec.outputs.checks.as_deref();
         let libraries = self
@@ -208,7 +212,7 @@ impl Package<'_> {
             target: target.clone(),
             platform: values.platform,
             sandbox: sandbox(values.platform).into(),
-            dependencies: Vec::new(),
+            dependencies,
             env: env(&[("RB_SYSTEM", &self.host.system)]),
             script: script(lines),
         }))

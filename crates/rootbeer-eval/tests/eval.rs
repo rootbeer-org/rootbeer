@@ -1,6 +1,6 @@
 #![cfg(test)]
 
-use rootbeer_drv::{Derivation, Platform};
+use rootbeer_drv::{DependencyKind, Derivation, Platform};
 use rootbeer_eval::{Catalog, Error, Host, LineBy, Lines, Target};
 use std::collections::BTreeMap;
 
@@ -176,6 +176,62 @@ fn cycles_name_every_package_in_them() {
 
     let error = catalog.evaluate(&hosts("a"), &[target]).unwrap_err();
     assert_eq!(error.to_string(), "dependency cycle: a@1 -> b@1 -> a@1");
+}
+
+#[test]
+fn runtime_dependencies_fill_placeholders_and_reach_the_check() {
+    let recipe = |name: &str, build: &str, outputs: &str| {
+        format!(
+            r#"return {{
+                name = "{name}", description = "", homepage = "", default_license = "MIT",
+                source = {{ url = "https://example.com/{name}.tar.gz" }},
+                build = {{ backend = "custom", {build} }},
+                outputs = {{ {outputs} }},
+                platforms = {{ ["x86_64-linux"] = {{ default_version = "1" }} }},
+                versions = {{ ["1"] = {{ digests = {{ ["x86_64-linux"] = "{}" }} }} }},
+            }}"#,
+            "0".repeat(64)
+        )
+    };
+
+    let script = recipe(
+        "script",
+        r#"steps = { install = { { "link", "{dependencies.interpreter}/bin/run" } } },
+            dependencies = { { package = "interpreter", kind = "runtime" } }"#,
+        r#"checks = { { "script" } }"#,
+    );
+    let interpreter = recipe("interpreter", "steps = {}", "");
+    let catalog = Catalog::parse([
+        ("script.lua", script.as_str()),
+        ("interpreter.lua", interpreter.as_str()),
+    ])
+    .unwrap();
+
+    let graph = catalog.evaluate(&hosts("a"), &catalog.targets()).unwrap();
+    let package = |name: &str| {
+        let (_, package) = graph
+            .packages
+            .iter()
+            .find(|(target, _)| target.name == name)
+            .unwrap();
+        package
+    };
+
+    let interpreter = &package("interpreter").build;
+    let script = package("script");
+    let Some(Derivation::Build(build)) = graph.derivations.get(&script.build) else {
+        panic!("script has no build");
+    };
+    let Some(Derivation::Check(check)) = graph.derivations.get(script.check.as_ref().unwrap())
+    else {
+        panic!("script has no check");
+    };
+
+    let path = format!("/opt/rb/store/{interpreter}-interpreter-1/bin/run");
+    assert!(build.script.contains(&path), "{}", build.script);
+    assert_eq!(check.dependencies, build.dependencies);
+    assert_eq!(check.dependencies[0].key, *interpreter);
+    assert_eq!(check.dependencies[0].kind, DependencyKind::Runtime);
 }
 
 #[test]
