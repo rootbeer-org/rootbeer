@@ -141,13 +141,17 @@ impl Package<'_> {
 
         Ok(Build {
             allow: build.allow.clone(),
-            host: self.host_references(),
+            host: self.host_references()?,
             ..compiled
         })
     }
 
-    fn host_references(&self) -> BTreeSet<String> {
-        self.resolved.spec.outputs.host.clone().unwrap_or_default()
+    /// A reference may name the version, as a library named after it does.
+    fn host_references(&self) -> Result<BTreeSet<String>, String> {
+        let references = self.resolved.spec.outputs.host.iter().flatten();
+        references
+            .map(|reference| self.resolved.values.literal(reference))
+            .collect()
     }
 
     pub(crate) fn is_shared(&self) -> Result<bool, String> {

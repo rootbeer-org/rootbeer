@@ -16,6 +16,7 @@ pub(crate) mod run;
 pub(crate) mod search;
 pub(crate) mod setup;
 mod updates;
+mod version;
 
 pub(crate) use configuration::{check_lock, configure, link_default_apps};
 
@@ -556,13 +557,17 @@ fn label(derivation: Option<&Derivation>) -> String {
 }
 
 /// `name` or `name@version` on `platform`, defaulting to its default version.
+/// A version may name a release line or a range.
 pub(super) fn target(
     catalog: &Catalog,
     package: &str,
     platform: Platform,
 ) -> Result<Target, String> {
     let (name, version) = match package.split_once('@') {
-        Some((name, version)) => (name, version),
+        Some((name, asked)) => {
+            let versions = catalog.versions(name, platform);
+            (name, version::resolve(versions, asked).unwrap_or(asked))
+        }
         None => {
             let version = catalog.default_version(package, platform).ok_or_else(|| {
                 format!("{package} is not in the catalog or has no default version on {platform}")

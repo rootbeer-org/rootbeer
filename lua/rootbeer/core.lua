@@ -92,7 +92,8 @@ function rootbeer.exec(cmd, args) end
 function rootbeer.package_catalog(path) end
 
 --- Installs a command-line tool, such as `"ripgrep"`. Use `"name@version"`
---- to choose an exact version. Package versions are saved in `rootbeer.lock`.
+--- to choose an exact version, a release line such as `"node@24"`, or a range
+--- such as `"jq@^1.7"`. Package versions are saved in `rootbeer.lock`.
 --- You can also use `github:owner/repo@tag` for a GitHub release's asset.
 --- @param spec string|rootbeer.PackageRequestSpec Package request, or a request with options.
 --- @param opts? rootbeer.PackageOptions Asset options for `github:` requests.

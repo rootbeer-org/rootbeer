@@ -121,8 +121,10 @@ pub(crate) fn configure(
                     Err(error) => return Err(error),
                 };
 
-                let (version, output) = install::select(entry, version.as_deref(), platform)?;
+                let asked = version.as_deref();
+                let (version, output) = install::select(entry, asked, platform)?;
                 Locked {
+                    pin: install::line(asked, &version),
                     version,
                     key: output.key.clone(),
                     manifest: Some(output.manifest.clone()),
@@ -150,6 +152,7 @@ pub(crate) fn configure(
                     release: Some(resolved.release),
                     is_local: false,
                     apps: BTreeMap::new(),
+                    pin: None,
                     extra: BTreeMap::new(),
                 }
             }
@@ -164,6 +167,7 @@ pub(crate) fn configure(
                     is_local: true,
                     bins: built.metadata.bins.clone(),
                     apps: built.metadata.apps.clone(),
+                    pin: None,
                     extra: BTreeMap::new(),
                 }
             }
@@ -235,15 +239,17 @@ pub(crate) fn configure(
         }
         installed(&store, &package, &locked)?;
 
+        let is_pinned = requests.get(&package).and_then(Wanted::version).is_some();
         let member = Member {
             version: locked.version.clone(),
-            is_pinned: requests.get(&package).and_then(Wanted::version).is_some(),
+            is_pinned,
             key: locked.key.clone(),
             manifest: locked.manifest.clone(),
             release: locked.release.clone(),
             is_local: locked.is_local,
             bins: locked.bins.clone(),
             apps: locked.apps.clone(),
+            pin: locked.pin.clone().filter(|_| is_pinned),
             extra: BTreeMap::new(),
         };
 
@@ -465,6 +471,7 @@ mod tests {
             is_local: false,
             bins: Default::default(),
             apps: Default::default(),
+            pin: None,
             extra: Default::default(),
         }
     }
@@ -522,6 +529,22 @@ mod tests {
         assert!(matches!(kept(None, &update), Ok(false)));
         assert!(matches!(kept(Some("1.8.2"), &update), Ok(false)));
         assert!(matches!(kept(Some("1.8.2"), &strict), Ok(true)));
+
+        // A line the lock wasn't resolved from doesn't keep a version in it.
+        assert!(matches!(kept(Some("1.8"), &plain), Ok(false)));
+        let mut lined = Lock::default();
+        let entry = Locked {
+            pin: Some("1.8".into()),
+            ..locked("1.8.2")
+        };
+        lined.insert("jq", "aarch64-macos", entry);
+        let on_line = |version: &str, flags| {
+            let requests = Requests::from([("jq".into(), Wanted::Index(Some(version.into())))]);
+            reconcile(&lined, "aarch64-macos", &requests, flags).map(|kept| kept.contains_key("jq"))
+        };
+        assert!(matches!(on_line("1.8", &strict), Ok(true)));
+        assert!(matches!(on_line("1.8", &update), Ok(false)));
+        assert!(matches!(on_line("1.8.2", &plain), Ok(false)));
 
         let moved = kept(Some("1.7"), &strict);
         assert!(matches!(moved, Err(Stale::Moved(_, version)) if version == "1.8.2"));

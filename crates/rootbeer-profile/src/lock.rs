@@ -20,6 +20,10 @@ pub struct Lock {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Locked {
     pub version: String,
+    /// The release line the configuration names, like `24`, when it isn't
+    /// the exact version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pin: Option<String>,
     pub key: Key,
     /// The signed index's manifest digest, for an entry from the index.
     #[serde(default, skip_serializing_if = "Option::is_none")]

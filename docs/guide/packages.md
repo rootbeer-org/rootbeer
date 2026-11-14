@@ -148,6 +148,25 @@ The same syntax works in Lua: `rb.package("jq@1.8.2")`. Explicit versions never
 fall back to another release. A retained version is available for selection;
 it does not necessarily become the default.
 
+A version can also name a release line by its leading parts. `node@24` selects
+the newest 24.x release and `python@3.15` the newest 3.15.x:
+
+```sh
+rb use node@24
+```
+
+For more control, ask for a range. `^1.2` allows anything from 1.2 up to the
+next major, `~1.2.3` anything up to the next minor, and `>=`, `>`, `<=`, `<`, and
+`=` compare directly. Join bounds with a comma, and quote the request so your
+shell leaves it alone:
+
+```sh
+rb use 'python@>=3.14,<3.16'
+```
+
+A line or range stays on what it first resolved to until you pass `--update`,
+which moves it to the newest release it allows and never outside it.
+
 `rb run` uses the current default each time. `rb use` and `rb apply` keep what
 they installed until you pass `--update`, and exact versions stay fixed. See
 [updates and offline use](/guide/package-locks) for each workflow.

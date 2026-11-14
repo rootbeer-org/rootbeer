@@ -46,6 +46,10 @@ pub struct Member {
     pub version: String,
     #[serde(rename = "pinned")]
     pub is_pinned: bool,
+    /// The release line the pin names, like `24`, when it isn't the exact
+    /// version. An update then moves within the line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pin: Option<String>,
     pub key: Key,
     /// The signed index's manifest digest, for a member from the index.
     #[serde(default, skip_serializing_if = "Option::is_none")]

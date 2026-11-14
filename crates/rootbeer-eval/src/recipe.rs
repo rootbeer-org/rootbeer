@@ -54,6 +54,9 @@ pub struct Upstream {
     /// A tag upstream moves to each new build, followed instead of version
     /// tags.
     pub rolling: Option<Rolling>,
+    /// Release lines followed side by side, like two majors. Only the newest
+    /// line is followed when unset.
+    pub lines: Option<Lines>,
     /// Whether an update's PR merges itself once its checks pass.
     #[serde(default, rename = "automerge")]
     pub should_automerge: bool,
@@ -66,6 +69,23 @@ pub struct Rolling {
     pub tag: String,
     /// What each build's version starts with, before `+` and its commit.
     pub version: String,
+}
+
+/// The release lines a recipe keeps one version of each.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Lines {
+    /// The leading version part that names a line.
+    pub by: LineBy,
+    /// How many lines are kept, newest first.
+    pub keep: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LineBy {
+    Major,
+    Minor,
 }
 
 #[derive(Deserialize)]
@@ -415,6 +435,29 @@ impl Upstream {
 
         let is_exact = !version.is_empty() && self.tag_for(&version) == tag;
         is_exact.then_some(version)
+    }
+}
+
+impl Lines {
+    /// The line a version belongs to, as its leading numbers. A version that
+    /// doesn't start with that many numbers belongs to none.
+    pub fn line(&self, version: &str) -> Option<Vec<u64>> {
+        let depth = match self.by {
+            LineBy::Major => 1,
+            LineBy::Minor => 2,
+        };
+
+        let release = version.split(['-', '+']).next().unwrap_or_default();
+        let line = release
+            .split('.')
+            .take(depth)
+            .map(|part| {
+                let is_number = !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit());
+                is_number.then(|| part.parse().ok()).flatten()
+            })
+            .collect::<Option<Vec<u64>>>()?;
+
+        (line.len() == depth).then_some(line)
     }
 }
 

@@ -10,7 +10,7 @@ mod recipe;
 mod template;
 
 use recipe::{DependencyKind as RecipeKind, Recipe};
-pub use recipe::{Rolling, Upstream};
+pub use recipe::{LineBy, Lines, Rolling, Upstream};
 use rootbeer_drv::{Dependency, DependencyKind, Derivation, Key, Platform, output_path};
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -252,6 +252,20 @@ impl Catalog {
             })
             .filter(|dependency| dependency.package == name)
             .filter_map(|dependency| dependency.version.as_deref())
+            .collect()
+    }
+
+    /// The versions a recipe declares with a download for a platform.
+    pub fn versions(&self, name: &str, platform: Platform) -> Vec<&str> {
+        let Some(recipe) = self.recipes.get(name) else {
+            return Vec::new();
+        };
+
+        recipe
+            .versions
+            .iter()
+            .filter(|(_, version)| version.digests.contains_key(&platform))
+            .map(|(version, _)| version.as_str())
             .collect()
     }
 
