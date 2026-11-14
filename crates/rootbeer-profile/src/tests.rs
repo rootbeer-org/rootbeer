@@ -44,6 +44,7 @@ fn output(store: &Path, digit: char, bins: &[&str]) -> Member {
         is_local: false,
         bins: bins.iter().map(|name| name.to_string()).collect(),
         apps: BTreeMap::new(),
+        pin: None,
         extra: BTreeMap::new(),
     }
 }
@@ -469,6 +470,7 @@ mod lock {
             is_local: false,
             bins: ["jq".to_string()].into(),
             apps: BTreeMap::new(),
+            pin: None,
             extra: BTreeMap::new(),
         }
     }

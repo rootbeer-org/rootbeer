@@ -1,8 +1,7 @@
-use super::{github, load, parse_platform, Sources};
+use super::{github, load, parse_platform, version, Sources};
 use rootbeer_drv::{is_version, Platform, Sha256};
 use rootbeer_eval::Target;
 use serde::Serialize;
-use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::ops::Range;
@@ -475,7 +474,7 @@ fn newest_beyond(
 
     match versions.iter().all(|(_, serial)| serial.is_some()) {
         true => versions.sort_by_key(|&(_, serial)| std::cmp::Reverse(serial)),
-        false => versions.sort_by(|(a, _), (b, _)| compare_versions(b, a)),
+        false => versions.sort_by(|(a, _), (b, _)| version::compare(b, a)),
     }
 
     versions
@@ -485,18 +484,6 @@ fn newest_beyond(
         .filter(|version| !kept.contains(*version))
         .cloned()
         .collect()
-}
-
-/// Dotted versions compared part by part, numbers numerically.
-fn compare_versions(a: &str, b: &str) -> Ordering {
-    let parts = |version: &str| {
-        version
-            .split(|byte: char| !byte.is_ascii_alphanumeric())
-            .map(|part| part.parse::<u64>().map_err(|_| part.to_string()))
-            .collect::<Vec<_>>()
-    };
-
-    parts(a).cmp(&parts(b))
 }
 
 #[cfg(test)]
@@ -626,11 +613,6 @@ mod tests {
         ]);
 
         assert_eq!(newest_beyond(&blocks, 2, &BTreeSet::new(), "    "), ["b"]);
-        assert_eq!(compare_versions("1.10.0", "1.9.0"), Ordering::Greater);
-        assert_eq!(
-            compare_versions("2026.2.5+262", "2026.2.5+100"),
-            Ordering::Greater
-        );
     }
 
     #[test]

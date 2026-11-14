@@ -255,6 +255,20 @@ impl Catalog {
             .collect()
     }
 
+    /// The versions a recipe declares with a download for a platform.
+    pub fn versions(&self, name: &str, platform: Platform) -> Vec<&str> {
+        let Some(recipe) = self.recipes.get(name) else {
+            return Vec::new();
+        };
+
+        recipe
+            .versions
+            .iter()
+            .filter(|(_, version)| version.digests.contains_key(&platform))
+            .map(|(version, _)| version.as_str())
+            .collect()
+    }
+
     pub fn default_version(&self, name: &str, platform: Platform) -> Option<&str> {
         let recipe = self.recipes.get(name)?;
         recipe

@@ -15,8 +15,9 @@ rb use --update
 `rb use --update` moves the packages you name, or every package with no names, to
 what the index has now, keeping your other tools. An exact request such as
 `jq@1.8.2` pins that version, including with `--update`, though it can move to a
-rebuild of the same version. Packages built from a local checkout are left alone
-unless you name them.
+rebuild of the same version. A release line such as `node@24` or a range such as
+`jq@^1.7` moves to the newest release it allows. Packages built from a local
+checkout are left alone unless you name them.
 
 These commands do not read or modify your configuration's `rootbeer.lock`.
 

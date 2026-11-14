@@ -184,6 +184,7 @@ impl Wanted {
     pub(crate) fn is_answered_by(&self, installed: Installed) -> bool {
         let Installed {
             version,
+            pin,
             key,
             release,
             is_local,
@@ -191,9 +192,11 @@ impl Wanted {
             apps,
         } = installed;
         match (self, release, is_local) {
-            (Wanted::Index(asked), None, false) => {
-                asked.as_deref().is_none_or(|asked| asked == version)
-            }
+            // A line asked for is answered only by what was resolved from
+            // it, never by a version that happens to be in it.
+            (Wanted::Index(asked), None, false) => asked
+                .as_deref()
+                .is_none_or(|asked| asked == pin.unwrap_or(version)),
             (Wanted::Release(request), Some(release), false) => {
                 request.is_answered_by(release, version)
             }
@@ -215,6 +218,7 @@ impl Wanted {
 /// A lock entry or generation member, as far as a request cares.
 pub(crate) struct Installed<'a> {
     version: &'a str,
+    pin: Option<&'a str>,
     key: &'a Key,
     release: Option<&'a Release>,
     is_local: bool,
@@ -226,6 +230,7 @@ impl<'a> From<&'a Locked> for Installed<'a> {
     fn from(locked: &'a Locked) -> Self {
         Installed {
             version: &locked.version,
+            pin: locked.pin.as_deref(),
             key: &locked.key,
             release: locked.release.as_ref(),
             is_local: locked.is_local,
@@ -239,6 +244,7 @@ impl<'a> From<&'a Member> for Installed<'a> {
     fn from(member: &'a Member) -> Self {
         Installed {
             version: &member.version,
+            pin: member.pin.as_deref(),
             key: &member.key,
             release: member.release.as_ref(),
             is_local: member.is_local,
@@ -254,6 +260,14 @@ pub(crate) fn named(repository: &str) -> Result<String, String> {
         .ok_or_else(|| format!("github:{repository}'s repo name isn't a valid package name"))
 }
 
+/// The release line or range a request names, when it isn't the version it
+/// resolved to.
+pub(super) fn line(asked: Option<&str>, resolved: &str) -> Option<String> {
+    asked.filter(|asked| *asked != resolved).map(str::to_string)
+}
+
+/// A package's output at the version asked for, which may name a release
+/// line or a range, or at its default.
 pub(super) fn select<'a>(
     package: &'a Package,
     version: Option<&str>,
@@ -261,7 +275,14 @@ pub(super) fn select<'a>(
 ) -> Result<(String, &'a Output), String> {
     let name = &package.name;
     let version = match version {
-        Some(version) => version,
+        Some(asked) => {
+            let built = package
+                .versions
+                .iter()
+                .filter(|(_, outputs)| outputs.contains_key(&platform))
+                .map(|(version, _)| version.as_str());
+            super::version::resolve(built, asked).unwrap_or(asked)
+        }
         None => package
             .default
             .get(&platform)
@@ -475,5 +496,59 @@ mod tests {
         let path = datastore(b"root", true).unwrap();
         assert!(path.starts_with("/opt/rb/var/index"));
         assert_ne!(path, datastore(b"other", true).unwrap());
+    }
+
+    #[test]
+    fn a_version_asked_for_may_name_a_release_line() {
+        let output = Output {
+            key: "a".repeat(32).parse().unwrap(),
+            manifest: format!("sha256:{}", "0".repeat(64)),
+            bins: BTreeSet::new(),
+            apps: BTreeMap::new(),
+        };
+        let built = |platforms: &[Platform]| {
+            platforms
+                .iter()
+                .map(|&platform| (platform, output.clone()))
+                .collect::<BTreeMap<_, _>>()
+        };
+        let (macos, linux) = (Platform::Aarch64Macos, Platform::X86_64Linux);
+        let versions = [
+            ("24.9.0", built(&[macos, linux])),
+            ("24.10.0", built(&[macos])),
+            ("26.1.0", built(&[macos, linux])),
+            ("2.4", built(&[macos])),
+            ("2.4.1", built(&[macos])),
+        ];
+        let package = Package {
+            name: "node".into(),
+            default: BTreeMap::from([(macos, "26.1.0".into())]),
+            versions: versions
+                .into_iter()
+                .map(|(version, outputs)| (version.to_string(), outputs))
+                .collect(),
+            ..Package::default()
+        };
+
+        let selected =
+            |asked, platform| select(&package, asked, platform).map(|(version, _)| version);
+        assert_eq!(selected(None, macos).unwrap(), "26.1.0");
+        assert_eq!(selected(Some("24"), macos).unwrap(), "24.10.0");
+        assert_eq!(selected(Some("24.9"), macos).unwrap(), "24.9.0");
+        assert_eq!(selected(Some("24.9.0"), macos).unwrap(), "24.9.0");
+
+        // A line holds only what the platform has, and a version wins over
+        // the line it starts.
+        assert_eq!(selected(Some("24"), linux).unwrap(), "24.9.0");
+        assert_eq!(selected(Some("2.4"), macos).unwrap(), "2.4");
+        assert_eq!(selected(Some("2"), macos).unwrap(), "2.4.1");
+
+        assert!(selected(Some("2"), linux).is_err());
+        assert!(selected(Some("25"), macos).is_err());
+        assert!(selected(Some("24.1"), macos).is_err());
+
+        assert_eq!(line(Some("24"), "24.10.0").as_deref(), Some("24"));
+        assert_eq!(line(Some("24.10.0"), "24.10.0"), None);
+        assert_eq!(line(None, "26.1.0"), None);
     }
 }

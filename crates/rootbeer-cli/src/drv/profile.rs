@@ -99,6 +99,7 @@ pub(super) fn install_requests(
                 .package(&name)
                 .and_then(|package| install::select(package, version.as_deref(), platform))
                 .map(|(resolved, output)| Member {
+                    pin: install::line(version.as_deref(), &resolved),
                     version: resolved,
                     is_pinned: version.is_some(),
                     key: output.key.clone(),
@@ -124,6 +125,7 @@ pub(super) fn install_requests(
                         release: Some(resolved.release),
                         is_local: false,
                         apps: BTreeMap::new(),
+                        pin: None,
                         extra: BTreeMap::new(),
                     },
                 )
@@ -140,6 +142,7 @@ pub(super) fn install_requests(
                     is_local: true,
                     bins: package.metadata.bins.clone(),
                     apps: package.metadata.apps.clone(),
+                    pin: install::line(version.as_deref(), &target.version),
                     extra: BTreeMap::new(),
                 }),
         };
@@ -220,7 +223,8 @@ pub(super) fn planned(
     requests
 }
 
-/// An update keeps a member's pin when the request names no version.
+/// An update keeps a member's pin when the request names no version. A pin
+/// to a release line stays on the line.
 fn pin(
     packages: &BTreeMap<String, Member>,
     requests: &mut BTreeMap<String, Wanted>,
@@ -229,7 +233,7 @@ fn pin(
     for (name, wanted) in requests {
         let pinned = packages.get(name).filter(|member| member.is_pinned);
         if let (true, None, Some(member)) = (should_update, wanted.version(), pinned) {
-            wanted.pin(member.version.clone());
+            wanted.pin(member.pin.clone().unwrap_or_else(|| member.version.clone()));
         }
     }
 }
@@ -245,6 +249,7 @@ fn unpinned(member: &Member) -> Wanted {
 /// Ignores fields a newer rb added, which never change what's linked.
 pub(super) fn is_same(a: &Member, b: &Member) -> bool {
     let strip = |member: &Member| Member {
+        pin: None,
         extra: BTreeMap::new(),
         ..member.clone()
     };
@@ -490,6 +495,7 @@ mod tests {
             is_local: false,
             bins: Default::default(),
             apps: Default::default(),
+            pin: None,
             extra: Default::default(),
         }
     }
@@ -521,6 +527,33 @@ mod tests {
 
         let unpinned = planned(&packages, ask(&[("jj", None), ("rg", None)]), false);
         assert_eq!(unpinned, ask(&[("jj", None), ("rg", None)]));
+    }
+
+    #[test]
+    fn a_pin_to_a_release_line_stays_on_the_line() {
+        let line = Member {
+            pin: Some("24".into()),
+            ..member("24.22.3", true)
+        };
+        let packages = BTreeMap::from([
+            ("node".to_string(), line),
+            ("python".to_string(), member("3.15.2", true)),
+        ]);
+        let ask = |name: &str, version: Option<&str>| {
+            let version = version.map(str::to_string);
+            BTreeMap::from([(name.to_string(), Wanted::Index(version))])
+        };
+
+        // The line is asked for again, so an update finds its newest version.
+        let updated = planned(&packages, ask("node", None), true);
+        assert_eq!(updated, ask("node", Some("24")));
+        assert!(planned(&packages, ask("node", Some("24")), false).is_empty());
+
+        // An exact pin is in the line, and still isn't a pin to it.
+        let exact = planned(&packages, ask("python", Some("3.15")), false);
+        assert_eq!(exact, ask("python", Some("3.15")));
+        let narrowed = planned(&packages, ask("node", Some("24.22.3")), false);
+        assert_eq!(narrowed, ask("node", Some("24.22.3")));
     }
 
     #[test]
