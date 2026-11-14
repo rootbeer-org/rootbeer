@@ -187,7 +187,7 @@ impl Package<'_> {
         );
 
         Ok(Build {
-            host: self.host_references(),
+            host: self.host_references()?,
             ..unpacked
         })
     }

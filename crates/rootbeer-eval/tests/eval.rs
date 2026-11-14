@@ -278,6 +278,25 @@ fn host_references_override_per_platform_and_key_only_the_build() {
         .count();
     assert_eq!(acknowledging, 3, "never the vendor build");
 
+    // A reference names the version through the same placeholders as a step.
+    let versioned = FIXTURES[tool].1.replacen(
+        "outputs = {",
+        r#"outputs = { host = { "libtool{major}.{minor}.so.{version}" },"#,
+        1,
+    );
+    let mut fixtures = FIXTURES;
+    fixtures[tool].1 = &versioned;
+    let catalog = Catalog::parse(fixtures).unwrap();
+    let graph = catalog.evaluate(&hosts("a"), &catalog.targets()).unwrap();
+    let rendered = graph
+        .derivations
+        .values()
+        .find_map(|derivation| match derivation {
+            Derivation::Build(build) => build.host.first().cloned(),
+            _ => None,
+        });
+    assert_eq!(rendered.as_deref(), Some("libtool2.0.so.2.0.0"));
+
     for invalid in [r#""""#, r#""libX11.so.6\n/bin/sh""#] {
         let edited = FIXTURES[tool].1.replacen(
             "outputs = {",
