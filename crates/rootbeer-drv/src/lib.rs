@@ -117,8 +117,9 @@ pub enum DependencyKind {
     Build,
     /// Linked into the output (e.g. headers, libraries, etc.)
     Linked,
-    /// Required at runtime without being referenced by path (e.g. plugins/tools
-    /// found on PATH). Linked libraries are discovered by scanning the output
+    /// Required to run the output but hidden from its build (e.g. an
+    /// interpreter a launcher names, or tools found on PATH). Checks run with
+    /// it. Linked libraries are discovered by scanning the output
     Runtime,
 }
 

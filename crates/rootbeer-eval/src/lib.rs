@@ -429,12 +429,10 @@ impl<'a> Evaluation<'a> {
                 linked.push(format!("{path}/lib"));
             }
 
-            if !matches!(declared.kind, RecipeKind::Runtime) {
-                resolved
-                    .values
-                    .dependencies
-                    .insert(declared.package.clone(), path);
-            }
+            resolved
+                .values
+                .dependencies
+                .insert(declared.package.clone(), path);
 
             dependencies.extend(kinds.iter().map(|kind| Dependency {
                 key: key.clone(),
@@ -478,9 +476,17 @@ impl<'a> Evaluation<'a> {
             (None, None, _) => return Err("a platform needs a prebuilt or a source".into()),
         };
 
+        // A check runs what was built, so it needs what the build needs to run
+        let runtime = build
+            .dependencies
+            .iter()
+            .filter(|dependency| dependency.kind == DependencyKind::Runtime)
+            .cloned()
+            .collect();
+
         let build = self.insert(Derivation::Build(build))?;
         let check = package
-            .check(&build)?
+            .check(&build, runtime)?
             .map(|check| self.insert(Derivation::Check(check)))
             .transpose()?;
 

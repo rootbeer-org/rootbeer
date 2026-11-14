@@ -125,6 +125,14 @@ pub(crate) fn check(request: &mut Request, check: &Check) -> Result<(), Error> {
     sandbox.has_home = true;
     sandbox.dependencies(request, &check.dependencies)?;
 
+    // A profile puts runtime dependencies on PATH beside the package
+    for dependency in &check.dependencies {
+        if dependency.kind == DependencyKind::Runtime {
+            let path = sandbox.read(request, &dependency.key)?;
+            sandbox.bins.push(format!("{path}/bin"));
+        }
+    }
+
     let target = sandbox.read(request, &check.target)?;
     sandbox.bins.insert(0, format!("{target}/bin"));
     sandbox.variables.insert("target".into(), target);

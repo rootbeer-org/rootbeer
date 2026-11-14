@@ -21,9 +21,7 @@ mod version;
 pub(crate) use configuration::{check_lock, configure, link_default_apps};
 
 use rootbeer_cache::Cache;
-use rootbeer_drv::{
-    fetch_path, output_path, Build, DependencyKind, Derivation, Key, Platform, STORE_ROOT,
-};
+use rootbeer_drv::{fetch_path, output_path, Build, Derivation, Key, Platform, STORE_ROOT};
 use rootbeer_eval::{Catalog, Graph, Host, Target};
 use rootbeer_sandbox::Request;
 use rootbeer_store::{Store, ROOT};
@@ -509,11 +507,9 @@ impl Resolver<'_> {
             Some(Derivation::Fetch(_)) | None => (Vec::new(), [].as_slice()),
         };
 
-        // Runtime dependencies aren't visible to the build.
-        let dependencies = dependencies
-            .iter()
-            .filter(|dependency| dependency.kind != DependencyKind::Runtime)
-            .map(|dependency| &dependency.key);
+        // A build can't see its runtime dependencies, but its output may
+        // name them and its check runs with them
+        let dependencies = dependencies.iter().map(|dependency| &dependency.key);
 
         for named in named.into_iter().chain(dependencies) {
             self.resolve(named)?;
