@@ -1,7 +1,7 @@
 #![cfg(test)]
 
 use rootbeer_drv::{Derivation, Platform};
-use rootbeer_eval::{Catalog, Error, Host, Target};
+use rootbeer_eval::{Catalog, Error, Host, LineBy, Lines, Target};
 use std::collections::BTreeMap;
 
 const FIXTURES: [(&str, &str); 13] = [
@@ -92,7 +92,7 @@ fn metadata_never_reaches_a_key() {
             .replace("{ \"fnd\" }", "{}")
             .replace(
                 "repository_id = 1234,",
-                r#"repository_id = 5678, exclude_tags = { "v1" }, git = "https://example.com/f.git","#,
+                r#"repository_id = 5678, exclude_tags = { "v1" }, lines = { by = "major", keep = 2 }, git = "https://example.com/f.git","#,
             );
 
         (file, source)
@@ -520,4 +520,16 @@ fn an_unpinned_dependency_follows_its_default() {
         Err(error) => error.to_string(),
     };
     assert!(error.contains("go") && error.contains("default"), "{error}");
+}
+
+#[test]
+fn a_version_belongs_to_the_line_its_leading_numbers_name() {
+    let lines = |by| Lines { by, keep: 2 };
+    let (major, minor) = (lines(LineBy::Major), lines(LineBy::Minor));
+
+    assert_eq!(major.line("26.13.1"), Some(vec![26]));
+    assert_eq!(minor.line("3.15.2+20261110"), Some(vec![3, 15]));
+    assert_eq!(minor.line("7.1.2-35"), Some(vec![7, 1]));
+    assert_eq!(minor.line("3"), None);
+    assert_eq!(major.line("v26"), None);
 }

@@ -1,7 +1,7 @@
 use super::{git, github, load, Sources};
 use globset::{Glob, GlobSetBuilder};
 use rootbeer_drv::Platform;
-use rootbeer_eval::{Catalog, Rolling, Upstream};
+use rootbeer_eval::{Catalog, Lines, Rolling, Upstream};
 use rootbeer_profile::is_repository;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -79,6 +79,13 @@ impl Release {
     fn is_published(&self, is_rolling: bool) -> bool {
         !self.is_draft && (is_rolling || !self.is_prerelease)
     }
+}
+
+/// The candidates one platform follows, and the numbers it advances from.
+struct Followed<'a> {
+    platform: Platform,
+    candidates: &'a [Candidate],
+    current: Vec<u64>,
 }
 
 struct Checker<'a> {
@@ -210,25 +217,15 @@ impl Checker<'_> {
             let candidates = candidates(upstream, tags).map_err(error)?;
             let mut is_verified = false;
             for (platform, current) in currents {
-                let newer = newer(&candidates, &current).map_err(error)?;
-                if newer.is_empty() {
-                    continue;
-                }
-
-                if !is_verified {
-                    self.verify(github, upstream.repository_id).map_err(error)?;
-                    is_verified = true;
-                }
-
-                for candidate in newer {
-                    let is_available = self
-                        .is_available(name, github, candidate, platform)
-                        .map_err(problem)?;
-                    if is_available {
-                        advanced.push(Advance::to(platform, candidate));
-                        break;
-                    }
-                }
+                let followed = Followed {
+                    platform,
+                    candidates: &candidates,
+                    current,
+                };
+                advanced.extend(
+                    self.advance(name, upstream, github, followed, &mut is_verified)
+                        .map_err(problem)?,
+                );
             }
         }
 
@@ -238,6 +235,51 @@ impl Checker<'_> {
             catalog.has_commit_placeholder(name),
             should_automerge,
         ))
+    }
+
+    /// What a platform advances to among the candidates it follows. That's
+    /// the newest available one, or with release lines, each line's.
+    fn advance(
+        &self,
+        name: &str,
+        upstream: &Upstream,
+        github: Option<&str>,
+        followed: Followed,
+        is_verified: &mut bool,
+    ) -> Result<Vec<Advance>, Problem> {
+        let Followed {
+            platform,
+            candidates,
+            current,
+        } = followed;
+        let catalog = self.catalog;
+        let default = catalog.default_version(name, platform).unwrap_or_default();
+        let declared = catalog.versions(name, platform);
+        let lines = follow(upstream.lines.as_ref(), candidates, default, &declared)
+            .unwrap_or_else(|| vec![(candidates.iter().collect(), current)]);
+
+        let mut advanced = Vec::new();
+        for (followed, current) in lines {
+            let newer = newer(&followed, &current).map_err(Problem::Error)?;
+            if newer.is_empty() {
+                continue;
+            }
+
+            if !*is_verified {
+                self.verify(github, upstream.repository_id)
+                    .map_err(Problem::Error)?;
+                *is_verified = true;
+            }
+
+            for candidate in newer {
+                if self.is_available(name, github, candidate, platform)? {
+                    advanced.push(Advance::to(platform, candidate));
+                    break;
+                }
+            }
+        }
+
+        Ok(advanced)
     }
 
     /// The platforms that advance to the build a rolling tag names now. The
@@ -474,11 +516,61 @@ fn candidates(upstream: &Upstream, tags: Vec<git::Tag>) -> Result<Vec<Candidate>
     Ok(candidates)
 }
 
+/// The candidates of each release line an upstream follows, newest line
+/// first, with the numbers each line advances from. The default's line
+/// advances from the default, and another from the newest version the recipe
+/// declares in it. None when the upstream follows no lines.
+fn follow<'a>(
+    lines: Option<&Lines>,
+    candidates: &'a [Candidate],
+    default: &str,
+    declared: &[&str],
+) -> Option<Vec<(Vec<&'a Candidate>, Vec<u64>)>> {
+    let lines = lines?;
+    let mut newest: Vec<(Vec<u64>, Vec<&Candidate>)> = Vec::new();
+    for candidate in candidates {
+        let Some(line) = lines.line(&candidate.version) else {
+            continue;
+        };
+
+        match newest.iter_mut().find(|(seen, _)| *seen == line) {
+            Some((_, followed)) => followed.push(candidate),
+            None => newest.push((line, vec![candidate])),
+        }
+    }
+
+    let default_line = lines.line(default);
+    let current = |line: &[u64]| {
+        if default_line.as_deref() == Some(line) {
+            return numbers(default).unwrap_or_default();
+        }
+
+        declared
+            .iter()
+            .filter(|version| lines.line(version).as_deref() == Some(line))
+            .filter_map(|version| numbers(version))
+            .max()
+            .unwrap_or_default()
+    };
+
+    let followed = newest
+        .into_iter()
+        .take(lines.keep)
+        .map(|(line, followed)| {
+            let current = current(&line);
+            (followed, current)
+        })
+        .collect();
+
+    Some(followed)
+}
+
 /// The candidates newer than `current`, newest first. Two tags naming one
 /// version, like `1.2` and `1.2.0`, leave which to take unclear.
-fn newer<'a>(candidates: &'a [Candidate], current: &[u64]) -> Result<Vec<&'a Candidate>, String> {
+fn newer<'a>(candidates: &[&'a Candidate], current: &[u64]) -> Result<Vec<&'a Candidate>, String> {
     let newer: Vec<&Candidate> = candidates
         .iter()
+        .copied()
         .take_while(|candidate| candidate.numbers.as_slice() > current)
         .collect();
 
@@ -588,6 +680,7 @@ mod tests {
             separator: separator.map(String::from),
             exclude_tags: exclude.iter().map(|tag| tag.to_string()).collect(),
             rolling: None,
+            lines: None,
             should_automerge: false,
         }
     }
@@ -649,12 +742,14 @@ mod tests {
         let found =
             candidates(&plain, tags(&["v1.10", "v1.9.0", "v1.2.0", "v2026.01.05"])).unwrap();
 
+        let found: Vec<&Candidate> = found.iter().collect();
         let newer_than =
             |current: &str| newer(&found, &numbers(current).unwrap()).map(|newer| versions(&newer));
         assert_eq!(newer_than("1.9").unwrap(), ["2026.01.05", "1.10"]);
         assert_eq!(newer_than("2026.1.5.0").unwrap(), Vec::<String>::new());
 
         let both = candidates(&plain, tags(&["v1.3", "v1.3.0"])).unwrap();
+        let both: Vec<&Candidate> = both.iter().collect();
         assert_eq!(
             newer(&both, &numbers("1.2").unwrap()).unwrap_err(),
             "tags v1.3 and v1.3.0 name the same version, so which to take is unclear"
@@ -663,6 +758,51 @@ mod tests {
         assert_eq!(numbers("1.2.0"), numbers("1.2"));
         assert_eq!(numbers("+1.2"), None);
         assert_eq!(numbers("1..2"), None);
+    }
+
+    #[test]
+    fn each_followed_line_advances_from_its_own_version() {
+        let found = candidates(
+            &upstream("v{version}", None, &[]),
+            tags(&["v26.1.0", "v26.0.0", "v24.3.0", "v24.2.0", "v22.9.0"]),
+        )
+        .unwrap();
+        let lines = Lines {
+            by: rootbeer_eval::LineBy::Major,
+            keep: 2,
+        };
+
+        let advances = |default: &str, declared: &[&str]| -> Vec<Vec<String>> {
+            follow(Some(&lines), &found, default, declared)
+                .unwrap()
+                .into_iter()
+                .map(|(followed, current)| versions(&newer(&followed, &current).unwrap()))
+                .collect()
+        };
+
+        // The older line starts from nothing, and the oldest isn't followed.
+        assert_eq!(
+            advances("26.0.0", &["26.0.0"]),
+            [vec!["26.1.0"], vec!["24.3.0", "24.2.0"]]
+        );
+        assert_eq!(
+            advances("26.1.0", &["26.1.0", "24.2.0"]),
+            [vec![], vec!["24.3.0"]]
+        );
+
+        // A default held behind a declared version still advances to it.
+        assert_eq!(
+            advances("26.0.0", &["26.1.0", "26.0.0", "24.3.0"]),
+            [vec!["26.1.0"], vec![]]
+        );
+
+        // A default in an older line leaves the newest line to start fresh.
+        assert_eq!(
+            advances("24.3.0", &["24.3.0"]),
+            [vec!["26.1.0", "26.0.0"], vec![]]
+        );
+
+        assert!(follow(None, &found, "26.0.0", &[]).is_none());
     }
 
     #[test]

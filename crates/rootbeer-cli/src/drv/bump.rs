@@ -1,7 +1,8 @@
 use super::{github, load, parse_platform, version, Sources};
 use rootbeer_drv::{is_version, Platform, Sha256};
-use rootbeer_eval::Target;
+use rootbeer_eval::{Lines, Target};
 use serde::Serialize;
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::ops::Range;
@@ -10,7 +11,9 @@ use std::ops::Range;
 pub(super) struct Args {
     /// The package to add a version to
     name: String,
-    /// The version to add, which becomes the default
+    /// The version to add, which becomes the default. A recipe that follows
+    /// release lines only moves a default forward, so an older line's version
+    /// is added beside it
     version: String,
     /// The commit the version builds from, for recipes that name `{commit}`
     #[arg(long)]
@@ -23,7 +26,8 @@ pub(super) struct Args {
     #[arg(long = "platform", value_parser = parse_platform)]
     platforms: Vec<Platform>,
     /// How many versions to keep, newest first. A version a platform still
-    /// defaults to or another recipe depends on always stays
+    /// defaults to or another recipe depends on always stays. A recipe that
+    /// follows release lines keeps the newest version of each line instead
     #[arg(long)]
     keep: Option<usize>,
     #[command(flatten)]
@@ -99,9 +103,24 @@ pub(super) fn bump(args: &Args) -> Result<(), String> {
         .filter(|platform| declared_block.is_none_or(|block| !recipe.has_digest(block, *platform)))
         .collect();
 
+    // Following release lines, an older line's version never becomes the
+    // default.
+    let lines = catalog
+        .upstreams(name)
+        .into_iter()
+        .find_map(|(_, upstream)| upstream.lines.as_ref());
+    let defaulted: Vec<Platform> = platforms
+        .iter()
+        .copied()
+        .filter(|&platform| {
+            let default = catalog.default_version(name, platform).unwrap_or_default();
+            lines.is_none() || version::compare(version, default) != Ordering::Less
+        })
+        .collect();
+
     let is_default =
         |platform: &Platform| catalog.default_version(name, *platform) == Some(version);
-    if declared_block.is_some() && missing.is_empty() && platforms.iter().all(is_default) {
+    if declared_block.is_some() && missing.is_empty() && defaulted.iter().all(is_default) {
         return print(&Bumped {
             name,
             version,
@@ -139,11 +158,21 @@ pub(super) fn bump(args: &Args) -> Result<(), String> {
         serial: args.serial,
     };
     let depended = catalog.depended_on(name);
-    let (text, dropped) = recipe.with(&entry, &platforms, args.keep, &depended)?;
+    let keep = args.keep.map(|keep| match lines {
+        Some(lines) => Keep::Lines(lines),
+        None => Keep::Newest(keep),
+    });
+    let (text, dropped) = recipe.with(&entry, &defaulted, keep, &depended)?;
+    if dropped.iter().any(|dropped| dropped == version) {
+        return Err(format!(
+            "{name}@{version} isn't the newest of a release line {name} keeps"
+        ));
+    }
+
     fs::write(&path, &text).map_err(|error| format!("{}: {error}", path.display()))?;
 
     // The edit must leave a recipe that still evaluates, or it's undone.
-    if let Err(error) = evaluates(&args.sources, name, version, &platforms) {
+    if let Err(error) = evaluates(&args.sources, name, version, &platforms, &defaulted) {
         fs::write(&path, &original).map_err(|restore| {
             format!(
                 "{name}@{version} doesn't evaluate ({error}) and restoring {} failed: \
@@ -166,33 +195,39 @@ pub(super) fn bump(args: &Args) -> Result<(), String> {
     })
 }
 
-/// Whether `platforms` now default to `version` and every platform's default
-/// evaluates.
+/// Whether `defaulted` now default to `version`, and it and every platform's
+/// default evaluate.
 fn evaluates(
     sources: &Sources,
     name: &str,
     version: &str,
     platforms: &[Platform],
+    defaulted: &[Platform],
 ) -> Result<(), String> {
     let (catalog, hosts) = load(sources)?;
-    if let Some(platform) = platforms
+    if let Some(platform) = defaulted
         .iter()
         .find(|&&platform| catalog.default_version(name, platform) != Some(version))
     {
         return Err(format!("{platform} doesn't default to it"));
     }
 
-    let targets: Vec<Target> = catalog
+    let target = |version: &str, platform| Target {
+        name: name.to_string(),
+        version: version.to_string(),
+        platform,
+    };
+    let mut targets: Vec<Target> = catalog
         .platforms(name)
         .into_iter()
-        .filter_map(|platform| {
-            Some(Target {
-                name: name.to_string(),
-                version: catalog.default_version(name, platform)?.to_string(),
-                platform,
-            })
-        })
+        .filter_map(|platform| Some(target(catalog.default_version(name, platform)?, platform)))
         .collect();
+
+    let added = platforms
+        .iter()
+        .filter(|platform| !defaulted.contains(platform))
+        .map(|&platform| target(version, platform));
+    targets.extend(added);
 
     catalog
         .evaluate(&hosts, &targets)
@@ -204,6 +239,15 @@ fn print(bumped: &Bumped) -> Result<(), String> {
     let json = serde_json::to_string(bumped).map_err(|error| error.to_string())?;
     println!("{json}");
     Ok(())
+}
+
+/// Which versions a bump keeps.
+#[derive(Clone, Copy)]
+enum Keep<'a> {
+    /// The newest this many.
+    Newest(usize),
+    /// The newest of each release line.
+    Lines(&'a Lines),
 }
 
 /// A version to add, as the recipe will record it.
@@ -264,7 +308,7 @@ impl<'a> Recipe<'a> {
         &self,
         entry: &Entry,
         platforms: &[Platform],
-        keep: Option<usize>,
+        keep: Option<Keep>,
         depended: &BTreeSet<&str>,
     ) -> Result<(String, Vec<String>), String> {
         let mut text = self.text.to_string();
@@ -309,7 +353,8 @@ impl<'a> Recipe<'a> {
         blocks.insert(entry.version.to_string(), block);
 
         let dropped = match keep {
-            Some(keep) => newest_beyond(&blocks, keep, &kept, self.unit),
+            Some(Keep::Newest(keep)) => newest_beyond(&blocks, keep, &kept, self.unit),
+            Some(Keep::Lines(lines)) => beyond_lines(&blocks, lines, &kept),
             None => Vec::new(),
         };
 
@@ -486,6 +531,34 @@ fn newest_beyond(
         .collect()
 }
 
+/// The versions that aren't the newest of one of the newest lines. Versions
+/// in `kept` or in no line are never dropped.
+fn beyond_lines(
+    blocks: &BTreeMap<String, String>,
+    lines: &Lines,
+    kept: &BTreeSet<String>,
+) -> Vec<String> {
+    let mut newest: BTreeMap<Vec<u64>, &String> = BTreeMap::new();
+    for version in blocks.keys() {
+        let Some(line) = lines.line(version) else {
+            continue;
+        };
+
+        let newer = newest.entry(line).or_insert(version);
+        if version::compare(version, newer) == Ordering::Greater {
+            *newer = version;
+        }
+    }
+
+    let followed: BTreeSet<&String> = newest.into_values().rev().take(lines.keep).collect();
+    blocks
+        .keys()
+        .filter(|version| lines.line(version).is_some())
+        .filter(|version| !followed.contains(version) && !kept.contains(*version))
+        .cloned()
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -565,14 +638,16 @@ mod tests {
 
         // Linux still defaults to 1.9.0, so 1.10.0 goes instead.
         let (text, dropped) = recipe
-            .with(&entry, &macos, Some(1), &BTreeSet::new())
+            .with(&entry, &macos, Some(Keep::Newest(1)), &BTreeSet::new())
             .unwrap();
         assert_eq!(dropped, ["1.10.0"]);
         assert!(text.contains(r#"["1.9.0"] = {"#));
         assert!(text.contains(r#"default_version = "1.9.0", -- until 1.10 builds"#));
 
         let depended = BTreeSet::from(["1.10.0"]);
-        let (_, dropped) = recipe.with(&entry, &macos, Some(1), &depended).unwrap();
+        let (_, dropped) = recipe
+            .with(&entry, &macos, Some(Keep::Newest(1)), &depended)
+            .unwrap();
         assert!(dropped.is_empty());
     }
 
@@ -613,6 +688,61 @@ mod tests {
         ]);
 
         assert_eq!(newest_beyond(&blocks, 2, &BTreeSet::new(), "    "), ["b"]);
+    }
+
+    #[test]
+    fn release_lines_keep_the_newest_version_of_each() {
+        let lines = Lines {
+            by: rootbeer_eval::LineBy::Major,
+            keep: 2,
+        };
+        let blocks: BTreeMap<String, String> = ["26.2.0", "26.10.0", "24.3.0", "24.1.0", "22.9.0"]
+            .into_iter()
+            .map(|version| (version.to_string(), String::new()))
+            .collect();
+
+        assert_eq!(
+            beyond_lines(&blocks, &lines, &BTreeSet::new()),
+            ["22.9.0", "24.1.0", "26.2.0"]
+        );
+
+        let kept = BTreeSet::from(["22.9.0".to_string()]);
+        assert_eq!(beyond_lines(&blocks, &lines, &kept), ["24.1.0", "26.2.0"]);
+    }
+
+    #[test]
+    fn an_older_line_is_added_beside_the_default() {
+        let recipe = Recipe::read(RECIPE).unwrap();
+        let both = [Platform::Aarch64Macos, Platform::X86_64Linux];
+        let digests = digests(&both);
+        let entry = Entry {
+            version: "1.8.5",
+            digests: &digests,
+            commit: None,
+            serial: None,
+        };
+        let lines = Lines {
+            by: rootbeer_eval::LineBy::Minor,
+            keep: 2,
+        };
+
+        // No platform moves, so 1.10 and 1.9 stay the two lines kept.
+        let (text, dropped) = recipe
+            .with(&entry, &[], Some(Keep::Lines(&lines)), &BTreeSet::new())
+            .unwrap();
+        assert_eq!(dropped, ["1.8.5"]);
+        assert_eq!(text, RECIPE);
+
+        let entry = Entry {
+            version: "1.9.4",
+            ..entry
+        };
+        let (text, dropped) = recipe
+            .with(&entry, &[], Some(Keep::Lines(&lines)), &BTreeSet::new())
+            .unwrap();
+        assert!(dropped.is_empty());
+        assert!(text.contains(r#"["1.9.4"] = {"#));
+        assert_eq!(text.matches(r#"default_version = "1.9.0","#).count(), 2);
     }
 
     #[test]
