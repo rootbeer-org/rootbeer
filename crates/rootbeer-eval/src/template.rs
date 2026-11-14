@@ -64,9 +64,7 @@ impl Values<'_> {
         });
 
         if value.contains("{dependencies.") {
-            return Err(format!(
-                "`{text}` names an undeclared build or linked dependency"
-            ));
+            return Err(format!("`{text}` names an undeclared dependency"));
         }
 
         if value.contains("{runtime:") {
@@ -210,7 +208,7 @@ mod tests {
         );
         assert_eq!(
             values.command(&["{dependencies.xz}"]).unwrap_err(),
-            "`{dependencies.xz}` names an undeclared build or linked dependency"
+            "`{dependencies.xz}` names an undeclared dependency"
         );
     }
 }

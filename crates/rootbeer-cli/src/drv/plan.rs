@@ -1,6 +1,6 @@
 use super::cache::{self, Caches};
 use super::{load, target, Sources};
-use rootbeer_drv::{DependencyKind, Derivation, Key, Platform};
+use rootbeer_drv::{Derivation, Key, Platform};
 use rootbeer_eval::{Catalog, Graph, Target};
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -129,10 +129,6 @@ impl<'a, F: FnMut(&str, &Key) -> Result<bool, String>> Planner<'a, F> {
 
         let mut level = 0;
         for dependency in &build.dependencies {
-            if dependency.kind == DependencyKind::Runtime {
-                continue;
-            }
-
             let below = self
                 .builds
                 .get(&dependency.key)
@@ -217,7 +213,7 @@ mod tests {
     }
 
     #[test]
-    fn levels_stop_at_cached_packages_and_ignore_runtime_dependencies() {
+    fn levels_stop_at_cached_packages_and_wait_for_every_dependency() {
         use DependencyKind::{Build, Linked, Runtime};
 
         let mut graph = Graph::default();
@@ -244,7 +240,7 @@ mod tests {
         assert_eq!(
             uncached,
             [
-                vec!["cmake@3", "cmake@4", "xz@5"],
+                vec!["cmake@3", "cmake@4", "docs@1", "xz@5"],
                 vec!["zlib@1"],
                 vec!["zstd@1"]
             ]
@@ -252,7 +248,7 @@ mod tests {
 
         let zlib = graph.packages[&zlib].build.clone();
         let cached = levels(&graph, &targets, |_, key| Ok(*key == zlib)).unwrap();
-        assert_eq!(cached, [vec!["cmake@4", "xz@5"], vec!["zstd@1"]]);
+        assert_eq!(cached, [vec!["cmake@4", "docs@1", "xz@5"], vec!["zstd@1"]]);
     }
 
     #[test]
