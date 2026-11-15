@@ -1,5 +1,5 @@
-use super::{git, github, load, Sources};
-use globset::{Glob, GlobSetBuilder};
+use super::{git, github, listing, load, Sources};
+use globset::{Glob, GlobSet, GlobSetBuilder};
 use rootbeer_drv::Platform;
 use rootbeer_eval::{Catalog, Lines, Rolling, Upstream};
 use rootbeer_profile::is_repository;
@@ -181,7 +181,14 @@ impl Checker<'_> {
             .any(|(_, upstream)| upstream.should_automerge);
         let mut advanced = Vec::new();
         for (platforms, upstream) in upstreams {
-            let (repository, github) = locate(upstream).map_err(problem)?;
+            let origin = locate(upstream).map_err(problem)?;
+            let github = origin.github();
+            if upstream.interval_days.is_some() && github.is_none() {
+                return Err(error(
+                    "its interval_days needs a github repository to date releases".into(),
+                ));
+            }
+
             if let Some(rolling) = &upstream.rolling {
                 let Some(github) = github else {
                     return Err(error(
@@ -209,11 +216,7 @@ impl Checker<'_> {
                 })
                 .collect::<Result<Vec<_>, Line>>()?;
 
-            // A pooled connection the server already closed fails once, so
-            // a second try gets a fresh one.
-            let tags = git::tags(&self.agent, &repository)
-                .or_else(|_| git::tags(&self.agent, &repository))
-                .map_err(error)?;
+            let tags = self.tags(&origin).map_err(error)?;
             let candidates = candidates(upstream, tags).map_err(error)?;
             let mut is_verified = false;
             for (platform, current) in currents {
@@ -272,14 +275,63 @@ impl Checker<'_> {
             }
 
             for candidate in newer {
-                if self.is_available(name, github, candidate, platform)? {
-                    advanced.push(Advance::to(platform, candidate));
-                    break;
+                if !self.is_available(name, github, candidate, platform)? {
+                    continue;
                 }
+
+                let had = candidates
+                    .iter()
+                    .find(|candidate| candidate.numbers == current);
+                if self
+                    .is_due(upstream, github, had, candidate)
+                    .map_err(Problem::Error)?
+                {
+                    advanced.push(Advance::to(platform, candidate));
+                }
+
+                break;
             }
         }
 
         Ok(advanced)
+    }
+
+    /// Whether a release is far enough past the one a platform has for an
+    /// upstream that sets `interval_days`. It is when the upstream sets none,
+    /// or no tag names what the platform has.
+    fn is_due(
+        &self,
+        upstream: &Upstream,
+        github: Option<&str>,
+        had: Option<&Candidate>,
+        candidate: &Candidate,
+    ) -> Result<bool, String> {
+        let (Some(interval), Some(github), Some(had)) = (upstream.interval_days, github, had)
+        else {
+            return Ok(true);
+        };
+
+        let day = |commit: &str| {
+            let committed = github::committed(github, commit)?;
+            day(&committed)
+                .ok_or_else(|| format!("commit {commit} has the unexpected date {committed}"))
+        };
+
+        Ok(day(&candidate.commit)?.saturating_sub(day(&had.commit)?) >= interval)
+    }
+
+    /// The tags an upstream's releases are named by.
+    fn tags(&self, origin: &Origin) -> Result<Vec<git::Tag>, String> {
+        // A pooled connection the server already closed fails once, so a
+        // second try gets a fresh one.
+        match origin {
+            Origin::Git { url, .. } => {
+                git::tags(&self.agent, url).or_else(|_| git::tags(&self.agent, url))
+            }
+            Origin::Listing(url) => {
+                listing::tags(&self.agent, url).or_else(|_| listing::tags(&self.agent, url))
+            }
+        }
     }
 
     /// The platforms that advance to the build a rolling tag names now. The
@@ -296,10 +348,12 @@ impl Checker<'_> {
         if upstream.tag.is_some()
             || upstream.separator.is_some()
             || !upstream.exclude_tags.is_empty()
+            || !upstream.include_tags.is_empty()
+            || upstream.interval_days.is_some()
         {
             return Err(error(
-                "its rolling upstream follows one tag, so tag, separator, and exclude_tags \
-                 don't apply"
+                "its rolling upstream follows one tag, so tag, separator, exclude_tags, \
+                 include_tags, and interval_days don't apply"
                     .into(),
             ));
         }
@@ -461,44 +515,60 @@ enum Problem {
     Skipped(String),
 }
 
-/// The URL an upstream's tags are fetched from, and its GitHub repository.
-fn locate(upstream: &Upstream) -> Result<(String, Option<&str>), Problem> {
-    match (&upstream.github, &upstream.git) {
-        (Some(repository), None) if is_repository(repository) => Ok((
-            format!("https://github.com/{repository}.git"),
-            Some(repository),
-        )),
-        (Some(repository), None) => Err(Problem::Error(format!(
+/// Where an upstream's tags are read from.
+#[derive(Debug, PartialEq, Eq)]
+enum Origin<'a> {
+    Git {
+        url: String,
+        github: Option<&'a str>,
+    },
+    Listing(&'a str),
+}
+
+impl Origin<'_> {
+    fn github(&self) -> Option<&str> {
+        match self {
+            Origin::Git { github, .. } => *github,
+            Origin::Listing(_) => None,
+        }
+    }
+}
+
+/// The one place an upstream names for its tags.
+fn locate(upstream: &Upstream) -> Result<Origin<'_>, Problem> {
+    let error = |message: String| Err(Problem::Error(message));
+    match (&upstream.github, &upstream.git, &upstream.listing) {
+        (Some(repository), None, None) if is_repository(repository) => Ok(Origin::Git {
+            url: format!("https://github.com/{repository}.git"),
+            github: Some(repository),
+        }),
+        (Some(repository), None, None) => error(format!(
             "its upstream github:{repository} isn't in the form owner/repo"
-        ))),
-        (None, Some(url)) if url.starts_with("https://") => Ok((url.clone(), None)),
-        (None, Some(url)) => Err(Problem::Error(format!(
+        )),
+        (None, Some(url), None) if url.starts_with("https://") => Ok(Origin::Git {
+            url: url.clone(),
+            github: None,
+        }),
+        (None, Some(url), None) => error(format!(
             "its upstream git repository {url} isn't an https URL"
-        ))),
-        (Some(_), Some(_)) => Err(Problem::Error(
-            "its upstream names both a github and a git repository".into(),
         )),
-        (None, None) => Err(Problem::Skipped(
-            "its upstream names neither a github nor a git repository".into(),
+        (None, None, Some(url)) if url.starts_with("https://") => Ok(Origin::Listing(url)),
+        (None, None, Some(url)) => error(format!("its upstream listing {url} isn't an https URL")),
+        (None, None, None) => Err(Problem::Skipped(
+            "its upstream names no github repository, git repository, or listing".into(),
         )),
+        _ => error("its upstream names more than one of github, git, and listing".into()),
     }
 }
 
 /// The stable versions tags name, newest first.
 fn candidates(upstream: &Upstream, tags: Vec<git::Tag>) -> Result<Vec<Candidate>, String> {
-    let mut excluded = GlobSetBuilder::new();
-    for pattern in &upstream.exclude_tags {
-        let glob = Glob::new(pattern)
-            .map_err(|err| format!("its excluded tag {pattern} isn't a valid glob ({err})"))?;
-        excluded.add(glob);
-    }
-    let excluded = excluded
-        .build()
-        .map_err(|err| format!("its excluded tags don't form a glob set ({err})"))?;
-
+    let excluded = globs(&upstream.exclude_tags, "excluded")?;
+    let included = globs(&upstream.include_tags, "included")?;
     let mut candidates: Vec<Candidate> = tags
         .into_iter()
         .filter(|tag| !excluded.is_match(&tag.name))
+        .filter(|tag| included.is_empty() || included.is_match(&tag.name))
         .filter_map(|tag| {
             let version = upstream.version_of(&tag.name)?;
             Some(Candidate {
@@ -514,6 +584,19 @@ fn candidates(upstream: &Upstream, tags: Vec<git::Tag>) -> Result<Vec<Candidate>
 
     candidates.sort_by(|a, b| (&b.numbers, &b.version).cmp(&(&a.numbers, &a.version)));
     Ok(candidates)
+}
+
+fn globs(patterns: &[String], kind: &str) -> Result<GlobSet, String> {
+    let mut globs = GlobSetBuilder::new();
+    for pattern in patterns {
+        let glob = Glob::new(pattern)
+            .map_err(|err| format!("its {kind} tag {pattern} isn't a valid glob ({err})"))?;
+        globs.add(glob);
+    }
+
+    globs
+        .build()
+        .map_err(|err| format!("its {kind} tags don't form a glob set ({err})"))
 }
 
 /// The candidates of each release line an upstream follows, newest line
@@ -612,6 +695,26 @@ fn serial(date: &str) -> Option<u64> {
     (digits.len() == 14).then(|| digits.parse().ok()).flatten()
 }
 
+/// The day a date like `2026-10-30T00:57:35Z` falls on, counted from the
+/// start of 1970.
+fn day(date: &str) -> Option<u64> {
+    let mut parts = date
+        .get(..10)?
+        .split('-')
+        .map(|part| part.parse::<u64>().ok());
+    let (year, month, day) = (parts.next()??, parts.next()??, parts.next()??);
+    if year < 1970 || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+
+    // Counting years from March puts the leap day last, so a month's offset
+    // doesn't depend on the year.
+    let year = if month <= 2 { year - 1 } else { year };
+    let month = (month + 9) % 12;
+    let days = year * 365 + year / 4 - year / 100 + year / 400 + (month * 153 + 2) / 5 + day - 1;
+    days.checked_sub(719_468)
+}
+
 /// One update line per version, naming every platform that advances to it.
 /// Platforms that would build from different commits get their own lines.
 fn group(
@@ -679,6 +782,9 @@ mod tests {
             tag: Some(tag.into()),
             separator: separator.map(String::from),
             exclude_tags: exclude.iter().map(|tag| tag.to_string()).collect(),
+            include_tags: Vec::new(),
+            interval_days: None,
+            listing: None,
             rolling: None,
             lines: None,
             should_automerge: false,
@@ -734,6 +840,70 @@ mod tests {
 
         let broken = upstream("v{version}", None, &["v5.[13"]);
         assert!(candidates(&broken, tags(&["v5.44.1"])).is_err());
+    }
+
+    #[test]
+    fn included_tags_narrow_the_releases_to_what_they_match() {
+        let mut vim = upstream("v{version}", None, &["v9.1.*"]);
+        vim.include_tags = vec!["v*00".into()];
+        let found = candidates(
+            &vim,
+            tags(&[
+                "v9.1.1300",
+                "v9.2.1200",
+                "v9.2.1299",
+                "v9.2.1300",
+                "v9.2.1301",
+            ]),
+        )
+        .unwrap();
+        let found: Vec<&Candidate> = found.iter().collect();
+        assert_eq!(versions(&found), ["9.2.1300", "9.2.1200"]);
+
+        vim.include_tags = vec!["v[".into()];
+        assert!(candidates(&vim, tags(&["v9.2.1300"])).is_err());
+    }
+
+    #[test]
+    fn an_upstream_names_one_place_for_its_tags() {
+        let mut nmap = upstream("nmap-{version}.tgz", None, &[]);
+        nmap.listing = Some("https://nmap.org/dist/".into());
+        assert!(
+            locate(&nmap).is_ok_and(|origin| origin == Origin::Listing("https://nmap.org/dist/"))
+        );
+
+        let found = candidates(
+            &nmap,
+            tags(&[
+                "nmap-7.98.tgz",
+                "nmap-7.99.tgz",
+                "nmap-7.99.tar.bz2",
+                "nmap-7.99-setup.exe",
+            ]),
+        )
+        .unwrap();
+        let found: Vec<&Candidate> = found.iter().collect();
+        assert_eq!(versions(&found), ["7.99", "7.98"]);
+
+        nmap.github = Some("nmap/nmap".into());
+        assert!(matches!(locate(&nmap), Err(Problem::Error(_))));
+
+        nmap.github = None;
+        nmap.listing = Some("http://nmap.org/dist/".into());
+        assert!(matches!(locate(&nmap), Err(Problem::Error(_))));
+    }
+
+    #[test]
+    fn a_date_falls_on_a_day_counted_from_1970() {
+        assert_eq!(day("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(day("2000-02-29T12:00:00Z"), Some(11_016));
+        assert_eq!(day("2000-03-01T00:00:00Z"), Some(11_017));
+        assert_eq!(
+            day("2026-11-15T23:59:59Z").unwrap() - day("2026-11-01T00:00:00Z").unwrap(),
+            14
+        );
+        assert_eq!(day("2026-13-01T00:00:00Z"), None);
+        assert_eq!(day("yesterday"), None);
     }
 
     #[test]

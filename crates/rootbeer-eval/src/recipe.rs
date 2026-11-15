@@ -40,6 +40,9 @@ pub struct Upstream {
     pub github: Option<String>,
     /// A git repository's HTTPS URL.
     pub git: Option<String>,
+    /// A download page's HTTPS URL, for an upstream whose releases are files
+    /// rather than tags. Each name the page links to stands for a tag.
+    pub listing: Option<String>,
     /// The GitHub repository's numeric ID, which a rename keeps and a new
     /// repository under the same name doesn't.
     pub repository_id: Option<u64>,
@@ -51,6 +54,14 @@ pub struct Upstream {
     /// `v5.?[13579].*` leaves out every odd minor.
     #[serde(default)]
     pub exclude_tags: Vec<String>,
+    /// Globs a tag must match one of to be a release. Every tag that fits
+    /// the template is one when unset.
+    #[serde(default)]
+    pub include_tags: Vec<String>,
+    /// The fewest days between the release a platform has and one it
+    /// advances to, by when GitHub says their tags were committed. Every
+    /// release is taken when unset.
+    pub interval_days: Option<u64>,
     /// A tag upstream moves to each new build, followed instead of version
     /// tags.
     pub rolling: Option<Rolling>,
