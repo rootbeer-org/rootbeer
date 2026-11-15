@@ -40,6 +40,9 @@ return {
   retained version and rekey it, so give a build change to one version as an
   override on that version.
 - Declare only platforms CI can verify, with checks that exercise the tool.
+- Keep a source's patches as `.patch` files in a directory named after the
+  recipe, such as `packages/unzip/`, and list their file names in order under
+  `source.patches`. A patch's content keys the build.
 
 ## Build and check locally
 

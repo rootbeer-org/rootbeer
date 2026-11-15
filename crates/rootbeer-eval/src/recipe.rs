@@ -461,6 +461,38 @@ impl Lines {
     }
 }
 
+impl Recipe {
+    /// Replaces each patch a source names by file with that file's diff. An
+    /// entry of more than one line is the diff itself.
+    pub(crate) fn read_patches(
+        &mut self,
+        files: Option<&BTreeMap<String, String>>,
+    ) -> Result<(), String> {
+        let specs = std::iter::once(&mut self.shared)
+            .chain(
+                self.platforms
+                    .values_mut()
+                    .map(|platform| &mut platform.spec),
+            )
+            .chain(self.versions.values_mut().map(|version| &mut version.spec));
+
+        for source in specs.filter_map(|spec| spec.source.as_mut()) {
+            for patch in &mut source.patches {
+                if patch.contains('\n') {
+                    continue;
+                }
+
+                let diff = files
+                    .and_then(|files| files.get(patch.as_str()))
+                    .ok_or_else(|| format!("its patch {patch} isn't a file in {}/", self.name))?;
+                *patch = diff.clone();
+            }
+        }
+
+        Ok(())
+    }
+}
+
 impl Spec {
     /// Platform and version overrides replace a shared field outright.
     fn overlay(&self, over: &Spec) -> Spec {

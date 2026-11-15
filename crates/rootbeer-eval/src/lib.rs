@@ -21,6 +21,9 @@ pub struct Catalog {
     recipes: BTreeMap<String, Recipe>,
 }
 
+/// Each recipe's patch files by recipe name, as file names and their diffs.
+pub type Patches = BTreeMap<String, BTreeMap<String, String>>;
+
 /// Where a version downloads from on one platform.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Download {
@@ -126,9 +129,19 @@ impl Graph {
 }
 
 impl Catalog {
-    /// Parses `(file name, recipe source)` pairs.
+    /// Parses `(file name, recipe source)` pairs whose recipes name no patch
+    /// files.
     pub fn parse<'a>(
         files: impl IntoIterator<Item = (&'a str, &'a str)>,
+    ) -> Result<Catalog, Error> {
+        Catalog::parse_with_patches(files, &Patches::new())
+    }
+
+    /// Parses `(file name, recipe source)` pairs, reading the patch files
+    /// their sources name from `patches`.
+    pub fn parse_with_patches<'a>(
+        files: impl IntoIterator<Item = (&'a str, &'a str)>,
+        patches: &Patches,
     ) -> Result<Catalog, Error> {
         let mut recipes = BTreeMap::new();
         for (file, source) in files {
@@ -140,6 +153,9 @@ impl Catalog {
             let mut recipe = recipe::load::<Recipe>(file, source)
                 .map_err(|error| parse_error(error.to_string()))?;
             recipe.has_commit_placeholder = source.contains("{commit}");
+            recipe
+                .read_patches(patches.get(&recipe.name))
+                .map_err(parse_error)?;
             if recipes.contains_key(&recipe.name) {
                 return Err(parse_error(format!("{} is declared twice", recipe.name)));
             }
