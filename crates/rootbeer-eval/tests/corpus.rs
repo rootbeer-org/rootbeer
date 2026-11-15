@@ -1,5 +1,5 @@
 use rootbeer_drv::Platform;
-use rootbeer_eval::{Catalog, Host};
+use rootbeer_eval::{Catalog, Host, Patches};
 use std::collections::BTreeMap;
 use std::fs;
 
@@ -20,10 +20,31 @@ fn every_declared_target_evaluates() {
         .collect::<Vec<_>>();
 
     files.sort();
-    let catalog = Catalog::parse(
+    let mut patches = Patches::new();
+    for directory in fs::read_dir(&directory).unwrap() {
+        let directory = directory.unwrap().path();
+        if !directory.is_dir() {
+            continue;
+        }
+
+        let name = |path: &std::path::Path| path.file_name().unwrap().to_str().unwrap().to_string();
+        let diffs = fs::read_dir(&directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "patch")
+            })
+            .map(|path| (name(&path), fs::read_to_string(&path).unwrap()))
+            .collect();
+        patches.insert(name(&directory), diffs);
+    }
+
+    let catalog = Catalog::parse_with_patches(
         files
             .iter()
             .map(|(file, source)| (file.as_str(), source.as_str())),
+        &patches,
     )
     .unwrap();
 

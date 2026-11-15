@@ -22,7 +22,7 @@ pub(crate) use configuration::{check_lock, configure, link_default_apps};
 
 use rootbeer_cache::Cache;
 use rootbeer_drv::{fetch_path, output_path, Build, Derivation, Key, Platform, STORE_ROOT};
-use rootbeer_eval::{Catalog, Graph, Host, Target};
+use rootbeer_eval::{Catalog, Graph, Host, Patches, Target};
 use rootbeer_sandbox::Request;
 use rootbeer_store::{Store, ROOT};
 use serde::{Deserialize, Serialize};
@@ -763,10 +763,11 @@ pub(super) fn load_from(
         .iter()
         .map(|path| Ok((path.display().to_string(), read(path)?)))
         .collect::<Result<Vec<_>, String>>()?;
-    let catalog = Catalog::parse(
+    let catalog = Catalog::parse_with_patches(
         files
             .iter()
             .map(|(file, text)| (file.as_str(), text.as_str())),
+        &patches(directory)?,
     )
     .map_err(|error| error.to_string())?;
 
@@ -775,6 +776,52 @@ pub(super) fn load_from(
         Host::parse(&host.display().to_string(), &hosts).map_err(|error| error.to_string())?;
 
     Ok((catalog, hosts))
+}
+
+/// The `.patch` files each recipe keeps in a directory named after it, beside
+/// its recipe file.
+fn patches(catalog: &Path) -> Result<Patches, String> {
+    let list = |directory: &Path| {
+        fs::read_dir(directory)
+            .and_then(|entries| {
+                entries
+                    .map(|entry| Ok(entry?.path()))
+                    .collect::<std::io::Result<Vec<_>>>()
+            })
+            .map_err(|error| format!("{}: {error}", directory.display()))
+    };
+
+    let name = |path: &Path| {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .map(str::to_string)
+            .ok_or_else(|| format!("{} isn't named in UTF-8", path.display()))
+    };
+
+    let mut patches = Patches::new();
+    for directory in list(catalog)? {
+        if !directory.is_dir() {
+            continue;
+        }
+
+        let mut files = BTreeMap::new();
+        for path in list(&directory)? {
+            if path
+                .extension()
+                .is_none_or(|extension| extension != "patch")
+            {
+                continue;
+            }
+
+            let diff = fs::read_to_string(&path)
+                .map_err(|error| format!("{}: {error}", path.display()))?;
+            files.insert(name(&path)?, diff);
+        }
+
+        patches.insert(name(&directory)?, files);
+    }
+
+    Ok(patches)
 }
 
 fn this_platform() -> Result<Platform, String> {
@@ -793,6 +840,44 @@ fn parse_platform(name: &str) -> Result<Platform, String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_recipe_reads_its_patches_from_the_directory_named_after_it() {
+        let root = tempfile::tempdir().unwrap();
+        let packages = root.path().join("packages");
+        fs::create_dir(&packages).unwrap();
+        let recipe = format!(
+            r#"return {{
+                name = "fixed", description = "", homepage = "", default_license = "MIT",
+                source = {{ url = "https://example.com/fixed.tar.gz", patches = {{ "main.patch" }} }},
+                build = {{ backend = "custom", steps = {{}} }},
+                platforms = {{ ["x86_64-linux"] = {{ default_version = "1" }} }},
+                versions = {{ ["1"] = {{ digests = {{ ["x86_64-linux"] = "{}" }} }} }},
+            }}"#,
+            "0".repeat(64)
+        );
+        fs::write(packages.join("fixed.lua"), recipe).unwrap();
+        let host = root.path().join("host.lua");
+        fs::write(
+            &host,
+            r#"return { ["x86_64-linux"] = { system = "test" } }"#,
+        )
+        .unwrap();
+
+        let error = load_from(&packages, &host).err().unwrap();
+        assert!(error.ends_with("its patch main.patch isn't a file in fixed/"));
+
+        fs::create_dir(packages.join("fixed")).unwrap();
+        fs::write(packages.join("fixed/notes.txt"), "not a patch").unwrap();
+        let diff = "--- a/main.c\n+++ b/main.c\n@@ -1 +1 @@\n-old\n+new\n";
+        fs::write(packages.join("fixed/main.patch"), diff).unwrap();
+
+        let (catalog, hosts) = load_from(&packages, &host).unwrap();
+        let graph = catalog.evaluate(&hosts, &catalog.targets()).unwrap();
+        let package = graph.packages.values().next().unwrap();
+        let script = graph.derivations[&package.build].to_string();
+        assert!(script.contains("+new"));
+    }
 
     #[test]
     fn reasons_name_the_entries_that_changed() {

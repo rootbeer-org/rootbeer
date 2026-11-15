@@ -1,7 +1,7 @@
 #![cfg(test)]
 
 use rootbeer_drv::{DependencyKind, Derivation, Platform};
-use rootbeer_eval::{Catalog, Error, Host, LineBy, Lines, Target};
+use rootbeer_eval::{Catalog, Error, Host, LineBy, Lines, Patches, Target};
 use std::collections::BTreeMap;
 
 const FIXTURES: [(&str, &str); 13] = [
@@ -176,6 +176,44 @@ fn cycles_name_every_package_in_them() {
 
     let error = catalog.evaluate(&hosts("a"), &[target]).unwrap_err();
     assert_eq!(error.to_string(), "dependency cycle: a@1 -> b@1 -> a@1");
+}
+
+#[test]
+fn a_patch_file_keys_a_build_like_the_same_diff_inline() {
+    const DIFF: &str = "--- a/main.c\n+++ b/main.c\n@@ -1 +1 @@\n-old\n+new\n";
+    let recipe = |patch: &str| {
+        format!(
+            r#"return {{
+                name = "fixed", description = "", homepage = "", default_license = "MIT",
+                source = {{ url = "https://example.com/fixed.tar.gz", patches = {{ {patch} }} }},
+                build = {{ backend = "custom", steps = {{}} }},
+                platforms = {{ ["x86_64-linux"] = {{ default_version = "1" }} }},
+                versions = {{ ["1"] = {{ digests = {{ ["x86_64-linux"] = "{}" }} }} }},
+            }}"#,
+            "0".repeat(64)
+        )
+    };
+
+    let key = |catalog: Catalog| {
+        let graph = catalog.evaluate(&hosts("a"), &catalog.targets()).unwrap();
+        graph.packages.values().next().unwrap().build.to_string()
+    };
+
+    let inline = recipe(&format!("{DIFF:?}"));
+    let named = recipe(r#""main.patch""#);
+    let files = Patches::from([(
+        "fixed".to_string(),
+        BTreeMap::from([("main.patch".to_string(), DIFF.to_string())]),
+    )]);
+
+    let from_file = Catalog::parse_with_patches([("fixed.lua", named.as_str())], &files).unwrap();
+    let from_text = Catalog::parse([("fixed.lua", inline.as_str())]).unwrap();
+    assert_eq!(key(from_file), key(from_text));
+
+    assert_eq!(
+        parse_error(&named),
+        "its patch main.patch isn't a file in fixed/"
+    );
 }
 
 #[test]
