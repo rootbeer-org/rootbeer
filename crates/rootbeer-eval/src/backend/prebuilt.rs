@@ -84,7 +84,7 @@ impl Package<'_> {
         };
 
         let install = prebuilt.install.clone().or_else(|| infer_install(&file));
-        Ok((self.fetch(download.url), install))
+        Ok((self.fetch(vec![download.url]), install))
     }
 
     pub(crate) fn unpack(
