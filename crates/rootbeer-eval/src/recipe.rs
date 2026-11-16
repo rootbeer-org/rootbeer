@@ -175,6 +175,8 @@ pub(crate) enum ArchiveFormat {
 #[serde(deny_unknown_fields)]
 pub(crate) struct Source {
     pub url: String,
+    #[serde(default)]
+    pub mirrors: Vec<String>,
     // Selects HEAD builds from a repository, release builds ignore this
     #[serde(rename = "git")]
     _git: Option<IgnoredAny>,

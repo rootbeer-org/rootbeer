@@ -43,6 +43,9 @@ return {
 - Keep a source's patches as `.patch` files in a directory named after the
   recipe, such as `packages/unzip/`, and list their file names in order under
   `source.patches`. A patch's content keys the build.
+- List `source.mirrors` for fallback URLs tried in order after `source.url`,
+  with the same placeholders. They don't change keys, so use only URLs that
+  serve the same bytes.
 
 ## Build and check locally
 

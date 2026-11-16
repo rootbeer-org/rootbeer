@@ -217,6 +217,58 @@ fn a_patch_file_keys_a_build_like_the_same_diff_inline() {
 }
 
 #[test]
+fn source_mirrors_fill_templates_and_leave_the_build_key_alone() {
+    let recipe = |mirrors: &str| {
+        format!(
+            r#"return {{
+                name = "fixed", description = "", homepage = "", default_license = "MIT",
+                source = {{ url = "https://example.com/fixed-{{version}}.tar.gz"{mirrors} }},
+                build = {{ backend = "custom", steps = {{}} }},
+                platforms = {{ ["x86_64-linux"] = {{ default_version = "1.2.3" }} }},
+                versions = {{ ["1.2.3"] = {{ digests = {{ ["x86_64-linux"] = "{}" }} }} }},
+            }}"#,
+            "0".repeat(64)
+        )
+    };
+
+    let evaluate = |source: &str| {
+        let catalog = Catalog::parse([("fixed.lua", source)]).unwrap();
+        let graph = catalog.evaluate(&hosts("a"), &catalog.targets()).unwrap();
+        let fetches = graph
+            .derivations
+            .values()
+            .filter_map(|derivation| match derivation {
+                Derivation::Fetch(fetch) => Some(fetch.urls.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        (
+            graph.packages.values().next().unwrap().build.to_string(),
+            fetches,
+        )
+    };
+
+    let (plain_key, plain_fetches) = evaluate(&recipe(""));
+    let (mirrored_key, mirrored_fetches) = evaluate(&recipe(
+        r#", mirrors = { "https://mirror.example.com/{major}.{minor}/fixed-{version}.tar.gz" }"#,
+    ));
+
+    assert_eq!(plain_key, mirrored_key);
+    assert_eq!(
+        plain_fetches,
+        [vec!["https://example.com/fixed-1.2.3.tar.gz".to_string()]]
+    );
+    assert_eq!(
+        mirrored_fetches,
+        [vec![
+            "https://example.com/fixed-1.2.3.tar.gz".to_string(),
+            "https://mirror.example.com/1.2/fixed-1.2.3.tar.gz".to_string(),
+        ]]
+    );
+}
+
+#[test]
 fn runtime_dependencies_fill_placeholders_and_reach_the_check() {
     let recipe = |name: &str, build: &str, outputs: &str| {
         format!(

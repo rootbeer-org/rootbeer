@@ -42,7 +42,12 @@ struct Phases {
 
 impl Package<'_> {
     pub(crate) fn source(&self, source: &Source) -> Result<Fetch, String> {
-        Ok(self.fetch(self.resolved.values.literal(&source.url)?))
+        let urls = std::iter::once(&source.url)
+            .chain(&source.mirrors)
+            .map(|url| self.resolved.values.literal(url))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(self.fetch(urls))
     }
 
     /// Go, Rust, and Zig fetch their locked dependencies with network, apart
@@ -218,10 +223,10 @@ impl Package<'_> {
         }))
     }
 
-    fn fetch(&self, url: String) -> Fetch {
+    fn fetch(&self, urls: Vec<String>) -> Fetch {
         Fetch {
             sha256: self.resolved.sha256.clone(),
-            urls: vec![url],
+            urls,
         }
     }
 
