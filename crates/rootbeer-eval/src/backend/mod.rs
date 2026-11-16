@@ -14,6 +14,8 @@ use std::path::Path;
 
 const PATCH_END: &str = "RB_PATCH";
 const UNPACKER: &str = "7zip";
+const SOURCE: &str = r#""${source}""#;
+const TAR: &str = r#""${TMPDIR}/source.tar""#;
 
 /// A package is a recipe's resolved values and the target it builds for.
 pub(crate) struct Package<'a> {
@@ -74,7 +76,8 @@ impl Package<'_> {
 
         let is_tool = |dependency: &&Dependency| {
             dependency.name == toolchain
-                || (dependency.name == UNPACKER && matches!(source.archive, ArchiveFormat::Zip))
+                || (dependency.name == UNPACKER
+                    && matches!(source.archive, ArchiveFormat::Zip | ArchiveFormat::TarBz2))
         };
 
         let tools = dependencies
@@ -232,8 +235,12 @@ impl Package<'_> {
 
     // Unpacks the source and applies patches
     fn prepare(&self, source: &Source, dependencies: &[Dependency]) -> Result<Vec<String>, String> {
-        if matches!(source.archive, ArchiveFormat::Zip) {
-            unpacker(dependencies, "zip source", "build.dependencies")?;
+        match source.archive {
+            ArchiveFormat::Zip => unpacker(dependencies, "zip source", "build.dependencies")?,
+            ArchiveFormat::TarBz2 => {
+                unpacker(dependencies, "tar.bz2 source", "build.dependencies")?;
+            }
+            ArchiveFormat::TarGz | ArchiveFormat::TarXz => {}
         }
 
         let mut lines = vec![extract(source.archive, ".")];
@@ -308,14 +315,19 @@ fn extract(format: ArchiveFormat, directory: &str) -> String {
     match format {
         ArchiveFormat::TarGz => format!(r#"tar -xzf "${{source}}" -C {directory}"#),
         ArchiveFormat::TarXz => format!(r#"tar -xJf "${{source}}" -C {directory}"#),
-        ArchiveFormat::Zip => seven_zip(directory),
+        ArchiveFormat::Zip => seven_zip(SOURCE, directory),
+        // 7-Zip opens one layer per run, so the tar goes through a file in between.
+        ArchiveFormat::TarBz2 => format!(
+            "7zz x -so -bsp0 {SOURCE} > {TAR}\n{}\nrm {TAR}",
+            seven_zip(TAR, directory)
+        ),
     }
 }
 
 // -spod takes the output path literally, -sns- skips alternate streams, and
 // -snld20 extracts every symlink as archived.
-fn seven_zip(directory: &str) -> String {
-    format!(r#"7zz x -y -bso0 -bsp0 -spod -sns- -snld20 -o{directory} "${{source}}""#)
+fn seven_zip(archive: &str, directory: &str) -> String {
+    format!("7zz x -y -bso0 -bsp0 -spod -sns- -snld20 -o{directory} {archive}")
 }
 
 /// Zip and DMG extraction runs `7zz` from a catalog 7zip on `PATH`.

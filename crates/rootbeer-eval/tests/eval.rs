@@ -335,7 +335,7 @@ fn recipes_are_sandboxed_declarative_tables() {
 }
 
 #[test]
-fn zip_and_dmg_archives_need_7zip_to_extract() {
+fn zip_bz2_and_dmg_archives_need_7zip_to_extract() {
     let (crab, lister, viewer) = (2, 7, 10);
     let dependency = r#"{ package = "7zip", version = "26.04", kind = "build" },"#;
     let runtime = r#"{ package = "7zip", version = "26.04", kind = "runtime" },"#;
@@ -350,6 +350,37 @@ fn zip_and_dmg_archives_need_7zip_to_extract() {
             "",
         ),
     ];
+
+    let bz2 = FIXTURES[crab]
+        .1
+        .replace(".zip", ".tar.bz2")
+        .replace(r#""zip""#, r#""tar.bz2""#);
+    let mut fixtures = FIXTURES;
+    fixtures[crab].1 = &bz2;
+    let catalog = Catalog::parse(fixtures).unwrap();
+    let graph = catalog.evaluate(&hosts("a"), &catalog.targets()).unwrap();
+    let scripts = graph
+        .derivations
+        .values()
+        .filter_map(|derivation| match derivation {
+            Derivation::Build(build) if build.name == "crab" => Some(&build.script),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(!scripts.is_empty());
+    assert!(scripts.iter().all(|script| script.contains("7zz x -so")));
+
+    let unlisted = bz2.replacen(dependency, "", 1);
+    fixtures[crab].1 = &unlisted;
+    let catalog = Catalog::parse(fixtures).unwrap();
+    let error = catalog
+        .evaluate(&hosts("a"), &catalog.targets())
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("a tar.bz2 source extracts with 7zip"),
+        "{error}"
+    );
 
     for (index, expected, replacement) in cases {
         let edited = FIXTURES[index].1.replacen(dependency, replacement, 1);

@@ -46,6 +46,8 @@ return {
 - List `source.mirrors` for fallback URLs tried in order after `source.url`,
   with the same placeholders. They don't change keys, so use only URLs that
   serve the same bytes.
+- A `source.archive` of `zip` or `tar.bz2` extracts with the catalog's 7zip,
+  so list `7zip` in `build.dependencies` with `kind = "build"`.
 
 ## Build and check locally
 

@@ -1,4 +1,4 @@
-use super::{Package, Phases, extract, link, seven_zip, unpacker};
+use super::{Package, Phases, SOURCE, extract, link, seven_zip, unpacker};
 use crate::recipe::{ArchiveFormat, Bins, Install, Prebuilt};
 use crate::template::{Values, escape, path, quote};
 use crate::{Download, ReleaseAsset};
@@ -105,6 +105,10 @@ impl Package<'_> {
                 format: ArchiveFormat::Zip,
                 ..
             }) => unpacker(&dependencies, "zip prebuilt", "prebuilt.dependencies")?,
+            Some(Install::Archive {
+                format: ArchiveFormat::TarBz2,
+                ..
+            }) => unpacker(&dependencies, "tar.bz2 prebuilt", "prebuilt.dependencies")?,
             _ => {}
         }
 
@@ -146,7 +150,7 @@ impl Package<'_> {
                 let apps = outputs.apps.as_ref().filter(|apps| !apps.is_empty());
                 let apps = apps.ok_or("a DMG needs outputs.apps")?;
 
-                phases.prepare.push(seven_zip(r#""${TMPDIR}/dmg""#));
+                phases.prepare.push(seven_zip(SOURCE, r#""${TMPDIR}/dmg""#));
                 phases.install.push(r#"mkdir -p "${out}""#.into());
                 for app in apps.values() {
                     phases.install.extend(copy_app(app));
@@ -204,6 +208,8 @@ fn infer_install(file: &str) -> Option<Install> {
         (".tgz", ArchiveFormat::TarGz),
         (".tar.xz", ArchiveFormat::TarXz),
         (".txz", ArchiveFormat::TarXz),
+        (".tar.bz2", ArchiveFormat::TarBz2),
+        (".tbz2", ArchiveFormat::TarBz2),
         (".zip", ArchiveFormat::Zip),
     ];
 

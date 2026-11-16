@@ -167,6 +167,8 @@ pub(crate) enum ArchiveFormat {
     TarGz,
     #[serde(alias = "tar.xz")]
     TarXz,
+    #[serde(alias = "tar.bz2")]
+    TarBz2,
     #[serde(alias = "zip")]
     Zip,
 }
