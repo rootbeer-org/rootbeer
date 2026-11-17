@@ -50,7 +50,8 @@ return {
   so list `7zip` in `build.dependencies` with `kind = "build"`.
 - Linked dependencies' `bin/` follows build dependencies' on `PATH`, so a
   library's `*-config` tool is found. `CPATH`, `LIBRARY_PATH`, and
-  `PKG_CONFIG_PATH` cover direct linked dependencies only.
+  `CMAKE_PREFIX_PATH` cover direct linked dependencies only. `PKG_CONFIG_PATH`
+  also covers what they link in turn, direct ones first, so `Requires` resolves.
 - Linking a package whose `build.libraries` include `{shared_extension}` as
   `link` or `all` fails evaluation, since only `link_runtime` gives the output
   a run-path to it. List it as `build` too if you also need its commands.
