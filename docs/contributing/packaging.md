@@ -48,6 +48,12 @@ return {
   serve the same bytes.
 - A `source.archive` of `zip` or `tar.bz2` extracts with the catalog's 7zip,
   so list `7zip` in `build.dependencies` with `kind = "build"`.
+- Linked dependencies' `bin/` follows build dependencies' on `PATH`, so a
+  library's `*-config` tool is found. `CPATH`, `LIBRARY_PATH`, and
+  `PKG_CONFIG_PATH` cover direct linked dependencies only.
+- Linking a package whose `build.libraries` include `{shared_extension}` as
+  `link` or `all` fails evaluation, since only `link_runtime` gives the output
+  a run-path to it. List it as `build` too if you also need its commands.
 
 ## Build and check locally
 

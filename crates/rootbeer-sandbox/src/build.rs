@@ -233,6 +233,11 @@ impl Sandbox {
             return Ok(());
         }
 
+        // Libraries ship tools like pcre2-config that configure scripts look
+        // for, and build dependencies win a name clash by coming first.
+        self.bins
+            .extend(linked.iter().map(|path| format!("{path}/bin")));
+
         let join = |suffixes: &[&str]| {
             linked
                 .iter()
