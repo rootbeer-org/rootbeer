@@ -438,10 +438,28 @@ impl<'a> Evaluation<'a> {
                 RecipeKind::Runtime => &[DependencyKind::Runtime],
             };
 
+            // Only link_runtime gives the output a run-path to a shared library
+            let is_shared = self.shared.contains(&key);
+            let misuse = match declared.kind {
+                RecipeKind::Link if is_shared => Some(("link", "use link_runtime")),
+                RecipeKind::All if is_shared => Some(("all", "list it as build and link_runtime")),
+                _ => None,
+            };
+
+            if let Some((kind, fix)) = misuse {
+                return Err(Error::Recipe {
+                    target: target.clone(),
+                    message: format!(
+                        "{} ships a shared library, so kind {kind} leaves no run-path, {fix} instead",
+                        declared.package,
+                    ),
+                });
+            }
+
             let path = output_path(&key, &declared.package, &version, "out")
                 .display()
                 .to_string();
-            if matches!(declared.kind, RecipeKind::LinkRuntime) && self.shared.contains(&key) {
+            if matches!(declared.kind, RecipeKind::LinkRuntime) && is_shared {
                 linked.push(format!("{path}/lib"));
             }
 

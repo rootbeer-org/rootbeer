@@ -150,6 +150,36 @@ fn rust_and_go_builds_need_their_toolchain_to_vendor_with() {
 }
 
 #[test]
+fn linking_a_shared_library_needs_a_run_path() {
+    let auto = 1;
+    let linked = r#"{ package = "libz", version = "1.3.2", kind = "link_runtime" }"#;
+    let cases = [
+        ("link", "use link_runtime instead"),
+        ("all", "list it as build and link_runtime instead"),
+    ];
+
+    for (kind, fix) in cases {
+        let recipe = FIXTURES[auto]
+            .1
+            .replace(linked, &linked.replace("link_runtime", kind));
+        let mut fixtures = FIXTURES;
+        fixtures[auto].1 = &recipe;
+
+        let catalog = Catalog::parse(fixtures).unwrap();
+        let target = Target {
+            name: "auto".to_string(),
+            version: "5.8".to_string(),
+            platform: Platform::X86_64Linux,
+        };
+
+        let error = catalog.evaluate(&hosts("a"), &[target]).unwrap_err();
+        let expected =
+            format!("libz ships a shared library, so kind {kind} leaves no run-path, {fix}");
+        assert!(error.to_string().ends_with(&expected), "{error}");
+    }
+}
+
+#[test]
 fn cycles_name_every_package_in_them() {
     let recipe = |name: &str, dependency: &str| {
         format!(
