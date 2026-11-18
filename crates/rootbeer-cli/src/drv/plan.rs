@@ -1,6 +1,6 @@
 use super::cache::{self, Caches};
 use super::{load, target, Sources};
-use rootbeer_drv::{Derivation, Key, Platform};
+use rootbeer_drv::{linked_closure, Derivation, Key, Platform};
 use rootbeer_eval::{Catalog, Graph, Target};
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -128,12 +128,20 @@ impl<'a, F: FnMut(&str, &Key) -> Result<bool, String>> Planner<'a, F> {
         }
 
         let mut level = 0;
-        for dependency in &build.dependencies {
+        // A cached library may still link one the store lacks
+        let indirect = linked_closure(&self.graph.derivations, &build.dependencies);
+        let keys = build
+            .dependencies
+            .iter()
+            .map(|dependency| &dependency.key)
+            .chain(&indirect);
+
+        for key in keys {
             let below = self
                 .builds
-                .get(&dependency.key)
+                .get(key)
                 .copied()
-                .ok_or_else(|| format!("{target}'s {} did not evaluate", dependency.name))?;
+                .ok_or_else(|| format!("{target}'s dependency {key} did not evaluate"))?;
 
             if let Some(below) = self.level(below)? {
                 level = level.max(below.saturating_add(1));
@@ -249,6 +257,20 @@ mod tests {
         let zlib = graph.packages[&zlib].build.clone();
         let cached = levels(&graph, &targets, |_, key| Ok(*key == zlib)).unwrap();
         assert_eq!(cached, [vec!["cmake@4", "docs@1", "xz@5"], vec!["zstd@1"]]);
+    }
+
+    #[test]
+    fn a_cached_library_still_waits_for_what_it_links_that_is_missing() {
+        use DependencyKind::Linked;
+
+        let mut graph = Graph::default();
+        let brotli = add(&mut graph, "brotli", "1", &[]);
+        let gnutls = add(&mut graph, "gnutls", "1", &[(&brotli, Linked)]);
+        let gnupg = add(&mut graph, "gnupg", "1", &[(&gnutls, Linked)]);
+
+        let cached = graph.packages[&gnutls].build.clone();
+        let levels = levels(&graph, &[gnupg], |_, key| Ok(*key == cached)).unwrap();
+        assert_eq!(levels, [vec!["brotli@1"], vec!["gnupg@1"]]);
     }
 
     #[test]
