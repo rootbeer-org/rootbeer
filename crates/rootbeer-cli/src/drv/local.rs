@@ -2,7 +2,7 @@ use super::cache::{self, Signed};
 use super::install::Wanted;
 use super::{label, load_from, present_references, realize, target};
 use rootbeer_cache::Cache;
-use rootbeer_drv::{linked_closure, Derivation, Key, Platform};
+use rootbeer_drv::{Derivation, Key, Platform};
 use rootbeer_eval::{Graph, Package, Target};
 use rootbeer_store::Store;
 use std::collections::{BTreeMap, BTreeSet};
@@ -186,7 +186,6 @@ impl Planner<'_, '_> {
             ));
         }
 
-        let indirect;
         let needs: Vec<&Key> = match derivation {
             Some(Derivation::Build(build)) => {
                 if self.signed.published(&build.name, key)?.is_some() {
@@ -200,22 +199,16 @@ impl Planner<'_, '_> {
                     );
                 }
 
-                indirect = linked_closure(&graph.derivations, &build.dependencies);
                 build
                     .inputs
                     .values()
                     .chain(build.dependencies.iter().map(|dependency| &dependency.key))
-                    .chain(indirect.iter())
                     .collect()
             }
             Some(Derivation::Unpack(unpack)) => vec![&unpack.source],
-            Some(Derivation::Check(check)) => {
-                indirect = linked_closure(&graph.derivations, &check.dependencies);
-                std::iter::once(&check.target)
-                    .chain(check.dependencies.iter().map(|dependency| &dependency.key))
-                    .chain(indirect.iter())
-                    .collect()
-            }
+            Some(Derivation::Check(check)) => std::iter::once(&check.target)
+                .chain(check.dependencies.iter().map(|dependency| &dependency.key))
+                .collect(),
             Some(Derivation::Fetch(_)) => Vec::new(),
             None => return Err(format!("{key} isn't in the evaluated catalog")),
         };

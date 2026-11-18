@@ -11,7 +11,7 @@ mod key;
 mod validate;
 mod view;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 pub use error::Error;
@@ -304,27 +304,6 @@ impl Derivation {
             Error::invalid("derivation", &error.to_string(), "cannot be canonicalized")
         })
     }
-}
-
-/// Every build reachable from `dependencies` through linked edges alone: the
-/// direct ones first, then each level below them. Build and runtime edges
-/// stop the walk, since only linked libraries are found by search paths.
-pub fn linked_closure(graph: &BTreeMap<Key, Derivation>, dependencies: &[Dependency]) -> Vec<Key> {
-    let mut seen = BTreeSet::new();
-    let mut order = Vec::new();
-    let mut pending = dependencies.iter().collect::<VecDeque<_>>();
-    while let Some(dependency) = pending.pop_front() {
-        if dependency.kind != DependencyKind::Linked || !seen.insert(&dependency.key) {
-            continue;
-        }
-
-        order.push(dependency.key.clone());
-        if let Some(Derivation::Build(build)) = graph.get(&dependency.key) {
-            pending.extend(&build.dependencies);
-        }
-    }
-
-    order
 }
 
 /// Store path of one output of a build

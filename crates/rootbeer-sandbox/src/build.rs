@@ -1,8 +1,7 @@
 use crate::{Error, Request, darwin, derivation, io_at, linux, scan};
 use rootbeer_drv::{Allow, Build, Check};
 use rootbeer_drv::{
-    Dependency, DependencyKind, Derivation, Key, Platform, STORE_ROOT, fetch_path, linked_closure,
-    output_path,
+    Dependency, DependencyKind, Derivation, Key, Platform, STORE_ROOT, fetch_path, output_path,
 };
 use rustix::process::{Pid, Signal, WaitId, WaitIdOptions};
 use std::collections::{BTreeMap, BTreeSet};
@@ -44,8 +43,6 @@ struct Sandbox {
     has_home: bool,
     allow: BTreeSet<Allow>,
     closure: BTreeSet<Key>,
-    // Linked below a direct dependency: readable, but an output can't keep them
-    indirect: BTreeSet<Key>,
     variables: BTreeMap<String, String>,
     bins: Vec<String>,
     reads: Vec<String>,
@@ -77,11 +74,7 @@ pub(crate) fn build(request: &mut Request, build: &Build) -> Result<BTreeSet<Key
 
     // Outputs might reference runtime dependencies, but never what was
     // fetched with network, which is scanned only as an input.
-    let mut allowed = sandbox
-        .closure
-        .difference(&sandbox.indirect)
-        .cloned()
-        .collect::<BTreeSet<_>>();
+    let mut allowed = sandbox.closure.clone();
     allowed.extend(
         build
             .dependencies
@@ -144,30 +137,6 @@ pub(crate) fn check(request: &mut Request, check: &Check) -> Result<(), Error> {
     sandbox.bins.insert(0, format!("{target}/bin"));
     sandbox.variables.insert("target".into(), target);
     sandbox.run(request, &check.script)
-}
-
-// Headers and libraries are found only in direct dependencies, but pkg-config
-// follows Requires into the ones below them.
-fn search_paths(direct: &[String], indirect: &[String]) -> [(String, String); 4] {
-    let join = |paths: &[&String], suffixes: &[&str]| {
-        paths
-            .iter()
-            .flat_map(|path| suffixes.iter().map(move |suffix| format!("{path}{suffix}")))
-            .collect::<Vec<_>>()
-            .join(":")
-    };
-
-    let direct = direct.iter().collect::<Vec<_>>();
-    let all = direct.iter().copied().chain(indirect).collect::<Vec<_>>();
-    [
-        ("CPATH".to_string(), join(&direct, &["/include"])),
-        ("LIBRARY_PATH".to_string(), join(&direct, &["/lib"])),
-        (
-            "PKG_CONFIG_PATH".to_string(),
-            join(&all, &["/lib/pkgconfig", "/share/pkgconfig"]),
-        ),
-        ("CMAKE_PREFIX_PATH".to_string(), join(&direct, &[""])),
-    ]
 }
 
 impl Sandbox {
@@ -235,7 +204,6 @@ impl Sandbox {
             has_home: false,
             allow: BTreeSet::new(),
             closure: BTreeSet::new(),
-            indirect: BTreeSet::new(),
             variables,
             bins: Vec::new(),
             reads: Vec::new(),
@@ -250,17 +218,13 @@ impl Sandbox {
         dependencies: &[Dependency],
     ) -> Result<(), Error> {
         let mut linked = Vec::new();
-        let mut direct_keys = BTreeSet::new();
         for dependency in dependencies {
             match dependency.kind {
                 DependencyKind::Build => {
                     let path = self.read(request, &dependency.key)?;
                     self.bins.push(format!("{path}/bin"));
                 }
-                DependencyKind::Linked => {
-                    direct_keys.insert(&dependency.key);
-                    linked.push(self.read(request, &dependency.key)?);
-                }
+                DependencyKind::Linked => linked.push(self.read(request, &dependency.key)?),
                 DependencyKind::Runtime => {}
             }
         }
@@ -274,18 +238,23 @@ impl Sandbox {
         self.bins
             .extend(linked.iter().map(|path| format!("{path}/bin")));
 
-        // Their files must exist for pkg-config, so they are realized too.
-        let before = self.closure.clone();
-        let mut indirect = Vec::new();
-        for key in linked_closure(request.graph, dependencies) {
-            if !direct_keys.contains(&key) {
-                indirect.push(self.read(request, &key)?);
-            }
-        }
+        let join = |suffixes: &[&str]| {
+            linked
+                .iter()
+                .flat_map(|path| suffixes.iter().map(move |suffix| format!("{path}{suffix}")))
+                .collect::<Vec<_>>()
+                .join(":")
+        };
 
-        self.indirect = self.closure.difference(&before).cloned().collect();
-
-        self.variables.extend(search_paths(&linked, &indirect));
+        self.variables.extend([
+            ("CPATH".to_string(), join(&["/include"])),
+            ("LIBRARY_PATH".to_string(), join(&["/lib"])),
+            (
+                "PKG_CONFIG_PATH".to_string(),
+                join(&["/lib/pkgconfig", "/share/pkgconfig"]),
+            ),
+            ("CMAKE_PREFIX_PATH".to_string(), join(&[""])),
+        ]);
 
         Ok(())
     }
@@ -535,23 +504,6 @@ mod tests {
         assert!(status.success());
         assert_eq!(log, b"ok\n");
         assert!(started.elapsed() < Duration::from_secs(30));
-    }
-
-    #[test]
-    fn pkg_config_alone_searches_below_direct_dependencies() {
-        let direct = ["/s/gnutls".to_string()];
-        let indirect = ["/s/nettle".to_string(), "/s/brotli".to_string()];
-        let variables = BTreeMap::from(search_paths(&direct, &indirect));
-
-        assert_eq!(
-            variables["PKG_CONFIG_PATH"],
-            "/s/gnutls/lib/pkgconfig:/s/gnutls/share/pkgconfig:\
-             /s/nettle/lib/pkgconfig:/s/nettle/share/pkgconfig:\
-             /s/brotli/lib/pkgconfig:/s/brotli/share/pkgconfig"
-        );
-        assert_eq!(variables["CPATH"], "/s/gnutls/include");
-        assert_eq!(variables["LIBRARY_PATH"], "/s/gnutls/lib");
-        assert_eq!(variables["CMAKE_PREFIX_PATH"], "/s/gnutls");
     }
 
     #[test]
