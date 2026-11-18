@@ -54,7 +54,10 @@ return {
   also covers what they link in turn, direct ones first, so `Requires` resolves.
 - Linking a package whose `build.libraries` include `{shared_extension}` as
   `link` or `all` fails evaluation, since only `link_runtime` gives the output
-  a run-path to it. List it as `build` too if you also need its commands.
+  a run-path to it.
+- Depend on a tool such as cmake as `build`, and also as `runtime` when its
+  path ends up in the output. `all` would make it a library that dependents'
+  search paths include.
 
 ## Build and check locally
 
