@@ -79,9 +79,10 @@ To try a recipe from your own configuration before it's published, see
 ## CI and publication
 
 pdr CI plans every declared version against `ghcr.io/rootbeer-org/store` and builds
-only what the store lacks, level by level on each platform. A failed package
-holds back only what depends on it.
+only what the store lacks, one job per platform in dependency order. A failed
+package holds back only what depends on it.
 
-Pull requests build and check. Pushes to main build again and publish to the
+Pull requests build and check the keys they change and stage each output once it
+passes. Main installs what's staged instead of rebuilding it and publishes to the
 store, then the [index](/contributing/package-hosting) signs the new entries
 with a key pdr never sees.
