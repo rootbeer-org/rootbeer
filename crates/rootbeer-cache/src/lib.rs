@@ -22,6 +22,7 @@ use ureq::{Agent, Body, RequestBuilder};
 
 const DOCUMENT_LIMIT: u64 = 16 << 20;
 const TIMEOUT: Duration = Duration::from_secs(30);
+const BACKOFF: [Duration; 2] = [Duration::from_secs(1), Duration::from_secs(3)];
 const SLOWEST: u64 = 64 << 10;
 
 pub struct Cache {
@@ -376,12 +377,27 @@ impl Session<'_> {
         build: impl Fn(Authorized<'_>) -> Result<Response<Body>, ureq::Error>,
     ) -> Result<Response<Body>, Error> {
         let is_registry = self.cache.is_registry(url);
+
+        // Registries drop connections and shed load now and then, so a call
+        // that may succeed later is sent again, waiting longer each time.
         let send = |authorization: Option<&str>| {
-            build(Authorized {
-                agent: &self.cache.agent,
-                authorization: authorization.filter(|_| is_registry),
-            })
-            .map_err(transport(url))
+            let mut waits = BACKOFF.iter();
+            loop {
+                let result = build(Authorized {
+                    agent: &self.cache.agent,
+                    authorization: authorization.filter(|_| is_registry),
+                })
+                .map_err(transport(url));
+
+                let is_transient = match &result {
+                    Ok(response) => matches!(response.status().as_u16(), 429 | 500..=599),
+                    Err(error) => matches!(error, Error::Transport { .. }),
+                };
+                match waits.next() {
+                    Some(wait) if is_transient => std::thread::sleep(*wait),
+                    _ => return result,
+                }
+            }
         };
 
         let response = send(self.authorization.as_deref())?;

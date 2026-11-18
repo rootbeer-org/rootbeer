@@ -591,3 +591,36 @@ fn a_token_that_expires_before_the_archive_is_renewed() {
     pulled.archive().unwrap().read_to_end(&mut bytes).unwrap();
     assert_eq!(bytes, b"not really a tar.zst");
 }
+
+#[test]
+fn a_registry_that_sheds_load_is_asked_again() {
+    let calls = Arc::new(Mutex::new(0));
+    let counted = calls.clone();
+    let (url, _) = serve(move |_| {
+        let mut calls = counted.lock().unwrap();
+        *calls += 1;
+        match *calls {
+            1 => (503, String::new(), Vec::new()),
+            _ => (200, String::new(), Vec::new()),
+        }
+    });
+
+    let key: Key = "a".repeat(32).parse().unwrap();
+    let cache = Cache::new(&url, "a").allow_http();
+    assert!(cache.exists("zlib", &key).unwrap());
+    assert_eq!(*calls.lock().unwrap(), 2);
+}
+
+#[test]
+fn a_registry_that_keeps_failing_gives_up() {
+    let (url, log) = serve(|_| (502, String::new(), Vec::new()));
+
+    let key: Key = "a".repeat(32).parse().unwrap();
+    let cache = Cache::new(&url, "a").allow_http();
+    let error = cache.exists("zlib", &key).unwrap_err();
+    assert!(
+        matches!(error, Error::Status { status: 502, .. }),
+        "{error}"
+    );
+    assert_eq!(log.lock().unwrap().len(), 3);
+}
