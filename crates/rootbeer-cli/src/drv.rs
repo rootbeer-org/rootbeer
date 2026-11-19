@@ -19,7 +19,7 @@ pub(crate) mod setup;
 mod updates;
 mod version;
 
-pub(crate) use configuration::{check_lock, configure, link_default_apps};
+pub(crate) use configuration::{check_lock, configure, install_default_apps};
 
 use rootbeer_cache::Cache;
 use rootbeer_drv::{

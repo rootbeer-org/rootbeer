@@ -3,14 +3,14 @@ use super::github;
 use super::install::{self, LazyIndex, Source, Wanted};
 use super::local;
 use super::profile::{
-    applications, check_apps, current, directory, is_same, link_apps, profile_error, switch,
+    applications, check_apps, current, directory, install_apps, is_same, profile_error, switch,
 };
 use super::this_platform;
 use rootbeer_core::env::{profiles, DEFAULT};
 use rootbeer_core::package::PackageRequest;
 use rootbeer_core::PackageLockOptions;
 use rootbeer_drv::{output_path, Platform};
-use rootbeer_profile::{Error, Generation, Lock, Locked, Member, Profile, Release};
+use rootbeer_profile::{Error, Generation, Lock, Locked, Member, Profile, Release, Removal};
 use rootbeer_store::Store;
 use rootbeer_trust::Package;
 use std::cell::Cell;
@@ -21,8 +21,8 @@ use std::path::{Path, PathBuf};
 type Requests = BTreeMap<String, Wanted>;
 
 pub(crate) struct Configured {
-    /// Whether apps need linking once the rest of the configuration runs.
-    pub(crate) should_link_apps: bool,
+    /// Whether apps need installing once the rest of the configuration runs.
+    pub(crate) should_install_apps: bool,
 }
 
 /// Installs what the configuration asks for from the signed index, GitHub
@@ -82,7 +82,7 @@ pub(crate) fn configure(
         }
 
         return Ok(Configured {
-            should_link_apps: false,
+            should_install_apps: false,
         });
     }
 
@@ -270,7 +270,7 @@ pub(crate) fn configure(
     }
 
     let configured = Configured {
-        should_link_apps: true,
+        should_install_apps: true,
     };
 
     if same(&current.packages, &members) {
@@ -313,9 +313,9 @@ pub(crate) fn check_lock(script_dir: &Path) -> Result<(), String> {
     }
 }
 
-pub(crate) fn link_default_apps() -> Result<(), String> {
+pub(crate) fn install_default_apps() -> Result<(), String> {
     let profile = Profile::open(&directory(false)?, DEFAULT).map_err(profile_error)?;
-    link_apps(&profile)
+    install_apps(&profile, Removal::Delete)
 }
 
 fn requests(packages: Vec<PackageRequest>) -> Result<Requests, String> {

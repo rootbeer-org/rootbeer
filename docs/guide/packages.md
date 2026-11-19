@@ -58,16 +58,20 @@ To keep a declared app export available in `~/Applications`, install its package
 rb use bobrwm
 ```
 
-Or declare `rb.package("bobrwm")` in Lua and run `rb apply`. Both manage a
-`~/Applications/Bobrwm.app` symlink into the verified package store. Existing apps
-are never overwritten; a conflicting app or unmanaged link makes installation fail.
-User and Lua profiles may share an app link when they select the exact same
-stored bundle; different versions conflict. Rootbeer does not configure login
-items or grant app permissions.
+Or declare `rb.package("bobrwm")` in Lua and run `rb apply`. Both install a copy
+of the bundle at `~/Applications/Bobrwm.app`. On APFS the copy shares the store's
+blocks, so it costs no space. Rootbeer replaces the copy whenever the profile
+selects a different version, and `rb rollback` puts the old one back.
 
-Remove a package from your user profile with `rb unuse bobrwm`. This removes its
-owned app link when no other profile needs it, while its files stay in the store.
-For Lua-managed apps, remove the declaration and run `rb apply`.
+Existing apps are never overwritten, and an app Rootbeer didn't install makes
+installation fail. Only one profile can install an app, so declaring it in Lua
+and with `rb use` conflicts. Rootbeer does not configure login items or grant app
+permissions.
+
+Remove a package from your user profile with `rb unuse bobrwm`, which deletes
+its app while its files stay in the store. `rb unuse bobrwm --keep-app` leaves
+the app in place for you to manage. For Lua-managed apps, remove the declaration
+and run `rb apply`.
 
 ## Keep tools installed
 

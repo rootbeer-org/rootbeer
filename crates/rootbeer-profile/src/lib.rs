@@ -15,16 +15,20 @@ use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+mod apps;
 mod lock;
 mod roots;
 #[cfg(test)]
 mod tests;
 
+pub use apps::{Deployed, Removal};
 pub use lock::{LOCK_SCHEMA, Lock, Locked};
 pub use roots::{hold_while_running, roots};
 
 /// Generations from schema 1 hold only index members, so this rb reads them.
-pub const SCHEMA: u32 = 2;
+/// Schema 3 installs apps as copies, which an older rb would refuse as taken,
+/// so it hands the command to a newer rb instead.
+pub const SCHEMA: u32 = 3;
 const OLDEST_SCHEMA: u32 = 1;
 pub(crate) const RECORD: &str = "generation.json";
 const APPLICATIONS: &str = "Applications";
@@ -342,85 +346,6 @@ impl Profile {
         symlink(self.generation(number), &staged).map_err(io_at(&staged))?;
         fs::rename(&staged, &link).map_err(io_at(&link))?;
         sync(&self.directory)
-    }
-
-    pub fn link_apps(&self, applications: &Path) -> Result<Vec<Error>, Error> {
-        self.writable()?;
-        let farm = self.farm();
-        let apps = match fs::read_dir(&farm) {
-            Ok(entries) => entries
-                .map(|entry| entry.map(|entry| entry.file_name()))
-                .collect::<Result<BTreeSet<_>, _>>()
-                .map_err(io_at(&farm))?,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => BTreeSet::new(),
-            Err(error) => return Err(io_at(&farm)(error)),
-        };
-
-        // We can't remove first because it frees up a name where the casing
-        // might've changed rather than a real name that was removed.
-        let mut problems = Vec::new();
-        match fs::read_dir(applications) {
-            Ok(entries) => {
-                for entry in entries {
-                    let path = match entry {
-                        Ok(entry) => entry.path(),
-                        Err(error) => {
-                            problems.push(io_at(applications)(error));
-                            continue;
-                        }
-                    };
-
-                    let Some(target) = self.target(&path) else {
-                        continue;
-                    };
-
-                    let is_current = target.file_name() == path.file_name()
-                        && target.file_name().is_some_and(|app| apps.contains(app));
-                    if !is_current {
-                        problems.extend(remove(&path).err());
-                    }
-                }
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => problems.push(io_at(applications)(error)),
-        }
-
-        if apps.is_empty() {
-            return Ok(problems);
-        }
-
-        if let Err(error) = fs::create_dir_all(applications) {
-            problems.push(io_at(applications)(error));
-            return Ok(problems);
-        }
-
-        for app in &apps {
-            let path = applications.join(app);
-            let linked = match fs::symlink_metadata(&path) {
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                    symlink(farm.join(app), &path).map_err(io_at(&path))
-                }
-                Err(error) => Err(io_at(&path)(error)),
-                Ok(_) if self.target(&path).is_some() => Ok(()),
-                Ok(_) => Err(taken(&path)),
-            };
-
-            problems.extend(linked.err());
-        }
-
-        Ok(problems)
-    }
-
-    pub fn check_apps<'a>(
-        &self,
-        applications: &Path,
-        apps: impl IntoIterator<Item = &'a str>,
-    ) -> Result<(), Error> {
-        let mut paths = apps.into_iter().map(|app| applications.join(app));
-        match paths.find(|path| fs::symlink_metadata(path).is_ok() && self.target(path).is_none()) {
-            Some(path) => Err(taken(&path)),
-            None => Ok(()),
-        }
     }
 
     fn target(&self, path: &Path) -> Option<PathBuf> {

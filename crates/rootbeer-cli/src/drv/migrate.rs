@@ -1,4 +1,4 @@
-use super::configuration::{configure, link_default_apps};
+use super::configuration::{configure, install_default_apps};
 use super::github;
 use super::install::{self, LazyIndex, Source, Wanted};
 use super::profile::{self, profile_error};
@@ -196,8 +196,8 @@ fn configuration(args: &Args) -> Result<(), String> {
         &PackageLockOptions::default(),
         &args.source,
     )?;
-    if configured.should_link_apps {
-        link_default_apps()?;
+    if configured.should_install_apps {
+        install_default_apps()?;
     }
 
     Ok(())

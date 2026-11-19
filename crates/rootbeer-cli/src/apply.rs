@@ -196,7 +196,7 @@ pub fn run(args: Args, lua_dir: Option<&PathBuf>) {
     });
 
     // Before the rest, so commands the configuration runs can use them.
-    let mut should_link_apps = false;
+    let mut should_install_apps = false;
     if !args.dry_run {
         let catalog = planned.package_catalog().map(Path::to_path_buf);
         let configured = crate::drv::configure(
@@ -212,7 +212,7 @@ pub fn run(args: Args, lua_dir: Option<&PathBuf>) {
             std::process::exit(1);
         });
 
-        should_link_apps = configured.should_link_apps;
+        should_install_apps = configured.should_install_apps;
     }
 
     let result = planned.execute(&mut CliHandler);
@@ -223,12 +223,12 @@ pub fn run(args: Args, lua_dir: Option<&PathBuf>) {
                 |result| matches!(result, OpResult::CommandRan { status, .. } if *status != 0),
             );
 
-            if should_link_apps && has_failed {
-                eprintln!("warning: a command failed, so apps weren't linked");
+            if should_install_apps && has_failed {
+                eprintln!("warning: a command failed, so apps weren't installed");
             }
 
-            if should_link_apps && !has_failed {
-                if let Err(e) = crate::drv::link_default_apps() {
+            if should_install_apps && !has_failed {
+                if let Err(e) = crate::drv::install_default_apps() {
                     eprintln!("{} error: {e}", "✗".red().bold());
                     std::process::exit(1);
                 }

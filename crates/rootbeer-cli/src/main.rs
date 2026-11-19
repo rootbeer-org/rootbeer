@@ -56,6 +56,9 @@ enum Commands {
     Unuse {
         #[arg(required = true)]
         names: Vec<String>,
+        /// Leave their apps in place for you to manage
+        #[arg(long = "keep-app")]
+        should_keep_apps: bool,
     },
 
     /// Switch your user profile back to its previous generation
@@ -129,7 +132,16 @@ fn main() {
         Commands::Use(args) => drv::profile::add(&args)
             .and_then(|()| drv::profile::keep_rootbeer())
             .inspect(|()| drv::migrate::hint()),
-        Commands::Unuse { names } => drv::profile::remove(&names),
+        Commands::Unuse {
+            names,
+            should_keep_apps,
+        } => {
+            let removal = match should_keep_apps {
+                true => rootbeer_profile::Removal::Keep,
+                false => rootbeer_profile::Removal::Delete,
+            };
+            drv::profile::remove(&names, removal)
+        }
         Commands::Rollback => drv::profile::rollback(),
         Commands::Generations => drv::profile::generations(),
         Commands::Cd => {

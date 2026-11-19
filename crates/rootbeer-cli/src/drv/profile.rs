@@ -4,7 +4,7 @@ use super::install::{self, LazyIndex, Source, Wanted};
 use super::local::{self, Evaluated};
 use super::{migrate, this_platform, HELPER};
 use rootbeer_core::env::{profiles, DEFAULT, USER};
-use rootbeer_profile::{Generation, Member, Profile};
+use rootbeer_profile::{Generation, Member, Profile, Removal};
 use rootbeer_store::{Store, ROOT};
 use rustix::process::getuid;
 use std::collections::{BTreeMap, BTreeSet};
@@ -60,7 +60,7 @@ pub(crate) fn add(args: &UseArgs) -> Result<(), String> {
     let requests = planned(&generation.packages, requests, args.should_update);
     if requests.is_empty() {
         eprintln!("nothing to install, your {USER} profile already has these packages");
-        return link_apps(&profile);
+        return install_apps(&profile, Removal::Delete);
     }
 
     install_requests(
@@ -166,7 +166,7 @@ pub(super) fn install_requests(
 
     if members.is_empty() {
         eprintln!("your {USER} profile is already up to date");
-        return link_apps(profile);
+        return install_apps(profile, Removal::Delete);
     }
 
     if let Some(applications) = applications() {
@@ -194,7 +194,7 @@ pub(super) fn install_requests(
     }
 
     switch(profile, USER, &store, generation)?;
-    link_apps(profile)
+    install_apps(profile, Removal::Delete)
 }
 
 /// Drops what the generation already has, unless updating. An update keeps a
@@ -260,7 +260,9 @@ pub(super) fn is_same(a: &Member, b: &Member) -> bool {
     strip(a) == strip(b)
 }
 
-pub(crate) fn remove(names: &[String]) -> Result<(), String> {
+/// Removes packages from `user`. Keeping their apps hands the copies to the
+/// user.
+pub(crate) fn remove(names: &[String], removal: Removal) -> Result<(), String> {
     let directory = directory(false)?;
     let profile = Profile::open(&directory, USER).map_err(profile_error)?;
     let mut generation = current(&profile)?;
@@ -285,7 +287,7 @@ pub(crate) fn remove(names: &[String]) -> Result<(), String> {
 
     let (store, _) = install::open_store()?;
     switch(&profile, USER, &store, generation)?;
-    link_apps(&profile)
+    install_apps(&profile, removal)
 }
 
 pub(crate) fn rollback() -> Result<(), String> {
@@ -293,7 +295,7 @@ pub(crate) fn rollback() -> Result<(), String> {
     let profile = Profile::open(&directory, USER).map_err(profile_error)?;
     let number = profile.rollback().map_err(profile_error)?;
     eprintln!("{USER} profile is now generation {number}");
-    link_apps(&profile)
+    install_apps(&profile, Removal::Delete)
 }
 
 pub(crate) fn generations() -> Result<(), String> {
@@ -404,7 +406,7 @@ pub(super) fn check_apps<'a>(
         .map_err(profile_error)
 }
 
-pub(super) fn link_apps(profile: &Profile) -> Result<(), String> {
+pub(super) fn install_apps(profile: &Profile, removal: Removal) -> Result<(), String> {
     let Some(applications) = applications() else {
         return Ok(());
     };
@@ -416,8 +418,24 @@ pub(super) fn link_apps(profile: &Profile) -> Result<(), String> {
         .flat_map(|member| member.apps.keys());
     migrate::release_legacy_apps(&applications, apps)?;
 
-    for problem in profile.link_apps(&applications).map_err(profile_error)? {
+    let deployed = profile
+        .install_apps(&applications, removal)
+        .map_err(profile_error)?;
+    for problem in deployed.problems {
         eprintln!("warning: {problem}");
+    }
+
+    if !deployed.migrated.is_empty() {
+        eprintln!(
+            "note: {} {} now a copy rather than a link. Pin it to the Dock or add it as a \
+             login item again if either stopped opening it",
+            deployed.migrated.join(", "),
+            if deployed.migrated.len() == 1 {
+                "is"
+            } else {
+                "are"
+            },
+        );
     }
 
     Ok(())
