@@ -7,7 +7,9 @@ mod transport;
 #[cfg(test)]
 mod tests;
 
-use rootbeer_drv::{Key, Platform, Sha256, is_app_name, is_file_name, is_inside, is_package_name};
+use rootbeer_drv::{
+    AppSettings, Key, Platform, Sha256, is_app_name, is_file_name, is_inside, is_package_name,
+};
 use serde::{Deserialize, Serialize};
 pub use sign::sign;
 use std::collections::{BTreeMap, BTreeSet};
@@ -48,6 +50,10 @@ pub struct Output {
     pub bins: BTreeSet<String>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub apps: BTreeMap<String, String>,
+    /// How each app that differs from the default is installed. Clients from
+    /// before this field ignore it.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub app_settings: BTreeMap<String, AppSettings>,
 }
 
 pub struct Index {
@@ -96,6 +102,8 @@ struct RawOutput {
     bins: BTreeSet<String>,
     #[serde(default)]
     apps: BTreeMap<String, String>,
+    #[serde(default)]
+    app_settings: BTreeMap<String, AppSettings>,
 }
 
 impl Index {
@@ -344,11 +352,20 @@ impl TryFrom<RawOutput> for Output {
             return Err(format!("{path:?} isn't a path inside the output"));
         }
 
+        if let Some(name) = raw
+            .app_settings
+            .keys()
+            .find(|name| !raw.apps.contains_key(*name))
+        {
+            return Err(format!("{name:?} has settings but isn't an app"));
+        }
+
         Ok(Output {
             key: raw.key,
             manifest: raw.manifest,
             bins: raw.bins,
             apps: raw.apps,
+            app_settings: raw.app_settings,
         })
     }
 }

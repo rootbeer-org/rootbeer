@@ -2,7 +2,9 @@
 //! a symlink to its current generation and each generation is a directory with
 //! symlinks into the store and a recorded manifest.
 
-use rootbeer_drv::{Format, Key, Sha256, is_app_name, is_file_name, is_inside, is_package_name};
+use rootbeer_drv::{
+    AppSettings, Format, Key, Sha256, is_app_name, is_file_name, is_inside, is_package_name,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -63,6 +65,10 @@ pub struct Member {
     pub bins: BTreeSet<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub apps: BTreeMap<String, String>,
+    /// How each app that differs from the default is installed, as the
+    /// index or recipe says.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub app_settings: BTreeMap<String, AppSettings>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -616,7 +622,7 @@ fn validate(name: &str, member: &Member) -> Result<(), String> {
         member.is_local,
         &member.bins,
     )?;
-    validate_exports(name, &member.bins, &member.apps)
+    validate_exports(name, &member.bins, &member.apps, &member.app_settings)
 }
 
 /// Every package comes from exactly one place. A release links what its
@@ -659,6 +665,7 @@ pub(crate) fn validate_exports(
     name: &str,
     bins: &BTreeSet<String>,
     apps: &BTreeMap<String, String>,
+    app_settings: &BTreeMap<String, AppSettings>,
 ) -> Result<(), String> {
     if let Some(bin) = bins.iter().find(|bin| !is_file_name(bin)) {
         return Err(format!("{name} has a bin {bin:?} that isn't a plain name"));
@@ -670,8 +677,14 @@ pub(crate) fn validate_exports(
         ));
     }
 
-    match apps.values().find(|path| !is_inside(path)) {
-        Some(path) => Err(format!("{name} has an app at {path:?} outside its output")),
+    if let Some(path) = apps.values().find(|path| !is_inside(path)) {
+        return Err(format!("{name} has an app at {path:?} outside its output"));
+    }
+
+    match app_settings.keys().find(|app| !apps.contains_key(*app)) {
+        Some(app) => Err(format!(
+            "{name} has settings for {app:?}, which it doesn't export"
+        )),
         None => Ok(()),
     }
 }

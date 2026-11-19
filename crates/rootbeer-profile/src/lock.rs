@@ -1,5 +1,5 @@
 use crate::{Error, Release, io_at, validate_exports, validate_source};
-use rootbeer_drv::{Key, is_package_name};
+use rootbeer_drv::{AppSettings, Key, is_package_name};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -37,6 +37,10 @@ pub struct Locked {
     pub bins: BTreeSet<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub apps: BTreeMap<String, String>,
+    /// How each app that differs from the default is installed, as the
+    /// index or recipe says.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub app_settings: BTreeMap<String, AppSettings>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -99,7 +103,9 @@ impl Lock {
                     locked.is_local,
                     &locked.bins,
                 )
-                .and_then(|()| validate_exports(name, &locked.bins, &locked.apps))
+                .and_then(|()| {
+                    validate_exports(name, &locked.bins, &locked.apps, &locked.app_settings)
+                })
                 .map_err(|reason| Error::Invalid {
                     path: path.to_path_buf(),
                     reason,

@@ -108,6 +108,7 @@ pub(super) fn install_requests(
                     is_local: false,
                     bins: output.bins.clone(),
                     apps: output.apps.clone(),
+                    app_settings: output.app_settings.clone(),
                     extra: BTreeMap::new(),
                 }),
             Wanted::Release(request) => {
@@ -125,6 +126,7 @@ pub(super) fn install_requests(
                         release: Some(resolved.release),
                         is_local: false,
                         apps: BTreeMap::new(),
+                        app_settings: BTreeMap::new(),
                         pin: None,
                         extra: BTreeMap::new(),
                     },
@@ -142,6 +144,7 @@ pub(super) fn install_requests(
                     is_local: true,
                     bins: package.metadata.bins.clone(),
                     apps: package.metadata.apps.clone(),
+                    app_settings: package.metadata.app_settings.clone(),
                     pin: install::line(version.as_deref(), &target.version),
                     extra: BTreeMap::new(),
                 }),
@@ -495,6 +498,7 @@ mod tests {
             is_local: false,
             bins: Default::default(),
             apps: Default::default(),
+            app_settings: Default::default(),
             pin: None,
             extra: Default::default(),
         }
@@ -623,6 +627,7 @@ mod tests {
             key: key.parse().unwrap(),
             bins: bins.iter().map(|bin| bin.to_string()).collect(),
             apps: BTreeMap::new(),
+            app_settings: BTreeMap::new(),
         };
         let same = wanted(local.key.as_str(), &[]);
         let rebuilt = wanted(&"b".repeat(32), &[]);

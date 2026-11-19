@@ -153,7 +153,7 @@ impl Package<'_> {
                 phases.prepare.push(seven_zip(SOURCE, r#""${TMPDIR}/dmg""#));
                 phases.install.push(r#"mkdir -p "${out}""#.into());
                 for app in apps.values() {
-                    phases.install.extend(copy_app(app));
+                    phases.install.extend(copy_app(app.path()));
                 }
             }
             None => {

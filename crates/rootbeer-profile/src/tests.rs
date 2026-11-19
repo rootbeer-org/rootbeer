@@ -1,5 +1,5 @@
 use crate::{Error, Generation, Member, Profile, SCHEMA, bin};
-use rootbeer_drv::Key;
+use rootbeer_drv::{AppSettings, Key};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -44,6 +44,7 @@ fn output(store: &Path, digit: char, bins: &[&str]) -> Member {
         is_local: false,
         bins: bins.iter().map(|name| name.to_string()).collect(),
         apps: BTreeMap::new(),
+        app_settings: BTreeMap::new(),
         pin: None,
         extra: BTreeMap::new(),
     }
@@ -442,6 +443,13 @@ fn an_app_must_be_a_bundle_inside_its_output_and_provided_once() {
         r#"slack has an app ".Slack.app" that isn't a bundle name"#,
     );
 
+    let mut unexported = slack.clone();
+    unexported.app_settings = BTreeMap::from([("Huddle.app".into(), AppSettings::default())]);
+    refuse(
+        unexported,
+        r#"slack has settings for "Huddle.app", which it doesn't export"#,
+    );
+
     let fork = with_app(
         &fixture.store,
         output(&fixture.store, 'b', &[]),
@@ -470,6 +478,7 @@ mod lock {
             is_local: false,
             bins: ["jq".to_string()].into(),
             apps: BTreeMap::new(),
+            app_settings: BTreeMap::new(),
             pin: None,
             extra: BTreeMap::new(),
         }

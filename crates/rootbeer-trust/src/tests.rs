@@ -1,6 +1,7 @@
 use super::*;
 use aws_lc_rs::rand::SystemRandom;
 use aws_lc_rs::signature::Ed25519KeyPair;
+use rootbeer_drv::Updates;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
@@ -173,6 +174,7 @@ fn package(name: &str) -> Package {
         manifest: format!("sha256:{}", "0".repeat(64)),
         bins: BTreeSet::from([name.into()]),
         apps: BTreeMap::new(),
+        app_settings: BTreeMap::new(),
     };
 
     Package {
@@ -359,6 +361,46 @@ fn unknown_platforms_are_dropped_and_digests_checked() {
             .apps
             .insert("Zstd.app".into(), "Applications/Zstd.app".into());
     }));
+
+    assert!(escapes(|output| {
+        output
+            .app_settings
+            .insert("Zstd.app".into(), AppSettings::default());
+    }));
+}
+
+#[test]
+fn app_settings_sit_beside_apps_so_older_clients_still_parse_them() {
+    let mut package = package("orbstack");
+    let output = package
+        .versions
+        .values_mut()
+        .flat_map(|outputs| outputs.values_mut())
+        .next()
+        .unwrap();
+    output
+        .apps
+        .insert("OrbStack.app".into(), "OrbStack.app".into());
+    output.app_settings.insert(
+        "OrbStack.app".into(),
+        AppSettings {
+            updates: Updates::Itself,
+            ..AppSettings::default()
+        },
+    );
+
+    let json = serde_json::to_value(&*output).unwrap();
+    assert_eq!(
+        json["apps"],
+        serde_json::json!({ "OrbStack.app": "OrbStack.app" })
+    );
+    assert_eq!(
+        json["app_settings"],
+        serde_json::json!({ "OrbStack.app": { "updates": "self" } })
+    );
+
+    let parsed = serde_json::from_slice::<Package>(&entry(&package)).unwrap();
+    assert_eq!(parsed, package);
 }
 
 #[test]

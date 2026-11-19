@@ -206,6 +206,7 @@ mod tests {
             maintainers: Vec::new(),
             bins: Default::default(),
             apps: Default::default(),
+            app_settings: Default::default(),
         };
 
         graph.packages.insert(

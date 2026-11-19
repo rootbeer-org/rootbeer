@@ -355,6 +355,7 @@ mod tests {
                 manifest: manifest.into(),
                 bins: BTreeSet::new(),
                 apps: BTreeMap::new(),
+                app_settings: BTreeMap::new(),
             };
 
             Package {

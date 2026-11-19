@@ -126,6 +126,7 @@ fn packages(
                 manifest,
                 bins: metadata.bins.clone(),
                 apps: metadata.apps.clone(),
+                app_settings: metadata.app_settings.clone(),
             };
 
             package
@@ -184,6 +185,7 @@ mod tests {
                     maintainers: vec!["tale".into()],
                     bins: [target.name.clone()].into(),
                     apps: BTreeMap::new(),
+                    app_settings: BTreeMap::new(),
                 },
             };
             graph.packages.insert(target.clone(), package);
