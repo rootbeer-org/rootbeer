@@ -4,7 +4,8 @@ use super::install::{self, LazyIndex, Source, Wanted};
 use super::local::{self, Evaluated};
 use super::{migrate, this_platform, HELPER};
 use rootbeer_core::env::{profiles, DEFAULT, USER};
-use rootbeer_profile::{Changed, Generation, InstalledApp, Member, Profile, Removal};
+use rootbeer_drv::{AppSettings, Location};
+use rootbeer_profile::{Applications, Changed, Generation, InstalledApp, Member, Profile, Removal};
 use rootbeer_store::{Store, ROOT};
 use rustix::process::getuid;
 use std::collections::{BTreeMap, BTreeSet};
@@ -170,7 +171,9 @@ pub(super) fn install_requests(
     }
 
     if let Some(applications) = applications() {
-        let apps = members.iter().flat_map(|(_, member)| member.apps.keys());
+        let apps = members
+            .iter()
+            .flat_map(|(_, member)| located(&member.apps, &member.app_settings));
         check_apps(profile, &applications, apps)?;
     }
 
@@ -422,14 +425,28 @@ pub(super) fn switch(
 
 pub(super) fn check_apps<'a>(
     profile: &Profile,
-    applications: &Path,
-    apps: impl IntoIterator<Item = &'a String>,
+    applications: &Applications,
+    apps: impl IntoIterator<Item = (&'a String, Location)>,
 ) -> Result<(), String> {
-    let legacy = migrate::legacy_apps(applications)?;
-    let apps = apps.into_iter().filter(|app| !legacy.contains(*app));
+    let legacy = migrate::legacy_apps(&applications.user)?;
+    let apps = apps
+        .into_iter()
+        .filter(|(app, _)| !legacy.contains(*app))
+        .map(|(app, location)| (app.as_str(), location));
     profile
-        .check_apps(applications, apps.map(String::as_str))
+        .check_apps(applications, apps)
         .map_err(profile_error)
+}
+
+/// Each app with the location its export asks for.
+pub(super) fn located<'a>(
+    apps: &'a BTreeMap<String, String>,
+    settings: &'a BTreeMap<String, AppSettings>,
+) -> impl Iterator<Item = (&'a String, Location)> {
+    apps.keys().map(|app| {
+        let location = settings.get(app).map(|settings| settings.location);
+        (app, location.unwrap_or_default())
+    })
 }
 
 pub(super) fn install_apps(
@@ -446,7 +463,7 @@ pub(super) fn install_apps(
         .packages
         .values()
         .flat_map(|member| member.apps.keys());
-    migrate::release_legacy_apps(&applications, apps)?;
+    migrate::release_legacy_apps(&applications.user, apps)?;
 
     let deployed = profile
         .install_apps(&applications, removal, changed)
@@ -482,8 +499,9 @@ pub(super) fn install_apps(
     Ok(())
 }
 
-/// None under sudo with HOME kept, so root never writes into a user's home.
-pub(super) fn applications() -> Option<PathBuf> {
+/// None under sudo with HOME kept, so root never writes into a user's home
+/// or into `/Applications`.
+pub(super) fn applications() -> Option<Applications> {
     if !cfg!(target_os = "macos") {
         return None;
     }
@@ -491,7 +509,10 @@ pub(super) fn applications() -> Option<PathBuf> {
     let home = PathBuf::from(std::env::var_os("HOME")?);
     let is_own = home.is_absolute()
         && fs::metadata(&home).is_ok_and(|metadata| metadata.uid() == getuid().as_raw());
-    is_own.then(|| home.join("Applications"))
+    is_own.then(|| Applications {
+        user: home.join("Applications"),
+        system: PathBuf::from("/Applications"),
+    })
 }
 
 pub(super) fn current(profile: &Profile) -> Result<Generation, String> {

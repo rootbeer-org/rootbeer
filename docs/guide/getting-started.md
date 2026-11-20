@@ -122,7 +122,7 @@ sudo rm -rf "/opt/rb/profiles/$(id -u)"
 
 Your configuration in `~/.config/rootbeer` and any files it applied stay in place;
 delete them yourself if you no longer want them. On macOS, the apps Rootbeer
-installed in `~/Applications` stay too. Once no other user on the machine uses Rootbeer,
+installed in `~/Applications` and `/Applications` stay too. Once no other user on the machine uses Rootbeer,
 remove the shared store:
 
 ```sh

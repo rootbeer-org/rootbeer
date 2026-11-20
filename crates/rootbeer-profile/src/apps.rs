@@ -1,5 +1,5 @@
 use crate::{Error, Profile, Schema, compare_versions, io_at, sync, taken};
-use rootbeer_drv::{Key, Updates};
+use rootbeer_drv::{Key, Location, Updates};
 use rustix::fs::{CWD, RenameFlags, renameat_with};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
@@ -11,6 +11,24 @@ use std::path::{Path, PathBuf};
 
 const RECEIPT_SCHEMA: u32 = 1;
 const RECEIPT: &str = ".apps.json";
+
+/// The folders apps are installed in, by location.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Applications {
+    /// `~/Applications`
+    pub user: PathBuf,
+    /// `/Applications`
+    pub system: PathBuf,
+}
+
+impl Applications {
+    pub fn path(&self, location: Location, app: &str) -> PathBuf {
+        match location {
+            Location::User => self.user.join(app),
+            Location::System => self.system.join(app),
+        }
+    }
+}
 
 /// What happens to the copy of an app the profile no longer selects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,6 +117,7 @@ struct Wanted {
     version: String,
     key: Key,
     updates: Updates,
+    location: Location,
     bundle: PathBuf,
 }
 
@@ -131,7 +150,7 @@ impl Profile {
     /// their store bundles, and removes the copies it no longer selects.
     pub fn install_apps(
         &self,
-        applications: &Path,
+        applications: &Applications,
         removal: Removal,
         changed: Changed,
     ) -> Result<Deployed, Error> {
@@ -141,38 +160,30 @@ impl Profile {
         let mut receipt = read_receipt(&self.receipt())?;
         let mut deployed = Deployed::default();
 
-        deployed.problems.extend(self.sweep(applications));
+        for folder in [&applications.user, &applications.system] {
+            deployed.problems.extend(self.sweep(folder));
+        }
 
-        // Before installing, so an app whose name changed case frees it.
-        let stale = receipt
+        // The file system ignores case, so an app whose name changed case
+        // frees it first. One that moved keeps its copy until the new one
+        // lands.
+        let wanted_names = wanted
+            .keys()
+            .map(|path| fold(path))
+            .collect::<BTreeSet<_>>();
+        let (renamed, moved) = receipt
             .apps
-            .iter()
-            .filter(|(path, _)| !wanted.contains_key(*path))
-            .map(|(path, installed)| (path.clone(), installed.clone()))
-            .collect::<Vec<_>>();
+            .keys()
+            .filter(|path| !wanted.contains_key(*path))
+            .cloned()
+            .partition::<Vec<_>, _>(|path| wanted_names.contains(&fold(path)));
 
-        for (path, installed) in stale {
-            let is_present = fs::symlink_metadata(&path).is_ok();
-            if is_present && !is_same_app(&installed, read_bundle(&path).as_ref()) {
-                deployed.problems.push(disowned(&path));
-            } else if removal == Removal::Delete
-                && let Err(error) = remove_tree(&path)
-            {
-                deployed.problems.push(error);
-                continue;
-            }
+        self.remove_stale(&mut receipt, renamed, removal, &mut deployed.problems)?;
 
-            receipt.apps.remove(&path);
-            self.write_receipt(&receipt)?;
-        }
-
-        let links = self.links(applications, &wanted, &mut deployed.problems);
-        if wanted.is_empty() {
-            return Ok(deployed);
-        }
-
-        if let Err(error) = fs::create_dir_all(applications) {
-            deployed.problems.push(io_at(applications)(error));
+        let links = self.links(&applications.user, &wanted, &mut deployed.problems);
+        let has_user_apps = wanted.values().any(|app| app.location == Location::User);
+        if has_user_apps && let Err(error) = fs::create_dir_all(&applications.user) {
+            deployed.problems.push(io_at(&applications.user)(error));
             return Ok(deployed);
         }
 
@@ -208,6 +219,13 @@ impl Profile {
                     }
                 },
             };
+
+            if wanted.location == Location::System && !can_write(&applications.system) {
+                deployed
+                    .problems
+                    .push(unwritable(path, &applications.system));
+                continue;
+            }
 
             let is_link = matches!(placement, Placement::OverLink);
             if is_link && let Err(error) = fs::remove_file(path) {
@@ -247,7 +265,48 @@ impl Profile {
             }
         }
 
+        // A move whose new copy failed keeps the old one.
+        let app_name = |path: &Path| path.file_name().map(|name| fold(Path::new(name)));
+        let has_landed = |path: &PathBuf| {
+            wanted
+                .keys()
+                .filter(|wanted| app_name(wanted) == app_name(path))
+                .all(|wanted| receipt.apps.contains_key(wanted))
+        };
+
+        let moved = moved.into_iter().filter(has_landed).collect();
+        self.remove_stale(&mut receipt, moved, removal, &mut deployed.problems)?;
         Ok(deployed)
+    }
+
+    /// Removes the copies at `stale`, which the profile no longer selects.
+    fn remove_stale(
+        &self,
+        receipt: &mut Receipt,
+        stale: Vec<PathBuf>,
+        removal: Removal,
+        problems: &mut Vec<Error>,
+    ) -> Result<(), Error> {
+        for path in stale {
+            let Some(installed) = receipt.apps.get(&path) else {
+                continue;
+            };
+
+            let is_present = fs::symlink_metadata(&path).is_ok();
+            if is_present && !is_same_app(installed, read_bundle(&path).as_ref()) {
+                problems.push(disowned(&path));
+            } else if removal == Removal::Delete
+                && let Err(error) = remove_tree(&path)
+            {
+                problems.push(error);
+                continue;
+            }
+
+            receipt.apps.remove(&path);
+            self.write_receipt(receipt)?;
+        }
+
+        Ok(())
     }
 
     /// The copies this profile installed, as they are now.
@@ -268,12 +327,12 @@ impl Profile {
         Ok(apps.collect())
     }
 
-    /// Refuses apps whose names something other than this profile holds in
-    /// `applications`.
+    /// Refuses apps whose paths something other than this profile holds, or
+    /// that go where the user can't write.
     pub fn check_apps<'a>(
         &self,
-        applications: &Path,
-        apps: impl IntoIterator<Item = &'a str>,
+        applications: &Applications,
+        apps: impl IntoIterator<Item = (&'a str, Location)>,
     ) -> Result<(), Error> {
         let receipt = read_receipt(&self.receipt())?;
         let others = self.others()?;
@@ -282,7 +341,12 @@ impl Profile {
             .keys()
             .map(|path| fold(path))
             .collect::<BTreeSet<_>>();
-        for path in apps.into_iter().map(|app| applications.join(app)) {
+        for (app, location) in apps {
+            let path = applications.path(location, app);
+            if location == Location::System && !can_write(&applications.system) {
+                return Err(unwritable(&path, &applications.system));
+            }
+
             if let Some(owner) = others.get(&fold(&path)) {
                 return Err(owned(&path, owner));
             }
@@ -296,7 +360,7 @@ impl Profile {
         Ok(())
     }
 
-    fn wanted(&self, applications: &Path) -> Result<BTreeMap<PathBuf, Wanted>, Error> {
+    fn wanted(&self, applications: &Applications) -> Result<BTreeMap<PathBuf, Wanted>, Error> {
         let Some(generation) = self.current()? else {
             return Ok(BTreeMap::new());
         };
@@ -313,10 +377,11 @@ impl Profile {
                     version: member.version.clone(),
                     key: member.key.clone(),
                     updates: settings.updates,
+                    location: settings.location,
                     bundle,
                 };
 
-                wanted.insert(applications.join(app), entry);
+                wanted.insert(applications.path(settings.location, app), entry);
             }
         }
 
@@ -446,8 +511,11 @@ impl Profile {
         path.with_file_name(format!("{}{name}.tmp", self.staging_prefix()))
     }
 
+    /// Every user's profiles stage in `/Applications`, and each user has a
+    /// profile with each name, so the uid keeps them apart.
     fn staging_prefix(&self) -> String {
-        format!(".rb-{}-", self.name)
+        let uid = rustix::process::getuid().as_raw();
+        format!(".rb-{uid}-{}-", self.name)
     }
 
     /// Removes copies a crash left half made or half replaced.
@@ -610,6 +678,20 @@ fn owned(path: &Path, owner: &str) -> Error {
     Error::Refused(format!(
         "{} belongs to your {owner} profile",
         path.display()
+    ))
+}
+
+/// `/Applications` is `root:admin` with group write, so an admin writes
+/// there without sudo, as dragging an app in does.
+fn can_write(folder: &Path) -> bool {
+    rustix::fs::access(folder, rustix::fs::Access::WRITE_OK).is_ok()
+}
+
+fn unwritable(path: &Path, folder: &Path) -> Error {
+    Error::Refused(format!(
+        "installing {} needs an admin user, who can write to {}",
+        path.display(),
+        folder.display()
     ))
 }
 

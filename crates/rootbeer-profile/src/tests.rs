@@ -1,8 +1,8 @@
 use crate::{
-    Changed, Error, Generation, InstalledApp, Member, Profile, Removal, SCHEMA, bin,
+    Applications, Changed, Error, Generation, InstalledApp, Member, Profile, Removal, SCHEMA, bin,
     compare_versions,
 };
-use rootbeer_drv::{AppSettings, Key, Updates};
+use rootbeer_drv::{AppSettings, Key, Location, Updates};
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::fs;
@@ -271,6 +271,17 @@ impl PartialEq for Error {
     }
 }
 
+fn folders(fixture: &Fixture) -> Applications {
+    Applications {
+        user: fixture.profiles.join("../Applications"),
+        system: fixture.profiles.join("../System"),
+    }
+}
+
+fn user_apps<const N: usize>(apps: [&str; N]) -> [(&str, Location); N] {
+    apps.map(|app| (app, Location::User))
+}
+
 /// A store bundle at `version` that's read-only, as the store leaves it,
 /// holding a file that names its key.
 fn store_app(store: &Path, digit: char, app: &str, version: &str) -> Member {
@@ -333,7 +344,8 @@ fn names(directory: &Path) -> Vec<String> {
 #[test]
 fn apps_are_writable_copies_that_follow_every_switch() {
     let fixture = fixture();
-    let applications = fixture.profiles.join("../Applications");
+    let folders = folders(&fixture);
+    let applications = folders.user.clone();
     let profile = Profile::open(&fixture.profiles, "user").unwrap();
     let store = locate(&fixture.store);
 
@@ -344,7 +356,7 @@ fn apps_are_writable_copies_that_follow_every_switch() {
     let packages = BTreeMap::from([("slack".to_string(), first)]);
     profile.create(holding(&packages), &store).unwrap();
     let deployed = profile
-        .install_apps(&applications, Removal::Delete, Changed::Leave)
+        .install_apps(&folders, Removal::Delete, Changed::Leave)
         .unwrap();
     assert!(deployed.problems.is_empty(), "{:?}", deployed.problems);
 
@@ -361,19 +373,19 @@ fn apps_are_writable_copies_that_follow_every_switch() {
     let packages = BTreeMap::from([("slack".to_string(), second)]);
     profile.create(holding(&packages), &store).unwrap();
     profile
-        .install_apps(&applications, Removal::Delete, Changed::Leave)
+        .install_apps(&folders, Removal::Delete, Changed::Leave)
         .unwrap();
     assert_eq!(installed_key(&app), key('b').as_str());
 
     profile.create(Generation::default(), &store).unwrap();
     profile
-        .install_apps(&applications, Removal::Delete, Changed::Leave)
+        .install_apps(&folders, Removal::Delete, Changed::Leave)
         .unwrap();
     assert!(fs::symlink_metadata(&app).is_err());
 
     profile.rollback().unwrap();
     profile
-        .install_apps(&applications, Removal::Delete, Changed::Leave)
+        .install_apps(&folders, Removal::Delete, Changed::Leave)
         .unwrap();
     assert_eq!(installed_key(&app), key('b').as_str());
     assert_eq!(
@@ -387,7 +399,8 @@ fn apps_are_writable_copies_that_follow_every_switch() {
 #[test]
 fn a_missing_copy_returns_and_a_crash_leaves_nothing_behind() {
     let fixture = fixture();
-    let applications = fixture.profiles.join("../Applications");
+    let folders = folders(&fixture);
+    let applications = folders.user.clone();
     let profile = Profile::open(&fixture.profiles, "user").unwrap();
     let slack = with_app(
         &fixture.store,
@@ -399,32 +412,32 @@ fn a_missing_copy_returns_and_a_crash_leaves_nothing_behind() {
         .create(holding(&packages), locate(&fixture.store))
         .unwrap();
     profile
-        .install_apps(&applications, Removal::Delete, Changed::Leave)
+        .install_apps(&folders, Removal::Delete, Changed::Leave)
         .unwrap();
 
     let app = applications.join("Slack.app");
     fs::remove_dir_all(&app).unwrap();
-    let staged = applications.join(".rb-user-Slack.app.tmp");
+    let uid = rustix::process::getuid().as_raw();
+    let staged = applications.join(format!(".rb-{uid}-user-Slack.app.tmp"));
     fs::create_dir_all(staged.join("Contents")).unwrap();
     fs::write(staged.join("Contents/Info.plist"), "").unwrap();
     set_tree_mode(&staged, 0o555, 0o444);
-    fs::create_dir(applications.join(".rb-default-Slack.app.tmp")).unwrap();
+    let other = format!(".rb-{uid}-default-Slack.app.tmp");
+    fs::create_dir(applications.join(&other)).unwrap();
 
     let deployed = profile
-        .install_apps(&applications, Removal::Delete, Changed::Leave)
+        .install_apps(&folders, Removal::Delete, Changed::Leave)
         .unwrap();
     assert!(deployed.problems.is_empty(), "{:?}", deployed.problems);
     assert!(app.is_dir());
-    assert_eq!(
-        names(&applications),
-        [".rb-default-Slack.app.tmp", "Slack.app"]
-    );
+    assert_eq!(names(&applications), [other.as_str(), "Slack.app"]);
 }
 
 #[test]
 fn links_from_before_copies_become_copies() {
     let fixture = fixture();
-    let applications = fixture.profiles.join("../Applications");
+    let folders = folders(&fixture);
+    let applications = folders.user.clone();
     let profile = Profile::open(&fixture.profiles, "user").unwrap();
     let slack = with_app(
         &fixture.store,
@@ -441,11 +454,11 @@ fn links_from_before_copies_become_copies() {
     std::os::unix::fs::symlink(farm.join("Slack.app"), applications.join("Slack.app")).unwrap();
     std::os::unix::fs::symlink(farm.join("Slack.app"), applications.join("Chat.app")).unwrap();
     profile
-        .check_apps(&applications, ["Slack.app", "Chat.app"])
+        .check_apps(&folders, user_apps(["Slack.app", "Chat.app"]))
         .unwrap();
 
     let deployed = profile
-        .install_apps(&applications, Removal::Delete, Changed::Leave)
+        .install_apps(&folders, Removal::Delete, Changed::Leave)
         .unwrap();
     assert!(deployed.problems.is_empty(), "{:?}", deployed.problems);
     assert_eq!(deployed.migrated, ["Slack.app"]);
@@ -457,7 +470,7 @@ fn links_from_before_copies_become_copies() {
     );
 
     let again = profile
-        .install_apps(&applications, Removal::Delete, Changed::Leave)
+        .install_apps(&folders, Removal::Delete, Changed::Leave)
         .unwrap();
     assert!(again.migrated.is_empty());
 }
@@ -465,7 +478,8 @@ fn links_from_before_copies_become_copies() {
 #[test]
 fn an_app_something_else_holds_is_reported_and_left_alone() {
     let fixture = fixture();
-    let applications = fixture.profiles.join("../Applications");
+    let folders = folders(&fixture);
+    let applications = folders.user.clone();
     let store = locate(&fixture.store);
 
     // Profiles in one directory share a lock, so one is open at a time.
@@ -475,7 +489,7 @@ fn an_app_something_else_holds_is_reported_and_left_alone() {
     let default = Profile::open(&fixture.profiles, "default").unwrap();
     default.create(holding(&packages), &store).unwrap();
     default
-        .install_apps(&applications, Removal::Delete, Changed::Leave)
+        .install_apps(&folders, Removal::Delete, Changed::Leave)
         .unwrap();
     drop(default);
 
@@ -494,14 +508,14 @@ fn an_app_something_else_holds_is_reported_and_left_alone() {
         ))
     };
     assert_eq!(
-        user.check_apps(&applications, ["Free.app", "Slack.app"]),
+        user.check_apps(&folders, user_apps(["Free.app", "Slack.app"])),
         Err(taken("Slack.app"))
     );
     assert_eq!(
-        user.check_apps(&applications, ["zed.app"]),
+        user.check_apps(&folders, user_apps(["zed.app"])),
         Err(owned("zed.app"))
     );
-    assert_eq!(user.check_apps(&applications, ["Free.app"]), Ok(()));
+    assert_eq!(user.check_apps(&folders, user_apps(["Free.app"])), Ok(()));
 
     let slack = with_app(
         &fixture.store,
@@ -513,7 +527,7 @@ fn an_app_something_else_holds_is_reported_and_left_alone() {
     user.create(holding(&packages), &store).unwrap();
 
     let deployed = user
-        .install_apps(&applications, Removal::Delete, Changed::Leave)
+        .install_apps(&folders, Removal::Delete, Changed::Leave)
         .unwrap();
     assert_eq!(deployed.problems, [taken("Slack.app"), owned("Zed.app")]);
     assert!(
@@ -526,11 +540,18 @@ fn an_app_something_else_holds_is_reported_and_left_alone() {
 }
 
 fn slack(store: &Path, digit: char, version: &str, updates: Updates) -> Generation {
+    slack_at(store, digit, version, updates, Location::User)
+}
+
+fn slack_at(
+    store: &Path,
+    digit: char,
+    version: &str,
+    updates: Updates,
+    location: Location,
+) -> Generation {
     let mut member = store_app(store, digit, "Slack.app", version);
-    let settings = AppSettings {
-        updates,
-        ..AppSettings::default()
-    };
+    let settings = AppSettings { updates, location };
 
     member.app_settings.insert("Slack.app".into(), settings);
     holding(&BTreeMap::from([("slack".to_string(), member)]))
@@ -539,13 +560,14 @@ fn slack(store: &Path, digit: char, version: &str, updates: Updates) -> Generati
 #[test]
 fn an_app_that_updates_itself_moves_forward_until_its_updater_does() {
     let fixture = fixture();
-    let applications = fixture.profiles.join("../Applications");
+    let folders = folders(&fixture);
+    let applications = folders.user.clone();
     let profile = Profile::open(&fixture.profiles, "user").unwrap();
     let store = locate(&fixture.store);
     let app = applications.join("Slack.app");
     let install = |changed| {
         let deployed = profile
-            .install_apps(&applications, Removal::Delete, changed)
+            .install_apps(&folders, Removal::Delete, changed)
             .unwrap();
         assert!(deployed.problems.is_empty(), "{:?}", deployed.problems);
         assert!(deployed.changed.is_empty(), "{:?}", deployed.changed);
@@ -591,7 +613,8 @@ fn an_app_that_updates_itself_moves_forward_until_its_updater_does() {
 #[test]
 fn a_changed_app_rb_updates_is_left_until_forced() {
     let fixture = fixture();
-    let applications = fixture.profiles.join("../Applications");
+    let folders = folders(&fixture);
+    let applications = folders.user.clone();
     let profile = Profile::open(&fixture.profiles, "user").unwrap();
     let app = applications.join("Slack.app");
     profile
@@ -601,12 +624,12 @@ fn a_changed_app_rb_updates_is_left_until_forced() {
         )
         .unwrap();
     profile
-        .install_apps(&applications, Removal::Delete, Changed::Leave)
+        .install_apps(&folders, Removal::Delete, Changed::Leave)
         .unwrap();
 
     write_info(&app, "com.example.app", "1.1");
     let deployed = profile
-        .install_apps(&applications, Removal::Delete, Changed::Leave)
+        .install_apps(&folders, Removal::Delete, Changed::Leave)
         .unwrap();
     assert_eq!(deployed.changed, ["Slack.app"]);
     assert_eq!(
@@ -615,7 +638,7 @@ fn a_changed_app_rb_updates_is_left_until_forced() {
     );
 
     let deployed = profile
-        .install_apps(&applications, Removal::Delete, Changed::Replace)
+        .install_apps(&folders, Removal::Delete, Changed::Replace)
         .unwrap();
     assert!(deployed.changed.is_empty());
     assert!(!profile.installed_apps().unwrap()[0].has_changed);
@@ -625,13 +648,14 @@ fn a_changed_app_rb_updates_is_left_until_forced() {
 #[test]
 fn an_app_with_another_identifier_is_no_longer_rbs() {
     let fixture = fixture();
-    let applications = fixture.profiles.join("../Applications");
+    let folders = folders(&fixture);
+    let applications = folders.user.clone();
     let profile = Profile::open(&fixture.profiles, "user").unwrap();
     let store = locate(&fixture.store);
     let app = applications.join("Slack.app");
     let install = |changed| {
         profile
-            .install_apps(&applications, Removal::Delete, changed)
+            .install_apps(&folders, Removal::Delete, changed)
             .unwrap()
             .problems
     };
@@ -664,6 +688,79 @@ fn an_app_with_another_identifier_is_no_longer_rbs() {
 }
 
 #[test]
+fn an_app_that_moves_keeps_its_copy_until_the_new_one_lands() {
+    let fixture = fixture();
+    let folders = folders(&fixture);
+    let profile = Profile::open(&fixture.profiles, "user").unwrap();
+    let store = locate(&fixture.store);
+    let install = || {
+        profile
+            .install_apps(&folders, Removal::Delete, Changed::Leave)
+            .unwrap()
+            .problems
+    };
+
+    profile
+        .create(slack(&fixture.store, 'a', "1.0", Updates::Rootbeer), &store)
+        .unwrap();
+    install();
+
+    let system = [("Slack.app", Location::System)];
+    let unwritable = || {
+        Error::Refused(format!(
+            "installing {} needs an admin user, who can write to {}",
+            folders.system.join("Slack.app").display(),
+            folders.system.display()
+        ))
+    };
+    fs::create_dir(&folders.system).unwrap();
+    fs::set_permissions(&folders.system, fs::Permissions::from_mode(0o555)).unwrap();
+    assert_eq!(profile.check_apps(&folders, system), Err(unwritable()));
+
+    let generation = slack_at(
+        &fixture.store,
+        'b',
+        "1.0",
+        Updates::Rootbeer,
+        Location::System,
+    );
+    profile.create(generation, &store).unwrap();
+    assert_eq!(install(), [unwritable()]);
+    assert_eq!(names(&folders.user), ["Slack.app"]);
+
+    fs::set_permissions(&folders.system, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(profile.check_apps(&folders, system), Ok(()));
+    assert_eq!(install(), []);
+    assert_eq!(names(&folders.user), Vec::<String>::new());
+    assert_eq!(names(&folders.system), ["Slack.app"]);
+    assert_eq!(
+        installed_key(&folders.system.join("Slack.app")),
+        key('b').as_str()
+    );
+    release(&fixture.store);
+}
+
+#[test]
+fn an_app_whose_name_changed_case_frees_it_first() {
+    let fixture = fixture();
+    let folders = folders(&fixture);
+    let profile = Profile::open(&fixture.profiles, "user").unwrap();
+    let store = locate(&fixture.store);
+    for (digit, app) in [('a', "Slack.app"), ('b', "slack.app")] {
+        let member = store_app(&fixture.store, digit, app, "1.0");
+        let packages = BTreeMap::from([("slack".to_string(), member)]);
+        profile.create(holding(&packages), &store).unwrap();
+        let deployed = profile
+            .install_apps(&folders, Removal::Delete, Changed::Leave)
+            .unwrap();
+        assert!(deployed.problems.is_empty(), "{:?}", deployed.problems);
+        assert_eq!(names(&folders.user), [app]);
+    }
+
+    release(&fixture.store);
+}
+
+#[test]
 fn versions_order_by_their_numbers() {
     assert_eq!(compare_versions("1.10.0", "1.9.0"), Ordering::Greater);
     assert_eq!(
@@ -675,7 +772,8 @@ fn versions_order_by_their_numbers() {
 #[test]
 fn a_kept_app_is_handed_to_the_user() {
     let fixture = fixture();
-    let applications = fixture.profiles.join("../Applications");
+    let folders = folders(&fixture);
+    let applications = folders.user.clone();
     let profile = Profile::open(&fixture.profiles, "user").unwrap();
     let store = locate(&fixture.store);
     let slack = with_app(
@@ -686,18 +784,18 @@ fn a_kept_app_is_handed_to_the_user() {
     let packages = BTreeMap::from([("slack".to_string(), slack)]);
     profile.create(holding(&packages), &store).unwrap();
     profile
-        .install_apps(&applications, Removal::Delete, Changed::Leave)
+        .install_apps(&folders, Removal::Delete, Changed::Leave)
         .unwrap();
 
     profile.create(Generation::default(), &store).unwrap();
     profile
-        .install_apps(&applications, Removal::Keep, Changed::Leave)
+        .install_apps(&folders, Removal::Keep, Changed::Leave)
         .unwrap();
     assert!(applications.join("Slack.app").is_dir());
 
     profile.rollback().unwrap();
     let deployed = profile
-        .install_apps(&applications, Removal::Delete, Changed::Leave)
+        .install_apps(&folders, Removal::Delete, Changed::Leave)
         .unwrap();
     assert_eq!(
         deployed.problems,

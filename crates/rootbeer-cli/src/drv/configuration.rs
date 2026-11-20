@@ -3,7 +3,8 @@ use super::github;
 use super::install::{self, LazyIndex, Source, Wanted};
 use super::local;
 use super::profile::{
-    applications, check_apps, current, directory, install_apps, is_same, profile_error, switch,
+    applications, check_apps, current, directory, install_apps, is_same, located, profile_error,
+    switch,
 };
 use super::this_platform;
 use rootbeer_core::env::{profiles, DEFAULT};
@@ -197,7 +198,7 @@ pub(crate) fn configure(
         check_apps(
             &profile,
             &applications,
-            apps.flat_map(|locked| locked.apps.keys()),
+            apps.flat_map(|locked| located(&locked.apps, &locked.app_settings)),
         )?;
     }
 

@@ -64,6 +64,10 @@ blocks, so it costs no space. Rootbeer replaces the copy whenever the profile
 selects a different version, and `rb rollback` puts the old one back. An app
 that's running keeps its old version until you restart it.
 
+Apps with system extensions, such as network filters or drivers, only work from
+`/Applications`, so their packages install them there. That needs an admin user,
+who can write to `/Applications` without `sudo`. Rootbeer never asks for it.
+
 Some packages mark an app as updating itself, because its built-in updater
 works. Rootbeer installs it once and then leaves updates to the app. It moves the
 app to a newer packaged version only while the app hasn't updated itself, and

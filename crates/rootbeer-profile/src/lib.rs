@@ -22,7 +22,7 @@ mod roots;
 mod tests;
 mod version;
 
-pub use apps::{Changed, Deployed, InstalledApp, Removal};
+pub use apps::{Applications, Changed, Deployed, InstalledApp, Removal};
 pub use lock::{LOCK_SCHEMA, Lock, Locked};
 pub use roots::{hold_while_running, roots};
 pub use version::compare_versions;
