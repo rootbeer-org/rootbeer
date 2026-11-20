@@ -4,8 +4,10 @@ use super::install::{self, LazyIndex, Source, Wanted};
 use super::local::{self, Evaluated};
 use super::{migrate, this_platform, HELPER};
 use rootbeer_core::env::{profiles, DEFAULT, USER};
-use rootbeer_drv::{AppSettings, Location};
-use rootbeer_profile::{Applications, Changed, Generation, InstalledApp, Member, Profile, Removal};
+use rootbeer_profile::{
+    AppSettings, Applications, Changed, Generation, InstalledApp, Location, Member, Overrides,
+    Profile, Removal, Updates,
+};
 use rootbeer_store::{Store, ROOT};
 use rustix::process::getuid;
 use std::collections::{BTreeMap, BTreeSet};
@@ -32,6 +34,23 @@ pub(crate) struct UseArgs {
     catalog: Option<PathBuf>,
     #[command(flatten)]
     source: Source,
+    /// Who updates these packages' apps instead of what the packages say
+    #[arg(long, requires = "packages", value_parser = setting::<Updates>(["rootbeer", "self"]))]
+    updates: Option<Updates>,
+    /// Where these packages' apps go, `system` being /Applications
+    #[arg(long, requires = "packages", value_parser = setting::<Location>(["user", "system"]))]
+    location: Option<Location>,
+}
+
+/// An app setting by the names its type serializes.
+fn setting<T>(names: [&'static str; 2]) -> impl clap::builder::TypedValueParser<Value = T>
+where
+    T: serde::de::DeserializeOwned + Clone + Send + Sync + 'static,
+{
+    use clap::builder::TypedValueParser;
+
+    clap::builder::PossibleValuesParser::new(names)
+        .try_map(|value| serde_json::from_value(serde_json::Value::String(value)))
 }
 
 pub(crate) fn add(args: &UseArgs) -> Result<(), String> {
@@ -46,11 +65,12 @@ pub(crate) fn add(args: &UseArgs) -> Result<(), String> {
 
     let directory = directory(true)?;
     let profile = Profile::open(&directory, USER).map_err(profile_error)?;
-    let generation = current(&profile)?;
+    let mut generation = current(&profile)?;
     let index = LazyIndex::new(&args.source);
     let is_known = |name: &str| generation.packages.contains_key(name);
     let mut requests = install::resolve_aliases(requests, is_known, &index)?;
 
+    let named = requests.keys().cloned().collect::<Vec<_>>();
     // Pinned first, so a checkout evaluates the version the pin keeps.
     pin(&generation.packages, &mut requests, args.should_update);
     let evaluated = match &args.catalog {
@@ -59,7 +79,29 @@ pub(crate) fn add(args: &UseArgs) -> Result<(), String> {
     };
 
     let requests = planned(&generation.packages, requests, args.should_update);
-    if requests.is_empty() {
+
+    // A package that stays as it is takes new settings without installing
+    // again. One that's installing takes them once it resolves.
+    let overrides = Overrides {
+        updates: args.updates,
+        location: args.location,
+    };
+
+    let mut is_resettled = false;
+    for name in named.iter().filter(|name| !requests.contains_key(*name)) {
+        let Some(member) = generation.packages.get_mut(name) else {
+            continue;
+        };
+
+        overrides
+            .check(name, &member.apps, &member.app_settings)
+            .map_err(profile_error)?;
+        let merged = member.overrides.merge(overrides);
+        is_resettled |= merged != member.overrides;
+        member.overrides = merged;
+    }
+
+    if requests.is_empty() && !is_resettled {
         eprintln!("nothing to install, your {USER} profile already has these packages");
         return install_apps(&profile, Removal::Delete, Changed::Leave);
     }
@@ -70,16 +112,20 @@ pub(crate) fn add(args: &UseArgs) -> Result<(), String> {
         requests,
         &index,
         evaluated.as_ref(),
+        overrides,
         |_, error| Err(error),
     )
 }
 
+/// Installs `requests` into `profile`, with `overrides` over each one's app
+/// settings.
 pub(super) fn install_requests(
     profile: &Profile,
     mut generation: Generation,
     requests: BTreeMap<String, Wanted>,
     index: &LazyIndex,
     evaluated: Option<&Evaluated>,
+    overrides: Overrides,
     mut unmatched: impl FnMut(&str, String) -> Result<(), String>,
 ) -> Result<(), String> {
     let (mut store, is_root) = install::open_store()?;
@@ -110,6 +156,7 @@ pub(super) fn install_requests(
                     bins: output.bins.clone(),
                     apps: output.apps.clone(),
                     app_settings: output.app_settings.clone(),
+                    overrides: Overrides::default(),
                     extra: BTreeMap::new(),
                 }),
             Wanted::Release(request) => {
@@ -128,6 +175,7 @@ pub(super) fn install_requests(
                         is_local: false,
                         apps: BTreeMap::new(),
                         app_settings: BTreeMap::new(),
+                        overrides: Overrides::default(),
                         pin: None,
                         extra: BTreeMap::new(),
                     },
@@ -146,12 +194,13 @@ pub(super) fn install_requests(
                     bins: package.metadata.bins.clone(),
                     apps: package.metadata.apps.clone(),
                     app_settings: package.metadata.app_settings.clone(),
+                    overrides: Overrides::default(),
                     pin: install::line(version.as_deref(), &target.version),
                     extra: BTreeMap::new(),
                 }),
         };
 
-        let member = match member {
+        let mut member = match member {
             Ok(member) => member,
             Err(error) => {
                 unmatched(&name, error)?;
@@ -159,21 +208,36 @@ pub(super) fn install_requests(
             }
         };
 
+        overrides
+            .check(&name, &member.apps, &member.app_settings)
+            .map_err(profile_error)?;
+        let existing = generation.packages.get(&name);
+        let kept = existing.map(|member| member.overrides).unwrap_or_default();
+        member.overrides = kept.merge(overrides);
+
         let existing = generation.packages.get(&name);
         if !existing.is_some_and(|existing| is_same(existing, &member)) {
             members.push((name, member));
         }
     }
 
-    if members.is_empty() {
+    let before = current(profile)?;
+    if members.is_empty() && generation == before {
         eprintln!("your {USER} profile is already up to date");
         return install_apps(profile, Removal::Delete, Changed::Leave);
     }
 
+    // Including members whose only change is their settings.
     if let Some(applications) = applications() {
+        let resettled = generation
+            .packages
+            .iter()
+            .filter(|(name, member)| before.packages.get(*name) != Some(*member));
         let apps = members
             .iter()
-            .flat_map(|(_, member)| located(&member.apps, &member.app_settings));
+            .map(|(name, member)| (name, member))
+            .chain(resettled)
+            .flat_map(|(_, member)| located(&member.apps, &member.app_settings, member.overrides));
         check_apps(profile, &applications, apps)?;
     }
 
@@ -369,6 +433,7 @@ pub(crate) fn self_update() -> Result<(), String> {
         requests,
         &LazyIndex::new(&Source::default()),
         None,
+        Overrides::default(),
         |_, error| Err(error),
     )
 }
@@ -395,6 +460,7 @@ pub(crate) fn keep_rootbeer() -> Result<(), String> {
         requests,
         &LazyIndex::new(&Source::default()),
         None,
+        Overrides::default(),
         |_, error| Err(error),
     )
 }
@@ -438,14 +504,15 @@ pub(super) fn check_apps<'a>(
         .map_err(profile_error)
 }
 
-/// Each app with the location its export asks for.
+/// Each app with the location its export asks for, unless overridden.
 pub(super) fn located<'a>(
     apps: &'a BTreeMap<String, String>,
     settings: &'a BTreeMap<String, AppSettings>,
+    overrides: Overrides,
 ) -> impl Iterator<Item = (&'a String, Location)> {
-    apps.keys().map(|app| {
-        let location = settings.get(app).map(|settings| settings.location);
-        (app, location.unwrap_or_default())
+    apps.keys().map(move |app| {
+        let export = settings.get(app).copied().unwrap_or_default();
+        (app, overrides.apply(export).location)
     })
 }
 
@@ -579,6 +646,7 @@ mod tests {
             bins: Default::default(),
             apps: Default::default(),
             app_settings: Default::default(),
+            overrides: Overrides::default(),
             pin: None,
             extra: Default::default(),
         }

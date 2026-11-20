@@ -78,6 +78,22 @@ If an app Rootbeer updates changes on its own, Rootbeer warns and leaves it as i
 is. Delete it to get Rootbeer's copy back, or run `rb apply --force-apps` to
 replace every such app your configuration installs.
 
+To choose for yourself, set `updates` or `location` on the package:
+
+```lua
+rb.package("google-chrome", { updates = "rootbeer" })
+rb.package("orbstack", { location = "system" })
+```
+
+```sh
+rb use google-chrome --updates rootbeer
+rb use orbstack --location system
+```
+
+`rb use` remembers these settings, so a later `rb use --update` keeps them.
+Asking for `user` on an app that needs `/Applications` is an error, as is setting
+either on a package without apps.
+
 Existing apps are never overwritten, and an app Rootbeer didn't install makes
 installation fail. Only one profile can install an app, so declaring it in Lua
 and with `rb use` conflicts. Rootbeer does not configure login items or grant app

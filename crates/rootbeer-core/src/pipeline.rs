@@ -7,6 +7,7 @@ use crate::package::PackageRequest;
 use crate::plan::Op;
 use crate::tools::{Install, ToolRuntime};
 use crate::{Error, Runtime};
+use rootbeer_profile::Overrides;
 
 #[derive(Debug, Default, Clone, Copy)]
 pub enum Mode {
@@ -173,7 +174,7 @@ impl PlannedPipeline {
     }
 
     /// Removes the package ops from the plan, which the caller installs.
-    pub fn take_packages(&mut self) -> Vec<PackageRequest> {
+    pub fn take_packages(&mut self) -> Vec<(PackageRequest, Overrides)> {
         let (packages, ops) = std::mem::take(&mut self.ops)
             .into_iter()
             .partition::<Vec<_>, _>(|op| matches!(op, Op::Package { .. }));
@@ -182,7 +183,7 @@ impl PlannedPipeline {
         packages
             .into_iter()
             .filter_map(|op| match op {
-                Op::Package { request } => Some(request),
+                Op::Package { request, overrides } => Some((request, overrides)),
                 _ => None,
             })
             .collect()

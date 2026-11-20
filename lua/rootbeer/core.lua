@@ -77,11 +77,15 @@ function rootbeer.exec(cmd, args) end
 --- @class rootbeer.PackageOptions
 --- @field asset? string Exact GitHub release asset filename. Required when platform selection is ambiguous.
 --- @field bins? table<string, string> Binary name → relative path in the GitHub asset. Defaults to executable discovery for archives, or the repository name for raw binaries.
+--- @field updates? "rootbeer"|"self" Who updates the package's macOS apps. `"self"` leaves updates to each app's own updater, and `"rootbeer"` replaces the app whenever the package changes. Defaults to what the package says.
+--- @field location? "user"|"system" Where the package's macOS apps go. `"system"` installs them in `/Applications`, which needs an admin user. Asking for `"user"` on an app that needs `/Applications` is an error.
 
 --- @class rootbeer.PackageRequestSpec
 --- @field request string Package name, name@version, or github:owner/repo@tag.
 --- @field asset? string Exact release asset filename for a github: request.
 --- @field bins? table<string, string> Exported command name → relative path for a github: request.
+--- @field updates? "rootbeer"|"self" Who updates the package's macOS apps, as in `rootbeer.PackageOptions`.
+--- @field location? "user"|"system" Where the package's macOS apps go, as in `rootbeer.PackageOptions`.
 
 --- Builds packages from a checkout of recipes, laid out like the package
 --- index with `packages/<name>.lua` and `host.lua`. A name the checkout
@@ -96,7 +100,7 @@ function rootbeer.package_catalog(path) end
 --- such as `"jq@^1.7"`. Package versions are saved in `rootbeer.lock`.
 --- You can also use `github:owner/repo@tag` for a GitHub release's asset.
 --- @param spec string|rootbeer.PackageRequestSpec Package request, or a request with options.
---- @param opts? rootbeer.PackageOptions Asset options for `github:` requests.
+--- @param opts? rootbeer.PackageOptions Asset options for `github:` requests, and how the package's macOS apps are installed.
 function rootbeer.package(spec, opts) end
 
 --- Declares a dense package list in order. Accepts the same entries as package().

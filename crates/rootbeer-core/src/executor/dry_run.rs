@@ -75,7 +75,7 @@ pub fn dry_run(ops: &[Op], handler: &mut impl ExecutionHandler) -> ExecutionRepo
                 report.results.push(result);
             }
 
-            Op::Package { request } => {
+            Op::Package { request, .. } => {
                 let result = OpResult::PackagePlanned {
                     spec: request.to_string(),
                 };

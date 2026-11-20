@@ -256,7 +256,7 @@ pub fn apply_with_tools(
                 }
             }
 
-            Op::Package { request } => {
+            Op::Package { request, .. } => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     format!("package `{request}` must be installed before apply"),

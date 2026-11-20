@@ -88,10 +88,19 @@ pub(crate) fn migrate(args: &Args) -> Result<(), String> {
             });
         let requests = profile::planned(&generation.packages, requests, false);
         if !requests.is_empty() {
-            profile::install_requests(&user, generation, requests, &index, None, |name, error| {
-                stuck.push(format!("{name}: {error}"));
-                Ok(())
-            })?;
+            let overrides = rootbeer_profile::Overrides::default();
+            profile::install_requests(
+                &user,
+                generation,
+                requests,
+                &index,
+                None,
+                overrides,
+                |name, error| {
+                    stuck.push(format!("{name}: {error}"));
+                    Ok(())
+                },
+            )?;
         }
     }
 

@@ -12,7 +12,7 @@ use rootbeer_core::package::PackageRequest;
 use rootbeer_core::PackageLockOptions;
 use rootbeer_drv::{output_path, Platform};
 use rootbeer_profile::{
-    Changed, Error, Generation, Lock, Locked, Member, Profile, Release, Removal,
+    Changed, Error, Generation, Lock, Locked, Member, Overrides, Profile, Release, Removal,
 };
 use rootbeer_store::Store;
 use rootbeer_trust::Package;
@@ -32,13 +32,13 @@ pub(crate) struct Configured {
 /// releases, and the local catalog into `default`. A name the catalog defines
 /// comes from its recipe.
 pub(crate) fn configure(
-    packages: Vec<PackageRequest>,
+    packages: Vec<(PackageRequest, Overrides)>,
     catalog: Option<&Path>,
     script_dir: &Path,
     flags: &PackageLockOptions,
     source: &Source,
 ) -> Result<Configured, String> {
-    let mut requests = requests(packages)?;
+    let (mut requests, overrides) = requests(packages)?;
     let path = script_dir.join("rootbeer.lock");
     let existing = read(&path, flags.is_locked)?;
     let platform = this_platform()?;
@@ -193,13 +193,18 @@ pub(crate) fn configure(
 
     let profile = Profile::open(&directory(true)?, DEFAULT).map_err(profile_error)?;
     let current = current(&profile)?;
+    let overrides_of = |package: &str| overrides.get(package).copied().unwrap_or_default();
+    for (package, locked) in kept.iter().chain(&resolved) {
+        overrides_of(package)
+            .check(package, &locked.apps, &locked.app_settings)
+            .map_err(profile_error)?;
+    }
+
     if let Some(applications) = applications() {
-        let apps = kept.values().chain(resolved.values());
-        check_apps(
-            &profile,
-            &applications,
-            apps.flat_map(|locked| located(&locked.apps, &locked.app_settings)),
-        )?;
+        let apps = kept.iter().chain(&resolved).flat_map(|(package, locked)| {
+            located(&locked.apps, &locked.app_settings, overrides_of(package))
+        });
+        check_apps(&profile, &applications, apps)?;
     }
 
     let mut members = BTreeMap::new();
@@ -260,6 +265,7 @@ pub(crate) fn configure(
             bins: locked.bins.clone(),
             apps: locked.apps.clone(),
             app_settings: locked.app_settings.clone(),
+            overrides: overrides_of(&package),
             pin: locked.pin.clone().filter(|_| is_pinned),
             extra: BTreeMap::new(),
         };
@@ -323,9 +329,14 @@ pub(crate) fn install_default_apps(changed: Changed) -> Result<(), String> {
     install_apps(&profile, Removal::Delete, changed)
 }
 
-fn requests(packages: Vec<PackageRequest>) -> Result<Requests, String> {
+/// What the configuration asks for by name, and the app settings it asks
+/// for each.
+fn requests(
+    packages: Vec<(PackageRequest, Overrides)>,
+) -> Result<(Requests, BTreeMap<String, Overrides>), String> {
     let mut requests = Requests::new();
-    for package in packages {
+    let mut overrides = BTreeMap::new();
+    for (package, settings) in packages {
         let (name, wanted) = match package {
             PackageRequest::Index { name, version } => (name, Wanted::Index(version)),
             PackageRequest::Release {
@@ -341,6 +352,18 @@ fn requests(packages: Vec<PackageRequest>) -> Result<Requests, String> {
             }
         };
 
+        // A declaration without settings agrees with one that has them.
+        let previous = match settings.is_empty() {
+            true => None,
+            false => overrides.insert(name.clone(), settings),
+        };
+
+        if previous.is_some_and(|previous| previous != settings) {
+            return Err(format!(
+                "the configuration lists {name} with two sets of app settings"
+            ));
+        }
+
         let Some(asked) = requests.insert(name.clone(), wanted.clone()) else {
             continue;
         };
@@ -354,7 +377,7 @@ fn requests(packages: Vec<PackageRequest>) -> Result<Requests, String> {
         }
     }
 
-    Ok(requests)
+    Ok((requests, overrides))
 }
 
 fn paths(bins: &BTreeMap<String, PathBuf>) -> Result<BTreeMap<String, String>, String> {
@@ -502,11 +525,16 @@ mod tests {
         let packages = |requests: &[&str]| {
             requests
                 .iter()
-                .map(|request| PackageRequest::parse(request).unwrap())
+                .map(|request| {
+                    (
+                        PackageRequest::parse(request).unwrap(),
+                        Overrides::default(),
+                    )
+                })
                 .collect::<Vec<_>>()
         };
 
-        let accepted = super::requests(packages(&[
+        let (accepted, _) = super::requests(packages(&[
             "jq",
             "fd@10.2.0",
             "jq",
@@ -524,6 +552,28 @@ mod tests {
 
         let error = super::requests(packages(&["jq", "github:jqlang/jq"])).unwrap_err();
         assert_eq!(error, "the configuration lists jq from two sources");
+
+        // Settings declared once apply wherever the package is listed.
+        let orbstack = || PackageRequest::parse("orbstack").unwrap();
+        let updates = |updates| Overrides {
+            updates: Some(updates),
+            location: None,
+        };
+        let declared = vec![
+            (orbstack(), Overrides::default()),
+            (orbstack(), updates(Updates::Itself)),
+        ];
+        let (_, overrides) = super::requests(declared).unwrap();
+        assert_eq!(overrides["orbstack"], updates(Updates::Itself));
+
+        let declared = vec![
+            (orbstack(), updates(Updates::Itself)),
+            (orbstack(), updates(Updates::Rootbeer)),
+        ];
+        assert_eq!(
+            super::requests(declared).unwrap_err(),
+            "the configuration lists orbstack with two sets of app settings"
+        );
     }
 
     #[test]

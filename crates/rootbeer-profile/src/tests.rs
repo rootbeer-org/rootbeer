@@ -1,6 +1,6 @@
 use crate::{
-    Applications, Changed, Error, Generation, InstalledApp, Member, Profile, Removal, SCHEMA, bin,
-    compare_versions,
+    Applications, Changed, Error, Generation, InstalledApp, Member, Overrides, Profile, Removal,
+    SCHEMA, bin, compare_versions,
 };
 use rootbeer_drv::{AppSettings, Key, Location, Updates};
 use std::cmp::Ordering;
@@ -50,6 +50,7 @@ fn output(store: &Path, digit: char, bins: &[&str]) -> Member {
         bins: bins.iter().map(|name| name.to_string()).collect(),
         apps: BTreeMap::new(),
         app_settings: BTreeMap::new(),
+        overrides: Overrides::default(),
         pin: None,
         extra: BTreeMap::new(),
     }
@@ -758,6 +759,47 @@ fn an_app_whose_name_changed_case_frees_it_first() {
     }
 
     release(&fixture.store);
+}
+
+#[test]
+fn overrides_win_except_over_a_required_location() {
+    let settings = |updates, location| AppSettings { updates, location };
+    let overrides = |updates, location| Overrides { updates, location };
+    let system = settings(Updates::Itself, Location::System);
+    let asked = overrides(Some(Updates::Rootbeer), Some(Location::User));
+    assert_eq!(
+        asked.apply(system),
+        settings(Updates::Rootbeer, Location::System)
+    );
+
+    let asked = overrides(None, Some(Location::System));
+    assert_eq!(
+        asked.apply(AppSettings::default()),
+        settings(Updates::Rootbeer, Location::System)
+    );
+
+    let later = overrides(Some(Updates::Itself), None);
+    assert_eq!(
+        asked.merge(later),
+        overrides(Some(Updates::Itself), Some(Location::System))
+    );
+
+    let apps = BTreeMap::from([("Tailscale.app".to_string(), "Tailscale.app".to_string())]);
+    let required = BTreeMap::from([("Tailscale.app".to_string(), system)]);
+    let to_user = overrides(None, Some(Location::User));
+    assert_eq!(
+        to_user.check("tailscale", &apps, &required),
+        Err(Error::Refused(
+            "Tailscale.app only works from /Applications".into()
+        ))
+    );
+    assert_eq!(
+        later.check("jq", &BTreeMap::new(), &BTreeMap::new()),
+        Err(Error::Refused(
+            "jq has no apps, so updates and location don't apply to it".into()
+        ))
+    );
+    assert_eq!(later.check("tailscale", &apps, &required), Ok(()));
 }
 
 #[test]

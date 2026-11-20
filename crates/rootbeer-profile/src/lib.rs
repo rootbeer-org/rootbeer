@@ -2,9 +2,7 @@
 //! a symlink to its current generation and each generation is a directory with
 //! symlinks into the store and a recorded manifest.
 
-use rootbeer_drv::{
-    AppSettings, Format, Key, Sha256, is_app_name, is_file_name, is_inside, is_package_name,
-};
+use rootbeer_drv::{Format, Key, Sha256, is_app_name, is_file_name, is_inside, is_package_name};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -22,8 +20,9 @@ mod roots;
 mod tests;
 mod version;
 
-pub use apps::{Applications, Changed, Deployed, InstalledApp, Removal};
+pub use apps::{Applications, Changed, Deployed, InstalledApp, Overrides, Removal};
 pub use lock::{LOCK_SCHEMA, Lock, Locked};
+pub use rootbeer_drv::{AppSettings, Location, Updates};
 pub use roots::{hold_while_running, roots};
 pub use version::compare_versions;
 
@@ -75,8 +74,19 @@ pub struct Member {
     /// index or recipe says.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub app_settings: BTreeMap<String, AppSettings>,
+    /// How the user asked for its apps to be installed instead.
+    #[serde(default, skip_serializing_if = "Overrides::is_empty")]
+    pub overrides: Overrides,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
+}
+
+impl Member {
+    /// How `app` is installed, as its export says unless overridden.
+    pub fn app(&self, app: &str) -> AppSettings {
+        let export = self.app_settings.get(app).copied().unwrap_or_default();
+        self.overrides.apply(export)
+    }
 }
 
 /// A GitHub release asset unpacked into the store, with what it takes to

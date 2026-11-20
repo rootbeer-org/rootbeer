@@ -1,5 +1,5 @@
 use crate::{Error, Profile, Schema, compare_versions, io_at, sync, taken};
-use rootbeer_drv::{Key, Location, Updates};
+use rootbeer_drv::{AppSettings, Key, Location, Updates};
 use rustix::fs::{CWD, RenameFlags, renameat_with};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
@@ -26,6 +26,72 @@ impl Applications {
         match location {
             Location::User => self.user.join(app),
             Location::System => self.system.join(app),
+        }
+    }
+}
+
+/// How the user asked for a package's apps to be installed, over what their
+/// exports say.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Overrides {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updates: Option<Updates>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<Location>,
+}
+
+impl Overrides {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// What `newer` sets replaces what this sets.
+    pub fn merge(self, newer: Overrides) -> Overrides {
+        Overrides {
+            updates: newer.updates.or(self.updates),
+            location: newer.location.or(self.location),
+        }
+    }
+
+    /// An export that needs `/Applications` keeps it.
+    pub fn apply(self, export: AppSettings) -> AppSettings {
+        let location = match export.location {
+            Location::System => Location::System,
+            Location::User => self.location.unwrap_or(Location::User),
+        };
+
+        AppSettings {
+            updates: self.updates.unwrap_or(export.updates),
+            location,
+        }
+    }
+
+    /// Refuses what can't apply to `package`, given its apps and how their
+    /// exports install them.
+    pub fn check(
+        self,
+        package: &str,
+        apps: &BTreeMap<String, String>,
+        settings: &BTreeMap<String, AppSettings>,
+    ) -> Result<(), Error> {
+        if self.is_empty() {
+            return Ok(());
+        }
+
+        if apps.is_empty() {
+            return Err(Error::Refused(format!(
+                "{package} has no apps, so updates and location don't apply to it"
+            )));
+        }
+
+        let system = settings
+            .iter()
+            .find(|(_, settings)| settings.location == Location::System);
+        match (self.location, system) {
+            (Some(Location::User), Some((app, _))) => Err(Error::Refused(format!(
+                "{app} only works from /Applications"
+            ))),
+            _ => Ok(()),
         }
     }
 }
@@ -371,7 +437,7 @@ impl Profile {
             for app in member.apps.keys() {
                 let link = farm.join(app);
                 let bundle = fs::read_link(&link).map_err(io_at(&link))?;
-                let settings = member.app_settings.get(app).copied().unwrap_or_default();
+                let settings = member.app(app);
                 let entry = Wanted {
                     package: package.clone(),
                     version: member.version.clone(),

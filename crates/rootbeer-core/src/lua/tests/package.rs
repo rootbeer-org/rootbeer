@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 
 use crate::package::PackageRequest;
 use crate::plan::Op;
+use rootbeer_profile::{Location, Overrides, Updates};
 
 use super::super::test_support::{run, vm_in};
 
@@ -29,7 +30,7 @@ fn rb_package_string_pushes_request_intent_without_resolving() {
         rb.package("github:owner/tool@v1.0.0")
         "#);
 
-    let [Op::Package { request }] = ops.as_slice() else {
+    let [Op::Package { request, .. }] = ops.as_slice() else {
         panic!("expected one Package op, got {ops:?}");
     };
 
@@ -41,6 +42,34 @@ fn rb_package_string_pushes_request_intent_without_resolving() {
             asset: None,
             bins: BTreeMap::new(),
         }
+    );
+}
+
+#[test]
+fn app_settings_ride_along_with_the_request() {
+    let ops = run(r#"
+        rb.package("google-chrome", { updates = "rootbeer" })
+        rb.packages({ { request = "orbstack", location = "system", updates = "self" } })
+    "#);
+    let overrides = ops
+        .into_iter()
+        .map(|op| match op {
+            Op::Package { overrides, .. } => overrides,
+            _ => panic!("unexpected op"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        overrides,
+        [
+            Overrides {
+                updates: Some(Updates::Rootbeer),
+                location: None,
+            },
+            Overrides {
+                updates: Some(Updates::Itself),
+                location: Some(Location::System),
+            },
+        ]
     );
 }
 
@@ -146,6 +175,7 @@ fn github_options_remain_declarative() {
     "#);
     let [Op::Package {
         request: PackageRequest::Release { asset, bins, .. },
+        ..
     }] = ops.as_slice()
     else {
         panic!("expected a release request");
@@ -171,7 +201,7 @@ fn batches_and_structured_requests_match_individual_declarations() {
     let intents = |ops: Vec<Op>| {
         ops.into_iter()
             .map(|op| match op {
-                Op::Package { request } => request,
+                Op::Package { request, .. } => request,
                 _ => panic!("unexpected op"),
             })
             .collect::<Vec<_>>()
@@ -291,6 +321,10 @@ fn exact_specs_source_selectors_and_other_resolvers_are_gone() {
         (
             r#"rb.package("brew:jq")"#,
             "the only places rb installs from",
+        ),
+        (
+            r#"rb.package("orbstack", { updates = "never" })"#,
+            "package field `updates` must be \"rootbeer\" or \"self\"",
         ),
     ] {
         let root = tempfile::tempdir().unwrap();
