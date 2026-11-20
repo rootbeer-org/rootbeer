@@ -61,7 +61,18 @@ rb use bobrwm
 Or declare `rb.package("bobrwm")` in Lua and run `rb apply`. Both install a copy
 of the bundle at `~/Applications/Bobrwm.app`. On APFS the copy shares the store's
 blocks, so it costs no space. Rootbeer replaces the copy whenever the profile
-selects a different version, and `rb rollback` puts the old one back.
+selects a different version, and `rb rollback` puts the old one back. An app
+that's running keeps its old version until you restart it.
+
+Some packages mark an app as updating itself, because its built-in updater
+works. Rootbeer installs it once and then leaves updates to the app. It moves the
+app to a newer packaged version only while the app hasn't updated itself, and
+never back to an older one, even on rollback. `rb generations` shows the version
+that's actually installed.
+
+If an app Rootbeer updates changes on its own, Rootbeer warns and leaves it as it
+is. Delete it to get Rootbeer's copy back, or run `rb apply --force-apps` to
+replace every such app your configuration installs.
 
 Existing apps are never overwritten, and an app Rootbeer didn't install makes
 installation fail. Only one profile can install an app, so declaring it in Lua

@@ -5,11 +5,15 @@ edition = "2024"
 rust-version.workspace = true
 
 [dependencies]
+plist = "1"
 rootbeer-drv = { path = "../rootbeer-drv" }
 rustix = { version = "1", features = ["fs", "process"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
 
 [lints.clippy]
 unwrap_used = "deny"

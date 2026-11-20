@@ -20,10 +20,12 @@ mod lock;
 mod roots;
 #[cfg(test)]
 mod tests;
+mod version;
 
-pub use apps::{Deployed, Removal};
+pub use apps::{Changed, Deployed, InstalledApp, Removal};
 pub use lock::{LOCK_SCHEMA, Lock, Locked};
 pub use roots::{hold_while_running, roots};
+pub use version::compare_versions;
 
 /// Generations from schema 1 hold only index members, so this rb reads them.
 /// Schema 3 installs apps as copies, which an older rb would refuse as taken,

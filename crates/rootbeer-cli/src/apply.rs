@@ -15,6 +15,11 @@ pub struct Args {
     #[arg(short, long)]
     pub force: bool,
 
+    /// Replace apps that changed since rb installed them, though never an app
+    /// that updates itself with an older version
+    #[arg(long = "force-apps")]
+    pub should_force_apps: bool,
+
     /// Refuse to update rootbeer.lock; fail if it is missing or stale
     #[arg(long)]
     pub locked: bool,
@@ -228,7 +233,12 @@ pub fn run(args: Args, lua_dir: Option<&PathBuf>) {
             }
 
             if should_install_apps && !has_failed {
-                if let Err(e) = crate::drv::install_default_apps() {
+                let changed = match args.should_force_apps {
+                    true => rootbeer_profile::Changed::Replace,
+                    false => rootbeer_profile::Changed::Leave,
+                };
+
+                if let Err(e) = crate::drv::install_default_apps(changed) {
                     eprintln!("{} error: {e}", "✗".red().bold());
                     std::process::exit(1);
                 }

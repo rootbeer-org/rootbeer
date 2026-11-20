@@ -4,7 +4,7 @@ use super::install::{self, LazyIndex, Source, Wanted};
 use super::local::{self, Evaluated};
 use super::{migrate, this_platform, HELPER};
 use rootbeer_core::env::{profiles, DEFAULT, USER};
-use rootbeer_profile::{Generation, Member, Profile, Removal};
+use rootbeer_profile::{Changed, Generation, InstalledApp, Member, Profile, Removal};
 use rootbeer_store::{Store, ROOT};
 use rustix::process::getuid;
 use std::collections::{BTreeMap, BTreeSet};
@@ -60,7 +60,7 @@ pub(crate) fn add(args: &UseArgs) -> Result<(), String> {
     let requests = planned(&generation.packages, requests, args.should_update);
     if requests.is_empty() {
         eprintln!("nothing to install, your {USER} profile already has these packages");
-        return install_apps(&profile, Removal::Delete);
+        return install_apps(&profile, Removal::Delete, Changed::Leave);
     }
 
     install_requests(
@@ -166,7 +166,7 @@ pub(super) fn install_requests(
 
     if members.is_empty() {
         eprintln!("your {USER} profile is already up to date");
-        return install_apps(profile, Removal::Delete);
+        return install_apps(profile, Removal::Delete, Changed::Leave);
     }
 
     if let Some(applications) = applications() {
@@ -194,7 +194,7 @@ pub(super) fn install_requests(
     }
 
     switch(profile, USER, &store, generation)?;
-    install_apps(profile, Removal::Delete)
+    install_apps(profile, Removal::Delete, Changed::Leave)
 }
 
 /// Drops what the generation already has, unless updating. An update keeps a
@@ -287,7 +287,7 @@ pub(crate) fn remove(names: &[String], removal: Removal) -> Result<(), String> {
 
     let (store, _) = install::open_store()?;
     switch(&profile, USER, &store, generation)?;
-    install_apps(&profile, removal)
+    install_apps(&profile, removal, Changed::Leave)
 }
 
 pub(crate) fn rollback() -> Result<(), String> {
@@ -295,20 +295,25 @@ pub(crate) fn rollback() -> Result<(), String> {
     let profile = Profile::open(&directory, USER).map_err(profile_error)?;
     let number = profile.rollback().map_err(profile_error)?;
     eprintln!("{USER} profile is now generation {number}");
-    install_apps(&profile, Removal::Delete)
+    install_apps(&profile, Removal::Delete, Changed::Leave)
 }
 
 pub(crate) fn generations() -> Result<(), String> {
     let directory = directory(false)?;
     let profile = Profile::open_shared(&directory, USER).map_err(profile_error)?;
     let current = profile.current_number().map_err(profile_error)?;
+    let apps = profile.installed_apps().map_err(profile_error)?;
     for number in profile.generations().map_err(profile_error)? {
-        let marker = if Some(number) == current { '*' } else { ' ' };
+        let is_current = Some(number) == current;
+        let marker = if is_current { '*' } else { ' ' };
         let contents = match profile.read(number) {
             Ok(generation) => generation
                 .packages
                 .iter()
-                .map(|(name, member)| format!("{name}@{}", member.version))
+                .map(|(name, member)| match is_current {
+                    true => format!("{name}@{}{}", member.version, copies(&apps, name, member)),
+                    false => format!("{name}@{}", member.version),
+                })
                 .collect::<Vec<_>>()
                 .join(" "),
             Err(error) => format!("unreadable, {}", profile_error(error)),
@@ -318,6 +323,27 @@ pub(crate) fn generations() -> Result<(), String> {
     }
 
     Ok(())
+}
+
+/// The copies of `package`'s apps that aren't its bundle, as an app that
+/// updates itself leaves them.
+fn copies(apps: &[InstalledApp], package: &str, member: &Member) -> String {
+    let differing = apps
+        .iter()
+        .filter(|app| app.package == package && (app.has_changed || app.key != member.key))
+        .map(|app| {
+            let name = app.path.file_name().unwrap_or_default().to_string_lossy();
+            match &app.version {
+                Some(version) => format!("{name} is {version}"),
+                None => format!("{name} differs"),
+            }
+        })
+        .collect::<Vec<_>>();
+
+    match differing.is_empty() {
+        true => String::new(),
+        false => format!(" ({})", differing.join(", ")),
+    }
 }
 
 /// Updates the rootbeer in `user`, or installs it there. A configuration that
@@ -406,7 +432,11 @@ pub(super) fn check_apps<'a>(
         .map_err(profile_error)
 }
 
-pub(super) fn install_apps(profile: &Profile, removal: Removal) -> Result<(), String> {
+pub(super) fn install_apps(
+    profile: &Profile,
+    removal: Removal,
+    changed: Changed,
+) -> Result<(), String> {
     let Some(applications) = applications() else {
         return Ok(());
     };
@@ -419,7 +449,7 @@ pub(super) fn install_apps(profile: &Profile, removal: Removal) -> Result<(), St
     migrate::release_legacy_apps(&applications, apps)?;
 
     let deployed = profile
-        .install_apps(&applications, removal)
+        .install_apps(&applications, removal, changed)
         .map_err(profile_error)?;
     for problem in deployed.problems {
         eprintln!("warning: {problem}");
@@ -436,6 +466,17 @@ pub(super) fn install_apps(profile: &Profile, removal: Removal) -> Result<(), St
                 "are"
             },
         );
+    }
+
+    for app in deployed.changed {
+        eprintln!(
+            "warning: {app} changed since rb installed it, so rb left it as it is. Delete it \
+             to have rb install its own"
+        );
+    }
+
+    for app in deployed.running {
+        eprintln!("note: {app} is running, and picks up the new version when it restarts");
     }
 
     Ok(())

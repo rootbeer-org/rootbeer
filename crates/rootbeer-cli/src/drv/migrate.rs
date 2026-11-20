@@ -197,7 +197,7 @@ fn configuration(args: &Args) -> Result<(), String> {
         &args.source,
     )?;
     if configured.should_install_apps {
-        install_default_apps()?;
+        install_default_apps(rootbeer_profile::Changed::Leave)?;
     }
 
     Ok(())

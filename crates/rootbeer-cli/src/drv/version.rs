@@ -1,18 +1,7 @@
 //! How versions order, and how a request selects one among them.
 
+pub(super) use rootbeer_profile::compare_versions as compare;
 use std::cmp::Ordering;
-
-/// Dotted versions compared part by part, numbers numerically.
-pub(super) fn compare(a: &str, b: &str) -> Ordering {
-    let parts = |version: &str| {
-        version
-            .split(|byte: char| !byte.is_ascii_alphanumeric())
-            .map(|part| part.parse::<u64>().map_err(|_| part.to_string()))
-            .collect::<Vec<_>>()
-    };
-
-    parts(a).cmp(&parts(b))
-}
 
 /// The newest of `versions` that `asked` selects. That's the version itself,
 /// the release line it starts, like 24.22.3 for 24, or a range like `^1.2`,
@@ -185,11 +174,5 @@ mod tests {
         assert_eq!(resolved(">=one"), None);
         assert_eq!(resolved("1,2"), None);
         assert_eq!(resolved("^"), None);
-    }
-
-    #[test]
-    fn versions_order_by_their_numbers() {
-        assert_eq!(compare("1.10.0", "1.9.0"), Ordering::Greater);
-        assert_eq!(compare("2026.2.5+262", "2026.2.5+100"), Ordering::Greater);
     }
 }

@@ -1,7 +1,8 @@
-use crate::{Error, Profile, Schema, io_at, sync, taken};
-use rootbeer_drv::Key;
+use crate::{Error, Profile, Schema, compare_versions, io_at, sync, taken};
+use rootbeer_drv::{Key, Updates};
 use rustix::fs::{CWD, RenameFlags, renameat_with};
 use serde::{Deserialize, Serialize};
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{self, Write};
@@ -19,12 +20,40 @@ pub enum Removal {
     Keep,
 }
 
+/// What happens to the copy of an app rb updates when it changed since rb
+/// installed it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Changed {
+    /// Reports it and leaves it as it is.
+    Leave,
+    Replace,
+}
+
 #[derive(Debug, Default)]
 pub struct Deployed {
     /// Apps that couldn't be installed or removed. The rest still were.
     pub problems: Vec<Error>,
     /// Apps that were links into the profile and are now copies.
     pub migrated: Vec<String>,
+    /// Apps that changed since rb installed them, which it left alone.
+    pub changed: Vec<String>,
+    /// Apps replaced while they ran, which keep the old version until they
+    /// restart.
+    pub running: Vec<String>,
+}
+
+/// A copy the profile installed, as it is now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstalledApp {
+    pub path: PathBuf,
+    pub package: String,
+    /// The package's key when rb installed the copy.
+    pub key: Key,
+    /// The version the copy's Info.plist states now.
+    pub version: Option<String>,
+    /// Whether the copy changed since rb installed it, as an app that
+    /// updates itself does.
+    pub has_changed: bool,
 }
 
 /// The copies a profile installed, by path. A copy can't show who put it
@@ -38,12 +67,50 @@ struct Receipt {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct Installed {
     package: String,
+    version: String,
     key: Key,
+    /// Absent when the bundle had no Info.plist rb could read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    bundle: Option<Bundle>,
+}
+
+/// What a bundle's Info.plist says. It's read under Apple's names and kept
+/// in the receipt under short ones.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct Bundle {
+    #[serde(alias = "CFBundleIdentifier")]
+    id: String,
+    #[serde(
+        alias = "CFBundleShortVersionString",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    version: Option<String>,
+    #[serde(
+        alias = "CFBundleVersion",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    build: Option<String>,
 }
 
 struct Wanted {
-    installed: Installed,
+    package: String,
+    version: String,
+    key: Key,
+    updates: Updates,
     bundle: PathBuf,
+}
+
+impl Wanted {
+    fn installed(&self) -> Installed {
+        Installed {
+            package: self.package.clone(),
+            version: self.version.clone(),
+            key: self.key.clone(),
+            bundle: read_bundle(&self.bundle),
+        }
+    }
 }
 
 enum Placement {
@@ -52,10 +119,22 @@ enum Placement {
     OverLink,
 }
 
+enum Action {
+    Keep,
+    Replace,
+    Changed,
+    Disown,
+}
+
 impl Profile {
     /// Installs the current generation's apps in `applications` as copies of
     /// their store bundles, and removes the copies it no longer selects.
-    pub fn install_apps(&self, applications: &Path, removal: Removal) -> Result<Deployed, Error> {
+    pub fn install_apps(
+        &self,
+        applications: &Path,
+        removal: Removal,
+        changed: Changed,
+    ) -> Result<Deployed, Error> {
         self.writable()?;
         let wanted = self.wanted(applications)?;
         let others = self.others()?;
@@ -67,13 +146,16 @@ impl Profile {
         // Before installing, so an app whose name changed case frees it.
         let stale = receipt
             .apps
-            .keys()
-            .filter(|path| !wanted.contains_key(*path))
-            .cloned()
+            .iter()
+            .filter(|(path, _)| !wanted.contains_key(*path))
+            .map(|(path, installed)| (path.clone(), installed.clone()))
             .collect::<Vec<_>>();
 
-        for path in stale {
-            if removal == Removal::Delete
+        for (path, installed) in stale {
+            let is_present = fs::symlink_metadata(&path).is_ok();
+            if is_present && !is_same_app(&installed, read_bundle(&path).as_ref()) {
+                deployed.problems.push(disowned(&path));
+            } else if removal == Removal::Delete
                 && let Err(error) = remove_tree(&path)
             {
                 deployed.problems.push(error);
@@ -97,8 +179,6 @@ impl Profile {
         for (path, wanted) in &wanted {
             let recorded = receipt.apps.get(path);
             let placement = match (recorded, fs::symlink_metadata(path)) {
-                (Some(recorded), Ok(_)) if *recorded == wanted.installed => continue,
-                (Some(_), Ok(_)) => Placement::Replace,
                 (None, _) if let Some(owner) = others.get(&fold(path)) => {
                     deployed.problems.push(owned(path, owner));
                     continue;
@@ -113,6 +193,20 @@ impl Profile {
                     deployed.problems.push(taken(path));
                     continue;
                 }
+                (Some(recorded), Ok(_)) => match reconcile(recorded, path, wanted, changed) {
+                    Action::Keep => continue,
+                    Action::Replace => Placement::Replace,
+                    Action::Changed => {
+                        deployed.changed.push(name(path));
+                        continue;
+                    }
+                    Action::Disown => {
+                        receipt.apps.remove(path);
+                        self.write_receipt(&receipt)?;
+                        deployed.problems.push(disowned(path));
+                        continue;
+                    }
+                },
             };
 
             let is_link = matches!(placement, Placement::OverLink);
@@ -121,11 +215,13 @@ impl Profile {
                 continue;
             }
 
+            let is_running = matches!(placement, Placement::Replace) && is_running(path);
+            let installed = wanted.installed();
             let placed = match placement {
                 // Recorded first, so a crash leaves a copy rb still owns. A
                 // copy that failed to land was never rb's.
                 Placement::New | Placement::OverLink => {
-                    receipt.apps.insert(path.clone(), wanted.installed.clone());
+                    receipt.apps.insert(path.clone(), installed);
                     self.write_receipt(&receipt)?;
                     let placed = self.place(&wanted.bundle, path, RenameFlags::NOREPLACE);
                     if placed.is_err() {
@@ -138,22 +234,38 @@ impl Profile {
                 Placement::Replace => self
                     .place(&wanted.bundle, path, RenameFlags::EXCHANGE)
                     .and_then(|()| {
-                        receipt.apps.insert(path.clone(), wanted.installed.clone());
+                        receipt.apps.insert(path.clone(), installed);
                         self.write_receipt(&receipt)
                     }),
             };
 
             match placed {
-                Ok(()) if is_link => {
-                    let name = path.file_name().unwrap_or_default();
-                    deployed.migrated.push(name.to_string_lossy().into_owned());
-                }
+                Ok(()) if is_link => deployed.migrated.push(name(path)),
+                Ok(()) if is_running => deployed.running.push(name(path)),
                 Ok(()) => {}
                 Err(error) => deployed.problems.push(error),
             }
         }
 
         Ok(deployed)
+    }
+
+    /// The copies this profile installed, as they are now.
+    pub fn installed_apps(&self) -> Result<Vec<InstalledApp>, Error> {
+        let receipt = read_receipt(&self.receipt())?;
+        let apps = receipt.apps.into_iter().map(|(path, installed)| {
+            let current = read_bundle(&path);
+            let has_changed = has_changed(&installed, current.as_ref());
+            InstalledApp {
+                path,
+                package: installed.package,
+                key: installed.key,
+                version: current.and_then(|bundle| bundle.version.or(bundle.build)),
+                has_changed,
+            }
+        });
+
+        Ok(apps.collect())
     }
 
     /// Refuses apps whose names something other than this profile holds in
@@ -195,12 +307,16 @@ impl Profile {
             for app in member.apps.keys() {
                 let link = farm.join(app);
                 let bundle = fs::read_link(&link).map_err(io_at(&link))?;
-                let installed = Installed {
+                let settings = member.app_settings.get(app).copied().unwrap_or_default();
+                let entry = Wanted {
                     package: package.clone(),
+                    version: member.version.clone(),
                     key: member.key.clone(),
+                    updates: settings.updates,
+                    bundle,
                 };
 
-                wanted.insert(applications.join(app), Wanted { installed, bundle });
+                wanted.insert(applications.join(app), entry);
             }
         }
 
@@ -495,4 +611,112 @@ fn owned(path: &Path, owner: &str) -> Error {
         "{} belongs to your {owner} profile",
         path.display()
     ))
+}
+
+fn disowned(path: &Path) -> Error {
+    Error::Refused(format!(
+        "{} is no longer the app rb installed, so rb stopped managing it",
+        path.display()
+    ))
+}
+
+fn name(path: &Path) -> String {
+    let name = path.file_name().unwrap_or_default();
+    name.to_string_lossy().into_owned()
+}
+
+/// What to do with a copy rb installed, now that the profile selects
+/// `wanted` there.
+fn reconcile(recorded: &Installed, path: &Path, wanted: &Wanted, changed: Changed) -> Action {
+    let current = read_bundle(path);
+    if !is_same_app(recorded, current.as_ref()) {
+        return Action::Disown;
+    }
+
+    let has_changed = has_changed(recorded, current.as_ref());
+    let is_forced = changed == Changed::Replace;
+    let is_selected = recorded.key == wanted.key;
+    match wanted.updates {
+        Updates::Rootbeer if is_selected && !has_changed => Action::Keep,
+        Updates::Rootbeer if has_changed && !is_forced => Action::Changed,
+        Updates::Rootbeer => Action::Replace,
+        // Bundle versions don't order, so rb moves an app forward only by
+        // its own versions, and only while the app's updater hasn't.
+        Updates::Itself if is_selected => Action::Keep,
+        Updates::Itself
+            if compare_versions(&wanted.version, &recorded.version) != Ordering::Greater =>
+        {
+            Action::Keep
+        }
+        Updates::Itself if has_changed && !is_forced => Action::Keep,
+        Updates::Itself => Action::Replace,
+    }
+}
+
+/// An app that updates itself keeps its identifier, so a different one
+/// means someone put another app there.
+fn is_same_app(installed: &Installed, current: Option<&Bundle>) -> bool {
+    let Some(recorded) = &installed.bundle else {
+        return true;
+    };
+
+    current.is_some_and(|current| current.id == recorded.id)
+}
+
+/// Without an Info.plist at install there's nothing to compare against.
+fn has_changed(installed: &Installed, current: Option<&Bundle>) -> bool {
+    installed.bundle.is_some() && installed.bundle.as_ref() != current
+}
+
+fn read_bundle(app: &Path) -> Option<Bundle> {
+    plist::from_file(app.join("Contents/Info.plist")).ok()
+}
+
+/// Whether a process runs from inside `app`.
+#[cfg(target_os = "macos")]
+pub(crate) fn is_running(app: &Path) -> bool {
+    use std::ffi::{OsStr, c_int};
+    use std::os::unix::ffi::OsStrExt;
+
+    let Ok(count) = usize::try_from(unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) })
+    else {
+        return false;
+    };
+
+    // Room for processes that start between the two calls.
+    let mut pids: Vec<c_int> = vec![0; count.saturating_add(64)];
+    let Some(size) = pids
+        .len()
+        .checked_mul(size_of::<c_int>())
+        .and_then(|size| c_int::try_from(size).ok())
+    else {
+        return false;
+    };
+
+    let count = unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast(), size) };
+    let Ok(count) = usize::try_from(count) else {
+        return false;
+    };
+
+    let (Ok(size), Ok(capacity)) = (
+        usize::try_from(libc::PROC_PIDPATHINFO_MAXSIZE),
+        u32::try_from(libc::PROC_PIDPATHINFO_MAXSIZE),
+    ) else {
+        return false;
+    };
+
+    let mut buffer = vec![0_u8; size];
+
+    pids.iter().take(count).any(|pid| {
+        let length = unsafe { libc::proc_pidpath(*pid, buffer.as_mut_ptr().cast(), capacity) };
+        let length = usize::try_from(length).unwrap_or_default();
+        buffer
+            .get(..length)
+            .is_some_and(|path| Path::new(OsStr::from_bytes(path)).starts_with(app))
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn is_running(_: &Path) -> bool {
+    false
 }

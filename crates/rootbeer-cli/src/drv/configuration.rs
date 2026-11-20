@@ -10,7 +10,9 @@ use rootbeer_core::env::{profiles, DEFAULT};
 use rootbeer_core::package::PackageRequest;
 use rootbeer_core::PackageLockOptions;
 use rootbeer_drv::{output_path, Platform};
-use rootbeer_profile::{Error, Generation, Lock, Locked, Member, Profile, Release, Removal};
+use rootbeer_profile::{
+    Changed, Error, Generation, Lock, Locked, Member, Profile, Release, Removal,
+};
 use rootbeer_store::Store;
 use rootbeer_trust::Package;
 use std::cell::Cell;
@@ -313,9 +315,11 @@ pub(crate) fn check_lock(script_dir: &Path) -> Result<(), String> {
     }
 }
 
-pub(crate) fn install_default_apps() -> Result<(), String> {
+/// Installs the configuration's apps. `changed` says whether copies that
+/// changed since rb installed them are replaced.
+pub(crate) fn install_default_apps(changed: Changed) -> Result<(), String> {
     let profile = Profile::open(&directory(false)?, DEFAULT).map_err(profile_error)?;
-    install_apps(&profile, Removal::Delete)
+    install_apps(&profile, Removal::Delete, changed)
 }
 
 fn requests(packages: Vec<PackageRequest>) -> Result<Requests, String> {

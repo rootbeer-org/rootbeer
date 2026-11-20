@@ -2154,6 +2154,8 @@ dependencies = [
 name = "rootbeer-profile"
 version = "0.1.0"
 dependencies = [
+ "libc",
+ "plist",
  "rootbeer-drv",
  "rustix",
  "serde",
