@@ -157,11 +157,18 @@ pub(super) fn bump(args: &Args) -> Result<(), String> {
         commit,
         serial: args.serial,
     };
+    // An always-newest download no longer serves an older version, so only
+    // the new one can still build.
+    let is_latest = catalog
+        .upstreams(name)
+        .into_iter()
+        .any(|(_, upstream)| upstream.latest);
     let depended = catalog.depended_on(name);
-    let keep = args.keep.map(|keep| match lines {
-        Some(lines) => Keep::Lines(lines),
-        None => Keep::Newest(keep),
-    });
+    let keep = match (is_latest, lines) {
+        (true, _) => Some(Keep::Newest(1)),
+        (false, Some(lines)) => args.keep.map(|_| Keep::Lines(lines)),
+        (false, None) => args.keep.map(Keep::Newest),
+    };
     let (text, dropped) = recipe.with(&entry, &defaulted, keep, &depended)?;
     if dropped.iter().any(|dropped| dropped == version) {
         return Err(format!(

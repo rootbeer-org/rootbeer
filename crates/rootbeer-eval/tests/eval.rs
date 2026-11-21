@@ -450,6 +450,30 @@ fn zipped_apps_leave_out_apple_double_files() {
 }
 
 #[test]
+fn a_latest_upstream_reads_the_app_its_download_holds() {
+    let viewer = 10;
+    let latest = FIXTURES[viewer].1.replace(
+        "\tprebuilt = {",
+        "\tupstream = { latest = true },\n\tprebuilt = {",
+    );
+    let mut fixtures = FIXTURES;
+    fixtures[viewer].1 = &latest;
+    let catalog = Catalog::parse(fixtures).unwrap();
+
+    let upstreams = catalog.upstreams("viewer");
+    assert!(upstreams.iter().all(|(_, upstream)| upstream.latest));
+    assert_eq!(
+        catalog
+            .apps("viewer", "4.1", Platform::Aarch64Macos)
+            .unwrap(),
+        ["Viewer.app"]
+    );
+
+    let plain = Catalog::parse(FIXTURES).unwrap();
+    assert!(plain.upstreams("viewer").is_empty());
+}
+
+#[test]
 fn zip_bz2_and_dmg_archives_need_7zip_to_extract() {
     let (crab, lister, viewer) = (2, 7, 10);
     let dependency = r#"{ package = "7zip", version = "26.04", kind = "build" },"#;

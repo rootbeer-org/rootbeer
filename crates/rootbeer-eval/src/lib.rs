@@ -251,6 +251,21 @@ impl Catalog {
         recipe.download(version, commit.map(str::to_string), serial, platform)
     }
 
+    /// The paths of the app bundles a version exports on a platform.
+    pub fn apps(
+        &self,
+        name: &str,
+        version: &str,
+        platform: Platform,
+    ) -> Result<Vec<String>, String> {
+        let recipe = self
+            .recipes
+            .get(name)
+            .ok_or_else(|| format!("{name} isn't in the catalog"))?;
+
+        recipe.app_paths(version, platform)
+    }
+
     /// The versions of a package any recipe depends on, at any layer.
     pub fn depended_on(&self, name: &str) -> BTreeSet<&str> {
         self.recipes

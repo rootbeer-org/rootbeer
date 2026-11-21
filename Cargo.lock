@@ -2085,6 +2085,7 @@ dependencies = [
  "data-encoding",
  "globset",
  "owo-colors",
+ "plist",
  "rootbeer-bootstrap",
  "rootbeer-cache",
  "rootbeer-core",
