@@ -418,6 +418,38 @@ fn recipes_are_sandboxed_declarative_tables() {
 }
 
 #[test]
+fn zipped_apps_leave_out_apple_double_files() {
+    let viewer = 10;
+    let zipped = FIXTURES[viewer].1.replace(".dmg", ".zip");
+    let mut fixtures = FIXTURES;
+    fixtures[viewer].1 = &zipped;
+    let catalog = Catalog::parse(fixtures).unwrap();
+    let graph = catalog.evaluate(&hosts("a"), &catalog.targets()).unwrap();
+    let script = |name: &str| {
+        graph
+            .derivations
+            .values()
+            .find_map(|derivation| match derivation {
+                Derivation::Build(build) if build.name == name => Some(build.script.clone()),
+                _ => None,
+            })
+            .unwrap()
+    };
+
+    let exclusions = "'-xr!._*' '-xr!__MACOSX'";
+    assert!(
+        script("viewer").contains(exclusions),
+        "{}",
+        script("viewer")
+    );
+    assert!(
+        !script("lister").contains(exclusions),
+        "{}",
+        script("lister")
+    );
+}
+
+#[test]
 fn zip_bz2_and_dmg_archives_need_7zip_to_extract() {
     let (crab, lister, viewer) = (2, 7, 10);
     let dependency = r#"{ package = "7zip", version = "26.04", kind = "build" },"#;

@@ -98,6 +98,7 @@ impl Package<'_> {
         let outputs = &self.resolved.spec.outputs;
         let steps = &prebuilt.steps;
         let is_discovered = install.is_some();
+        let has_apps = outputs.apps.as_ref().is_some_and(|apps| !apps.is_empty());
 
         match install {
             Some(Install::Dmg) => unpacker(&dependencies, "DMG prebuilt", "prebuilt.dependencies")?,
@@ -119,7 +120,9 @@ impl Package<'_> {
                 strip_prefix: None,
             }) if !steps.has_steps_before_install() => {
                 phases.install.push(r#"mkdir -p "${out}""#.into());
-                phases.install.push(extract(format, r#""${out}""#));
+                phases
+                    .install
+                    .push(unarchive(format, r#""${out}""#, has_apps));
             }
             // Steps before install run in the tree that becomes $out.
             Some(Install::Archive {
@@ -135,7 +138,7 @@ impl Package<'_> {
                 phases.prepare.push(r#"mkdir "${TMPDIR}/unpack""#.into());
                 phases
                     .prepare
-                    .push(extract(format, r#""${TMPDIR}/unpack""#));
+                    .push(unarchive(format, r#""${TMPDIR}/unpack""#, has_apps));
                 if steps.has_steps_before_install() {
                     phases.prepare.push(format!("cd {unpacked}"));
                     phases.install.push(
@@ -194,6 +197,18 @@ impl Package<'_> {
             host: self.host_references()?,
             ..unpacked
         })
+    }
+}
+
+/// A zip made on macOS can store each file's metadata in an AppleDouble file
+/// beside it. ditto folds those back into attributes, but 7-Zip writes them
+/// out, and inside an app bundle they break the code seal.
+fn unarchive(format: ArchiveFormat, directory: &str, has_apps: bool) -> String {
+    match format {
+        ArchiveFormat::Zip if has_apps => {
+            format!("{} '-xr!._*' '-xr!__MACOSX'", seven_zip(SOURCE, directory))
+        }
+        _ => extract(format, directory),
     }
 }
 
