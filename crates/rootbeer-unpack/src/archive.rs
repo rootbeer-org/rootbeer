@@ -1,8 +1,9 @@
 use crate::tree::Tree;
 use bzip2::read::BzDecoder;
 use std::fs::File;
-use std::io::{BufReader, Read};
+use std::io::{self, BufReader, Read};
 use std::path::Path;
+use std::time::{Duration, UNIX_EPOCH};
 use tar::EntryType;
 
 pub(crate) fn zip(archive: &Path, tree: &Tree) -> Result<(), String> {
@@ -72,8 +73,17 @@ pub(crate) fn tar_bz2(archive: &Path, tree: &Tree) -> Result<(), String> {
             EntryType::Directory => tree.directory(&path, mode)?,
             EntryType::Symlink => tree.symlink(&path, &link()?)?,
             EntryType::Link => tree.hard_link(&path, &link()?)?,
+            // Source builds compare mtimes, so make would try to rebuild
+            // generated files that look older than their sources.
             EntryType::Regular | EntryType::Continuous => {
-                tree.file(&path, mode, &mut entry)?;
+                let modified = entry.header().mtime().map_err(|error| error.to_string())?;
+                let mut file = tree.create(&path, mode)?;
+                io::copy(&mut entry, &mut file).map_err(|error| format!("{path}: {error}"))?;
+                let modified = UNIX_EPOCH
+                    .checked_add(Duration::from_secs(modified))
+                    .ok_or_else(|| format!("{path} has mtime {modified}"))?;
+                file.set_modified(modified)
+                    .map_err(|error| format!("{path}: {error}"))?;
             }
             // Extended headers that carry metadata for the next entry.
             EntryType::XGlobalHeader | EntryType::XHeader => {}
@@ -99,5 +109,43 @@ mod tests {
         assert!(is_apple_double("._Tool.app/"));
         assert!(!is_apple_double("Tool.app/Contents/Info.plist"));
         assert!(!is_apple_double("Tool.app/Contents/a._b"));
+    }
+
+    #[test]
+    fn tar_entries_keep_their_mtimes() {
+        let mut builder = tar::Builder::new(bzip2::write::BzEncoder::new(
+            Vec::new(),
+            bzip2::Compression::fast(),
+        ));
+        for (name, modified) in [("src/doc.texi", 1_000), ("src/doc.info", 2_000)] {
+            let mut header = tar::Header::new_ustar();
+            header.set_size(2);
+            header.set_mode(0o644);
+            header.set_mtime(modified);
+            builder
+                .append_data(&mut header, name, "hi".as_bytes())
+                .unwrap();
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let archive = directory.path().join("source.tar.bz2");
+        std::fs::write(&archive, builder.into_inner().unwrap().finish().unwrap()).unwrap();
+        let tree = Tree::new(&directory.path().join("out")).unwrap();
+        tar_bz2(&archive, &tree).unwrap();
+
+        let modified = |name: &str| {
+            std::fs::metadata(directory.path().join("out/src").join(name))
+                .unwrap()
+                .modified()
+                .unwrap()
+        };
+        assert_eq!(
+            modified("doc.texi"),
+            UNIX_EPOCH + Duration::from_secs(1_000)
+        );
+        assert_eq!(
+            modified("doc.info"),
+            UNIX_EPOCH + Duration::from_secs(2_000)
+        );
     }
 }
