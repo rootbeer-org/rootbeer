@@ -13,7 +13,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 const PATCH_END: &str = "RB_PATCH";
-const UNPACKER: &str = "7zip";
+const UNPACKER: &str = "rb-unpack";
+const SEVEN_ZIP: &str = "7zip";
 const SOURCE: &str = r#""${source}""#;
 const TAR: &str = r#""${TMPDIR}/source.tar""#;
 
@@ -76,7 +77,7 @@ impl Package<'_> {
 
         let is_tool = |dependency: &&Dependency| {
             dependency.name == toolchain
-                || (dependency.name == UNPACKER
+                || ([UNPACKER, SEVEN_ZIP].contains(&dependency.name.as_str())
                     && matches!(source.archive, ArchiveFormat::Zip | ArchiveFormat::TarBz2))
         };
 
@@ -235,15 +236,15 @@ impl Package<'_> {
 
     // Unpacks the source and applies patches
     fn prepare(&self, source: &Source, dependencies: &[Dependency]) -> Result<Vec<String>, String> {
-        match source.archive {
+        let unpacker = match source.archive {
             ArchiveFormat::Zip => unpacker(dependencies, "zip source", "build.dependencies")?,
             ArchiveFormat::TarBz2 => {
-                unpacker(dependencies, "tar.bz2 source", "build.dependencies")?;
+                unpacker(dependencies, "tar.bz2 source", "build.dependencies")?
             }
-            ArchiveFormat::TarGz | ArchiveFormat::TarXz => {}
-        }
+            ArchiveFormat::TarGz | ArchiveFormat::TarXz => Unpacker::Tar,
+        };
 
-        let mut lines = vec![extract(source.archive, ".")];
+        let mut lines = vec![extract(source.archive, ".", unpacker)];
         if let Some(prefix) = &source.strip_prefix {
             lines.push(format!(
                 "cd {}",
@@ -311,17 +312,32 @@ impl Phases {
     }
 }
 
-fn extract(format: ArchiveFormat, directory: &str) -> String {
-    match format {
-        ArchiveFormat::TarGz => format!(r#"tar -xzf "${{source}}" -C {directory}"#),
-        ArchiveFormat::TarXz => format!(r#"tar -xJf "${{source}}" -C {directory}"#),
-        ArchiveFormat::Zip => seven_zip(SOURCE, directory),
+/// What extracts an archive. tar opens gzip and xz itself.
+#[derive(Clone, Copy, PartialEq)]
+enum Unpacker {
+    Tar,
+    RbUnpack,
+    // Recipes that still declare 7zip extract with it until they move.
+    SevenZip,
+}
+
+fn extract(format: ArchiveFormat, directory: &str, unpacker: Unpacker) -> String {
+    match (format, unpacker) {
+        (ArchiveFormat::TarGz, _) => format!(r#"tar -xzf "${{source}}" -C {directory}"#),
+        (ArchiveFormat::TarXz, _) => format!(r#"tar -xJf "${{source}}" -C {directory}"#),
+        (ArchiveFormat::Zip, Unpacker::SevenZip) => seven_zip(SOURCE, directory),
         // 7-Zip opens one layer per run, so the tar goes through a file in between.
-        ArchiveFormat::TarBz2 => format!(
+        (ArchiveFormat::TarBz2, Unpacker::SevenZip) => format!(
             "7zz x -so -bsp0 {SOURCE} > {TAR}\n{}\nrm {TAR}",
             seven_zip(TAR, directory)
         ),
+        (ArchiveFormat::Zip, _) => rb_unpack("zip", directory),
+        (ArchiveFormat::TarBz2, _) => rb_unpack("tar.bz2", directory),
     }
+}
+
+fn rb_unpack(format: &str, directory: &str) -> String {
+    format!("rb-unpack {format} {SOURCE} {directory}")
 }
 
 // -spod takes the output path literally, -sns- skips alternate streams, and
@@ -330,18 +346,26 @@ fn seven_zip(archive: &str, directory: &str) -> String {
     format!("7zz x -y -bso0 -bsp0 -spod -sns- -snld20 -o{directory} {archive}")
 }
 
-/// Zip and DMG extraction runs `7zz` from a catalog 7zip on `PATH`.
-fn unpacker(dependencies: &[Dependency], archive: &str, field: &str) -> Result<(), String> {
-    let has_unpacker = dependencies
-        .iter()
-        .any(|dependency| dependency.kind == DependencyKind::Build && dependency.name == UNPACKER);
-    if !has_unpacker {
-        return Err(format!(
-            "a {archive} extracts with {UNPACKER}, so declare it in {field} with kind = \"build\""
-        ));
+/// Zips, tar.bz2s, disk images, and packages extract with a catalog
+/// rb-unpack on `PATH`.
+fn unpacker(dependencies: &[Dependency], archive: &str, field: &str) -> Result<Unpacker, String> {
+    let declares = |name: &str| {
+        dependencies
+            .iter()
+            .any(|dependency| dependency.kind == DependencyKind::Build && dependency.name == name)
+    };
+
+    if declares(UNPACKER) {
+        return Ok(Unpacker::RbUnpack);
     }
 
-    Ok(())
+    if declares(SEVEN_ZIP) {
+        return Ok(Unpacker::SevenZip);
+    }
+
+    Err(format!(
+        "a {archive} extracts with {UNPACKER}, so declare it in {field} with kind = \"build\""
+    ))
 }
 
 /// Links each command declared at a path outside `bin/` at `$out/bin/<name>`.

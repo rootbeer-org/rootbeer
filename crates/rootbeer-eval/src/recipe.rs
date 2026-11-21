@@ -158,6 +158,8 @@ pub(crate) struct Prebuilt {
 #[serde(deny_unknown_fields)]
 pub(crate) enum Install {
     Dmg,
+    /// A flat installer package, or a disk image holding one.
+    Pkg,
     Archive {
         format: ArchiveFormat,
         strip_prefix: Option<String>,

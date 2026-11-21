@@ -1,8 +1,8 @@
+use rootbeer_unpack::Format;
 use serde::Deserialize;
 use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::Duration;
 
 const STALL: Duration = Duration::from_secs(30);
@@ -14,8 +14,7 @@ struct Info {
     version: String,
 }
 
-/// The version of `app` in the download at `url`. The download unpacks with
-/// `7zz` from `PATH`, which reads DMGs and zips on every platform.
+/// The version of `app` in the download at `url`, a DMG, zip, or package.
 pub(super) fn version(url: &str, app: &str) -> Result<String, String> {
     let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
     let download = directory.path().join("download");
@@ -35,14 +34,17 @@ pub(super) fn version(url: &str, app: &str) -> Result<String, String> {
         .map_err(|error| format!("{url}: {error}"))?;
 
     let unpacked = directory.path().join("unpacked");
-    let status = Command::new("7zz")
-        .args(["x", "-y", "-bso0", "-bsp0", "-snld20"])
-        .arg(format!("-o{}", unpacked.display()))
-        .arg(&download)
-        .status()
-        .map_err(|error| format!("couldn't run 7zz, which reads the download ({error})"))?;
-    if !status.success() {
-        return Err(format!("7zz couldn't unpack {url} ({status})"));
+    let format = rootbeer_unpack::detect(&download)?
+        .ok_or("the download is neither a DMG, a zip, nor a package")?;
+    rootbeer_unpack::unpack(format, &download, &unpacked)
+        .map_err(|error| format!("{url}: {error}"))?;
+
+    // A DMG can hold an installer package instead of the app.
+    if format == Format::Dmg && read(&unpacked, app).is_err() {
+        let installed = directory.path().join("installed");
+        rootbeer_unpack::unpack(Format::Pkg, &download, &installed)
+            .map_err(|error| format!("{url}: {error}"))?;
+        return read(&installed, app);
     }
 
     read(&unpacked, app)

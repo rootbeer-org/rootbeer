@@ -1,4 +1,4 @@
-use super::{Package, Phases, SOURCE, extract, link, seven_zip, unpacker};
+use super::{Package, Phases, SOURCE, Unpacker, extract, link, rb_unpack, seven_zip, unpacker};
 use crate::recipe::{ArchiveFormat, Bins, Install, Prebuilt};
 use crate::template::{Values, escape, path, quote};
 use crate::{Download, ReleaseAsset};
@@ -100,18 +100,27 @@ impl Package<'_> {
         let is_discovered = install.is_some();
         let has_apps = outputs.apps.as_ref().is_some_and(|apps| !apps.is_empty());
 
-        match install {
-            Some(Install::Dmg) => unpacker(&dependencies, "DMG prebuilt", "prebuilt.dependencies")?,
+        let field = "prebuilt.dependencies";
+        let unpacker = match &install {
+            Some(Install::Dmg) => unpacker(&dependencies, "DMG prebuilt", field)?,
+            Some(Install::Pkg) => match unpacker(&dependencies, "pkg prebuilt", field)? {
+                Unpacker::SevenZip => {
+                    return Err(format!(
+                        "a pkg prebuilt extracts with rb-unpack, so declare it in {field}"
+                    ));
+                }
+                unpacker => unpacker,
+            },
             Some(Install::Archive {
                 format: ArchiveFormat::Zip,
                 ..
-            }) => unpacker(&dependencies, "zip prebuilt", "prebuilt.dependencies")?,
+            }) => unpacker(&dependencies, "zip prebuilt", field)?,
             Some(Install::Archive {
                 format: ArchiveFormat::TarBz2,
                 ..
-            }) => unpacker(&dependencies, "tar.bz2 prebuilt", "prebuilt.dependencies")?,
-            _ => {}
-        }
+            }) => unpacker(&dependencies, "tar.bz2 prebuilt", field)?,
+            _ => Unpacker::Tar,
+        };
 
         let mut phases = Phases::default();
         match install {
@@ -122,7 +131,7 @@ impl Package<'_> {
                 phases.install.push(r#"mkdir -p "${out}""#.into());
                 phases
                     .install
-                    .push(unarchive(format, r#""${out}""#, has_apps));
+                    .push(unarchive(format, r#""${out}""#, has_apps, unpacker));
             }
             // Steps before install run in the tree that becomes $out.
             Some(Install::Archive {
@@ -136,9 +145,12 @@ impl Package<'_> {
 
                 let unpacked = path("TMPDIR", &unpacked);
                 phases.prepare.push(r#"mkdir "${TMPDIR}/unpack""#.into());
-                phases
-                    .prepare
-                    .push(unarchive(format, r#""${TMPDIR}/unpack""#, has_apps));
+                phases.prepare.push(unarchive(
+                    format,
+                    r#""${TMPDIR}/unpack""#,
+                    has_apps,
+                    unpacker,
+                ));
                 if steps.has_steps_before_install() {
                     phases.prepare.push(format!("cd {unpacked}"));
                     phases.install.push(
@@ -153,10 +165,25 @@ impl Package<'_> {
                 let apps = outputs.apps.as_ref().filter(|apps| !apps.is_empty());
                 let apps = apps.ok_or("a DMG needs outputs.apps")?;
 
-                phases.prepare.push(seven_zip(SOURCE, r#""${TMPDIR}/dmg""#));
+                phases.prepare.push(match unpacker {
+                    Unpacker::SevenZip => seven_zip(SOURCE, r#""${TMPDIR}/dmg""#),
+                    _ => rb_unpack("dmg", r#""${TMPDIR}/dmg""#),
+                });
                 phases.install.push(r#"mkdir -p "${out}""#.into());
                 for app in apps.values() {
-                    phases.install.extend(copy_app(app.path()));
+                    phases.install.extend(copy_app(app.path(), "dmg", "DMG"));
+                }
+            }
+            Some(Install::Pkg) => {
+                let apps = outputs.apps.as_ref().filter(|apps| !apps.is_empty());
+                let apps = apps.ok_or("a pkg needs outputs.apps")?;
+
+                phases.prepare.push(rb_unpack("pkg", r#""${TMPDIR}/pkg""#));
+                phases.install.push(r#"mkdir -p "${out}""#.into());
+                for app in apps.values() {
+                    phases
+                        .install
+                        .extend(copy_app(app.path(), "pkg", "package"));
                 }
             }
             None => {
@@ -202,13 +229,14 @@ impl Package<'_> {
 
 /// A zip made on macOS can store each file's metadata in an AppleDouble file
 /// beside it. ditto folds those back into attributes, but 7-Zip writes them
-/// out, and inside an app bundle they break the code seal.
-fn unarchive(format: ArchiveFormat, directory: &str, has_apps: bool) -> String {
-    match format {
-        ArchiveFormat::Zip if has_apps => {
+/// out, and inside an app bundle they break the code seal. rb-unpack always
+/// leaves them out.
+fn unarchive(format: ArchiveFormat, directory: &str, has_apps: bool, unpacker: Unpacker) -> String {
+    match (format, unpacker) {
+        (ArchiveFormat::Zip, Unpacker::SevenZip) if has_apps => {
             format!("{} '-xr!._*' '-xr!__MACOSX'", seven_zip(SOURCE, directory))
         }
-        _ => extract(format, directory),
+        _ => extract(format, directory, unpacker),
     }
 }
 
@@ -216,6 +244,10 @@ fn infer_install(file: &str) -> Option<Install> {
     let file = file.to_ascii_lowercase();
     if file.ends_with(".dmg") {
         return Some(Install::Dmg);
+    }
+
+    if file.ends_with(".pkg") {
+        return Some(Install::Pkg);
     }
 
     let formats = [
@@ -238,20 +270,22 @@ fn infer_install(file: &str) -> Option<Install> {
     })
 }
 
-// An HFS+ image extracts into a volume directory, whose name can carry a
-// version, while an APFS image extracts without one.
-fn copy_app(app: &str) -> Vec<String> {
+// 7-Zip extracts an HFS+ image into a volume directory, whose name can carry
+// a version, and a package's apps land in the directory it installs into.
+fn copy_app(app: &str, directory: &str, archive: &str) -> Vec<String> {
     let name = escape(app);
     vec![
         "set --".into(),
-        format!(r#"for app in "${{TMPDIR}}/dmg/{name}" "${{TMPDIR}}/dmg"/*/"{name}"; do"#),
+        format!(
+            r#"for app in "${{TMPDIR}}/{directory}/{name}" "${{TMPDIR}}/{directory}"/*/"{name}"; do"#
+        ),
         r#"  if [ -e "$app" ] || [ -L "$app" ]; then set -- "$@" "$app"; fi"#.into(),
         "done".into(),
         format!(
-            r#"[ $# -eq 1 ] || {{ echo "expected one {name} in the DMG, found $#" >&2; exit 1; }}"#
+            r#"[ $# -eq 1 ] || {{ echo "expected one {name} in the {archive}, found $#" >&2; exit 1; }}"#
         ),
         format!(
-            r#"[ ! -L "$1" ] || {{ echo "{name} in the DMG is a symlink, not an app bundle" >&2; exit 1; }}"#
+            r#"[ ! -L "$1" ] || {{ echo "{name} in the {archive} is a symlink, not an app bundle" >&2; exit 1; }}"#
         ),
         format!(r#"ditto "$1" {}"#, path("out", app)),
     ]
