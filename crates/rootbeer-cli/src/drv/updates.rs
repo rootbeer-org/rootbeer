@@ -1,9 +1,10 @@
-use super::{git, github, listing, load, Sources};
+use super::{git, github, latest, listing, load, version, Sources};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use rootbeer_drv::Platform;
 use rootbeer_eval::{Catalog, Lines, Rolling, Upstream};
 use rootbeer_profile::is_repository;
 use serde::Serialize;
+use std::cmp;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -181,6 +182,11 @@ impl Checker<'_> {
             .any(|(_, upstream)| upstream.should_automerge);
         let mut advanced = Vec::new();
         for (platforms, upstream) in upstreams {
+            if upstream.latest {
+                advanced.extend(self.latest(name, upstream, platforms).map_err(problem)?);
+                continue;
+            }
+
             let origin = locate(upstream).map_err(problem)?;
             let github = origin.github();
             if upstream.interval_days.is_some() && github.is_none() {
@@ -399,6 +405,70 @@ impl Checker<'_> {
         for platform in behind {
             if self.is_available(name, Some(github), &candidate, platform)? {
                 advanced.push(Advance::to(platform, &candidate));
+            }
+        }
+
+        Ok(advanced)
+    }
+
+    /// The platforms whose always-newest download holds a newer version than
+    /// their default, by the version its app bundle names.
+    fn latest(
+        &self,
+        name: &str,
+        upstream: &Upstream,
+        platforms: Vec<Platform>,
+    ) -> Result<Vec<Advance>, Problem> {
+        let error = |message: &str| Err(Problem::Error(message.into()));
+        if upstream.github.is_some() || upstream.git.is_some() || upstream.listing.is_some() {
+            return error("its latest upstream reads its download, so it names no tags to follow");
+        }
+
+        if upstream.rolling.is_some() || upstream.lines.is_some() {
+            return error("its latest upstream has one version at a time, so it follows no lines");
+        }
+
+        let catalog = self.catalog;
+        let mut by_url = BTreeMap::<String, String>::new();
+        let mut advanced = Vec::new();
+        for platform in platforms {
+            let current = catalog.default_version(name, platform).unwrap_or_default();
+            let download = catalog
+                .download(name, current, None, None, platform)
+                .map_err(Problem::Error)?;
+            if download.release.is_some() {
+                return error("its latest upstream reads a URL, not a GitHub release asset");
+            }
+
+            let version = match by_url.get(&download.url) {
+                Some(version) => version.clone(),
+                None => {
+                    let apps = catalog
+                        .apps(name, current, platform)
+                        .map_err(Problem::Error)?;
+                    let [app] = apps.as_slice() else {
+                        return error("its latest upstream reads the version of exactly one app");
+                    };
+
+                    let version = latest::version(&download.url, app).map_err(Problem::Error)?;
+                    by_url.insert(download.url, version.clone());
+                    version
+                }
+            };
+
+            if !rootbeer_drv::is_version(&version) {
+                return Err(Problem::Error(format!(
+                    "its download holds version {version}, which isn't a valid version"
+                )));
+            }
+
+            if version::compare(&version, current) == cmp::Ordering::Greater {
+                advanced.push(Advance {
+                    platform,
+                    version,
+                    commit: String::new(),
+                    serial: None,
+                });
             }
         }
 
@@ -788,6 +858,7 @@ mod tests {
             rolling: None,
             lines: None,
             should_automerge: false,
+            latest: false,
         }
     }
 

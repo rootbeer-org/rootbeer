@@ -17,6 +17,7 @@ data-encoding = "2"
 globset = "0.4"
 clap = { version = "4.5.60", features = ["derive", "wrap_help"] }
 owo-colors = { version = "4.3.0", features = ["supports-colors"] }
+plist = "1"
 rootbeer-core = { path = "../rootbeer-core" }
 rootbeer-bootstrap = { path = "../rootbeer-bootstrap" }
 rootbeer-drv = { path = "../rootbeer-drv" }

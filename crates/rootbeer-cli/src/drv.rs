@@ -8,6 +8,7 @@ mod git;
 mod github;
 mod index;
 mod install;
+mod latest;
 mod listing;
 mod local;
 pub(crate) mod migrate;

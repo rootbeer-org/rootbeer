@@ -71,6 +71,10 @@ pub struct Upstream {
     /// Whether an update's PR merges itself once its checks pass.
     #[serde(default, rename = "automerge")]
     pub should_automerge: bool,
+    /// Whether the download always serves the newest release, so its version
+    /// is read from the app bundle inside it rather than from tags.
+    #[serde(default)]
+    pub latest: bool,
 }
 
 /// A rolling tag, whose builds are versioned by the commit it names.
@@ -382,15 +386,7 @@ impl Recipe {
         serial: Option<u64>,
         platform: Platform,
     ) -> Result<Download, String> {
-        let entry = Version {
-            digests: BTreeMap::new(),
-            commit,
-            serial,
-            license: None,
-            _revision: None,
-            spec: Spec::default(),
-        };
-
+        let entry = Version::undeclared(commit, serial);
         let (spec, values) = self.layer(version, &entry, platform)?;
         match (&spec.prebuilt, &spec.source) {
             (Some(prebuilt), None) => prebuilt::locate(prebuilt, &values),
@@ -403,6 +399,18 @@ impl Recipe {
             }
             (None, None) => Err("a platform needs a prebuilt or a source".into()),
         }
+    }
+
+    /// The paths of the app bundles a version exports on a platform.
+    pub(crate) fn app_paths(
+        &self,
+        version: &str,
+        platform: Platform,
+    ) -> Result<Vec<String>, String> {
+        let entry = Version::undeclared(None, None);
+        let (spec, _) = self.layer(version, &entry, platform)?;
+        let apps = spec.outputs.apps.unwrap_or_default();
+        Ok(apps.values().map(|app| app.path().to_string()).collect())
     }
 
     fn layer<'a>(
@@ -541,6 +549,20 @@ impl Spec {
                 checks: top.checks.clone().or_else(|| base.checks.clone()),
                 host: top.host.clone().or_else(|| base.host.clone()),
             },
+        }
+    }
+}
+
+impl Version {
+    /// A version the recipe doesn't declare yet, for what its layers render.
+    fn undeclared(commit: Option<String>, serial: Option<u64>) -> Version {
+        Version {
+            digests: BTreeMap::new(),
+            commit,
+            serial,
+            license: None,
+            _revision: None,
+            spec: Spec::default(),
         }
     }
 }
