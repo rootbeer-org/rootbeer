@@ -46,8 +46,11 @@ return {
 - List `source.mirrors` for fallback URLs tried in order after `source.url`,
   with the same placeholders. They don't change keys, so use only URLs that
   serve the same bytes.
-- A `source.archive` of `zip` or `tar.bz2` extracts with the catalog's 7zip,
-  so list `7zip` in `build.dependencies` with `kind = "build"`.
+- A `zip` or `tar.bz2` archive, a DMG, or an installer package extracts with
+  the catalog's rb-unpack, so list `rb-unpack` with `kind = "build"` in
+  `build.dependencies` or `prebuilt.dependencies`. A prebuilt ending in `.pkg`
+  installs as `Pkg`, which copies `outputs.apps` from where the package would
+  install them. Give a DMG that holds a package `install = "Pkg"`.
 - Linked dependencies' `bin/` follows build dependencies' on `PATH`, so a
   library's `*-config` tool is found. `CPATH`, `LIBRARY_PATH`, and
   `CMAKE_PREFIX_PATH` cover direct linked dependencies only. `PKG_CONFIG_PATH`

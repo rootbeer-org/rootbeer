@@ -474,18 +474,18 @@ fn a_latest_upstream_reads_the_app_its_download_holds() {
 }
 
 #[test]
-fn zip_bz2_and_dmg_archives_need_7zip_to_extract() {
+fn zip_bz2_and_dmg_archives_need_an_unpacker_to_extract() {
     let (crab, lister, viewer) = (2, 7, 10);
     let dependency = r#"{ package = "7zip", version = "26.04", kind = "build" },"#;
     let runtime = r#"{ package = "7zip", version = "26.04", kind = "runtime" },"#;
     let other = r#"{ package = "libz", version = "1.3.2", kind = "build" },"#;
     let cases = [
-        (viewer, "a DMG prebuilt extracts with 7zip", other),
-        (viewer, "a DMG prebuilt extracts with 7zip", runtime),
-        (lister, "a zip prebuilt extracts with 7zip", other),
+        (viewer, "a DMG prebuilt extracts with rb-unpack", other),
+        (viewer, "a DMG prebuilt extracts with rb-unpack", runtime),
+        (lister, "a zip prebuilt extracts with rb-unpack", other),
         (
             crab,
-            "a zip source extracts with 7zip, so declare it in build.dependencies",
+            "a zip source extracts with rb-unpack, so declare it in build.dependencies",
             "",
         ),
     ];
@@ -517,7 +517,7 @@ fn zip_bz2_and_dmg_archives_need_7zip_to_extract() {
         .unwrap_err()
         .to_string();
     assert!(
-        error.contains("a tar.bz2 source extracts with 7zip"),
+        error.contains("a tar.bz2 source extracts with rb-unpack"),
         "{error}"
     );
 
@@ -538,6 +538,78 @@ fn zip_bz2_and_dmg_archives_need_7zip_to_extract() {
         .1
         .replace("prebuilt = {", r#"prebuilt = { allow = { "tmp" },"#);
     assert!(parse_error(&allowed).contains("unknown field `allow`"));
+}
+
+#[test]
+fn rb_unpack_extracts_what_declares_it_and_alone_opens_packages() {
+    let (crab, viewer) = (2, 10);
+    let seven_zip = r#"{ package = "7zip", version = "26.04", kind = "build" },"#;
+    let rb_unpack = r#"{ package = "rb-unpack", kind = "build" },"#;
+    let scripts = |edits: &[(usize, String)]| {
+        let mut fixtures = FIXTURES.to_vec();
+        fixtures.push(("rb-unpack.lua", include_str!("fixtures/rb-unpack.lua")));
+        for (index, edited) in edits {
+            fixtures[*index].1 = edited;
+        }
+
+        let catalog = Catalog::parse(fixtures)?;
+        let graph = catalog.evaluate(&hosts("a"), &catalog.targets())?;
+        Ok::<_, Error>(
+            graph
+                .derivations
+                .into_values()
+                .filter_map(|derivation| match derivation {
+                    Derivation::Build(build) => Some((build.name, build.script)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+        )
+    };
+    let script = |scripts: &[(String, String)], name: &str| {
+        scripts
+            .iter()
+            .find(|(built, _)| built == name)
+            .map(|(_, script)| script.clone())
+            .unwrap()
+    };
+
+    let bz2 = FIXTURES[crab]
+        .1
+        .replace(".zip", ".tar.bz2")
+        .replace(r#""zip""#, r#""tar.bz2""#)
+        .replace(seven_zip, rb_unpack);
+    let image = FIXTURES[viewer].1.replace(seven_zip, rb_unpack);
+    let built = scripts(&[(crab, bz2), (viewer, image.clone())]).unwrap();
+    assert!(script(&built, "crab").contains(r#"rb-unpack tar.bz2 "${source}" ."#));
+    let viewed = script(&built, "viewer");
+    assert!(
+        viewed.contains(r#"rb-unpack dmg "${source}" "${TMPDIR}/dmg""#),
+        "{viewed}"
+    );
+    assert!(!viewed.contains("7zz"), "{viewed}");
+
+    let package = image.replace(".dmg", ".pkg");
+    let built = scripts(&[(viewer, package.clone())]).unwrap();
+    let viewed = script(&built, "viewer");
+    assert!(
+        viewed.contains(r#"rb-unpack pkg "${source}" "${TMPDIR}/pkg""#),
+        "{viewed}"
+    );
+    assert!(
+        viewed.contains(r#""${TMPDIR}/pkg"/*/"Viewer.app""#),
+        "{viewed}"
+    );
+
+    let dated = package.replace(rb_unpack, seven_zip);
+    let error = scripts(&[(viewer, dated)]).unwrap_err().to_string();
+    assert!(
+        error.contains("a pkg prebuilt extracts with rb-unpack"),
+        "{error}"
+    );
+
+    let image_with_package = image.replace("prebuilt = {", r#"prebuilt = { install = "Pkg","#);
+    let built = scripts(&[(viewer, image_with_package)]).unwrap();
+    assert!(script(&built, "viewer").contains("rb-unpack pkg"));
 }
 
 #[test]
