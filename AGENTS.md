@@ -21,6 +21,8 @@ it akin to a dotfile manager like home-manager or chezmoi.
   `/opt/rb/profiles/<uid>`, `rootbeer.lock`, and GC roots
 - `crates/rootbeer-trust`: Reads the signed package index from a TUF repository
   (through `tough`), so a client believes only what the index's keys signed
+- `crates/rootbeer-unpack`: `rb-unpack`, which prebuilt recipes use to unpack
+  zips, DMGs, and installer packages on any platform without mounting them
 - `crates/rootbeer-bootstrap`: The frozen protocol for fetching a verified rb new
   enough to run a command (first installs, and state written by a newer rb). Changes
   are additive only, and it must never depend on another rootbeer crate.
