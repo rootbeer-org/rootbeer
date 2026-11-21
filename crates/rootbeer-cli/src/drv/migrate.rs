@@ -1,4 +1,4 @@
-use super::configuration::{configure, link_default_apps};
+use super::configuration::{configure, install_default_apps};
 use super::github;
 use super::install::{self, LazyIndex, Source, Wanted};
 use super::profile::{self, profile_error};
@@ -88,10 +88,19 @@ pub(crate) fn migrate(args: &Args) -> Result<(), String> {
             });
         let requests = profile::planned(&generation.packages, requests, false);
         if !requests.is_empty() {
-            profile::install_requests(&user, generation, requests, &index, None, |name, error| {
-                stuck.push(format!("{name}: {error}"));
-                Ok(())
-            })?;
+            let overrides = rootbeer_profile::Overrides::default();
+            profile::install_requests(
+                &user,
+                generation,
+                requests,
+                &index,
+                None,
+                overrides,
+                |name, error| {
+                    stuck.push(format!("{name}: {error}"));
+                    Ok(())
+                },
+            )?;
         }
     }
 
@@ -196,8 +205,8 @@ fn configuration(args: &Args) -> Result<(), String> {
         &PackageLockOptions::default(),
         &args.source,
     )?;
-    if configured.should_link_apps {
-        link_default_apps()?;
+    if configured.should_install_apps {
+        install_default_apps(rootbeer_profile::Changed::Leave)?;
     }
 
     Ok(())

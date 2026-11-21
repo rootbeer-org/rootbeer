@@ -1,6 +1,6 @@
 #![cfg(test)]
 
-use rootbeer_drv::{DependencyKind, Derivation, Platform};
+use rootbeer_drv::{AppSettings, DependencyKind, Derivation, Location, Platform, Updates};
 use rootbeer_eval::{Catalog, Error, Host, LineBy, Lines, Patches, Target};
 use std::collections::BTreeMap;
 
@@ -91,6 +91,10 @@ fn metadata_never_reaches_a_key() {
             .replace("\"MIT\"", "\"0BSD\"")
             .replace("{ \"fnd\" }", "{}")
             .replace(
+                r#"["Viewer.app"] = "Viewer.app""#,
+                r#"["Viewer.app"] = { path = "Viewer.app", updates = "self", location = "system" }"#,
+            )
+            .replace(
                 "repository_id = 1234,",
                 r#"repository_id = 5678, exclude_tags = { "v1" }, lines = { by = "major", keep = 2 }, git = "https://example.com/f.git","#,
             );
@@ -104,6 +108,55 @@ fn metadata_never_reaches_a_key() {
         .collect::<Vec<_>>();
 
     assert_eq!(build_keys(&FIXTURES, "a"), build_keys(&edited, "a"));
+}
+
+#[test]
+fn app_tables_carry_install_settings_and_paths_carry_defaults() {
+    let viewer = 10;
+    let metadata = |source: &str| {
+        let mut fixtures = FIXTURES;
+        fixtures[viewer].1 = source;
+        let catalog = Catalog::parse(fixtures).unwrap();
+        let graph = catalog.evaluate(&hosts("a"), &catalog.targets()).unwrap();
+        let (_, package) = graph
+            .packages
+            .into_iter()
+            .find(|(target, _)| target.name == "viewer")
+            .unwrap();
+
+        package.metadata
+    };
+
+    let plain = metadata(FIXTURES[viewer].1);
+    assert_eq!(plain.apps["Viewer.app"], "Viewer.app");
+    assert!(plain.app_settings.is_empty());
+
+    let path = r#"["Viewer.app"] = "Viewer.app""#;
+    let table = FIXTURES[viewer].1.replace(
+        path,
+        r#"["Viewer.app"] = { path = "Viewer.app", updates = "self" }"#,
+    );
+    let tabled = metadata(&table);
+    assert_eq!(tabled.apps, plain.apps);
+    assert_eq!(
+        tabled.app_settings["Viewer.app"],
+        AppSettings {
+            updates: Updates::Itself,
+            location: Location::User,
+        }
+    );
+
+    let defaults = FIXTURES[viewer].1.replace(
+        path,
+        r#"["Viewer.app"] = { path = "Viewer.app", updates = "rootbeer" }"#,
+    );
+    assert!(metadata(&defaults).app_settings.is_empty());
+
+    let unknown = FIXTURES[viewer].1.replace(
+        path,
+        r#"["Viewer.app"] = { path = "Viewer.app", update = "self" }"#,
+    );
+    assert!(parse_error(&unknown).contains("untagged enum App"));
 }
 
 #[test]

@@ -68,6 +68,7 @@ pub(crate) fn shadow(
             key: package.build.clone(),
             bins: package.metadata.bins.clone(),
             apps: package.metadata.apps.clone(),
+            app_settings: package.metadata.app_settings.clone(),
         };
     }
 
@@ -288,6 +289,7 @@ mod tests {
                 key: package.build.clone(),
                 bins: ["mac".to_string()].into(),
                 apps: BTreeMap::new(),
+                app_settings: BTreeMap::new(),
             }
         );
         assert_eq!(requests["jq"], Wanted::Index(None));

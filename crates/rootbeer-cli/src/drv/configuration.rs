@@ -3,14 +3,17 @@ use super::github;
 use super::install::{self, LazyIndex, Source, Wanted};
 use super::local;
 use super::profile::{
-    applications, check_apps, current, directory, is_same, link_apps, profile_error, switch,
+    applications, check_apps, current, directory, install_apps, is_same, located, profile_error,
+    switch,
 };
 use super::this_platform;
 use rootbeer_core::env::{profiles, DEFAULT};
 use rootbeer_core::package::PackageRequest;
 use rootbeer_core::PackageLockOptions;
 use rootbeer_drv::{output_path, Platform};
-use rootbeer_profile::{Error, Generation, Lock, Locked, Member, Profile, Release};
+use rootbeer_profile::{
+    Changed, Error, Generation, Lock, Locked, Member, Overrides, Profile, Release, Removal,
+};
 use rootbeer_store::Store;
 use rootbeer_trust::Package;
 use std::cell::Cell;
@@ -21,21 +24,21 @@ use std::path::{Path, PathBuf};
 type Requests = BTreeMap<String, Wanted>;
 
 pub(crate) struct Configured {
-    /// Whether apps need linking once the rest of the configuration runs.
-    pub(crate) should_link_apps: bool,
+    /// Whether apps need installing once the rest of the configuration runs.
+    pub(crate) should_install_apps: bool,
 }
 
 /// Installs what the configuration asks for from the signed index, GitHub
 /// releases, and the local catalog into `default`. A name the catalog defines
 /// comes from its recipe.
 pub(crate) fn configure(
-    packages: Vec<PackageRequest>,
+    packages: Vec<(PackageRequest, Overrides)>,
     catalog: Option<&Path>,
     script_dir: &Path,
     flags: &PackageLockOptions,
     source: &Source,
 ) -> Result<Configured, String> {
-    let mut requests = requests(packages)?;
+    let (mut requests, overrides) = requests(packages)?;
     let path = script_dir.join("rootbeer.lock");
     let existing = read(&path, flags.is_locked)?;
     let platform = this_platform()?;
@@ -55,7 +58,7 @@ pub(crate) fn configure(
 
     let mut lock = existing.clone().unwrap_or_default();
     lock.retain(&name, |package| requests.contains_key(package));
-    let kept = reconcile(&lock, &name, &requests, flags).map_err(|error| match error {
+    let mut kept = reconcile(&lock, &name, &requests, flags).map_err(|error| match error {
         Stale::Missing(package) => format!(
             "{package} isn't locked for {name} in {}. Run without --locked to add it",
             path.display()
@@ -82,7 +85,7 @@ pub(crate) fn configure(
         }
 
         return Ok(Configured {
-            should_link_apps: false,
+            should_install_apps: false,
         });
     }
 
@@ -132,6 +135,7 @@ pub(crate) fn configure(
                     is_local: false,
                     bins: output.bins.clone(),
                     apps: output.apps.clone(),
+                    app_settings: output.app_settings.clone(),
                     extra: BTreeMap::new(),
                 }
             }
@@ -152,6 +156,7 @@ pub(crate) fn configure(
                     release: Some(resolved.release),
                     is_local: false,
                     apps: BTreeMap::new(),
+                    app_settings: BTreeMap::new(),
                     pin: None,
                     extra: BTreeMap::new(),
                 }
@@ -167,6 +172,7 @@ pub(crate) fn configure(
                     is_local: true,
                     bins: built.metadata.bins.clone(),
                     apps: built.metadata.apps.clone(),
+                    app_settings: built.metadata.app_settings.clone(),
                     pin: None,
                     extra: BTreeMap::new(),
                 }
@@ -176,20 +182,29 @@ pub(crate) fn configure(
     }
 
     if is_index_open.get() {
-        for (package, locked) in kept.iter().filter(|(_, locked)| locked.manifest.is_some()) {
+        for (package, locked) in &mut kept {
+            if locked.manifest.is_none() {
+                continue;
+            }
+
             verify(signed.package(package)?, locked, platform)?;
         }
     }
 
     let profile = Profile::open(&directory(true)?, DEFAULT).map_err(profile_error)?;
     let current = current(&profile)?;
+    let overrides_of = |package: &str| overrides.get(package).copied().unwrap_or_default();
+    for (package, locked) in kept.iter().chain(&resolved) {
+        overrides_of(package)
+            .check(package, &locked.apps, &locked.app_settings)
+            .map_err(profile_error)?;
+    }
+
     if let Some(applications) = applications() {
-        let apps = kept.values().chain(resolved.values());
-        check_apps(
-            &profile,
-            &applications,
-            apps.flat_map(|locked| locked.apps.keys()),
-        )?;
+        let apps = kept.iter().chain(&resolved).flat_map(|(package, locked)| {
+            located(&locked.apps, &locked.app_settings, overrides_of(package))
+        });
+        check_apps(&profile, &applications, apps)?;
     }
 
     let mut members = BTreeMap::new();
@@ -249,6 +264,8 @@ pub(crate) fn configure(
             is_local: locked.is_local,
             bins: locked.bins.clone(),
             apps: locked.apps.clone(),
+            app_settings: locked.app_settings.clone(),
+            overrides: overrides_of(&package),
             pin: locked.pin.clone().filter(|_| is_pinned),
             extra: BTreeMap::new(),
         };
@@ -262,7 +279,7 @@ pub(crate) fn configure(
     }
 
     let configured = Configured {
-        should_link_apps: true,
+        should_install_apps: true,
     };
 
     if same(&current.packages, &members) {
@@ -305,14 +322,21 @@ pub(crate) fn check_lock(script_dir: &Path) -> Result<(), String> {
     }
 }
 
-pub(crate) fn link_default_apps() -> Result<(), String> {
+/// Installs the configuration's apps. `changed` says whether copies that
+/// changed since rb installed them are replaced.
+pub(crate) fn install_default_apps(changed: Changed) -> Result<(), String> {
     let profile = Profile::open(&directory(false)?, DEFAULT).map_err(profile_error)?;
-    link_apps(&profile)
+    install_apps(&profile, Removal::Delete, changed)
 }
 
-fn requests(packages: Vec<PackageRequest>) -> Result<Requests, String> {
+/// What the configuration asks for by name, and the app settings it asks
+/// for each.
+fn requests(
+    packages: Vec<(PackageRequest, Overrides)>,
+) -> Result<(Requests, BTreeMap<String, Overrides>), String> {
     let mut requests = Requests::new();
-    for package in packages {
+    let mut overrides = BTreeMap::new();
+    for (package, settings) in packages {
         let (name, wanted) = match package {
             PackageRequest::Index { name, version } => (name, Wanted::Index(version)),
             PackageRequest::Release {
@@ -328,6 +352,18 @@ fn requests(packages: Vec<PackageRequest>) -> Result<Requests, String> {
             }
         };
 
+        // A declaration without settings agrees with one that has them.
+        let previous = match settings.is_empty() {
+            true => None,
+            false => overrides.insert(name.clone(), settings),
+        };
+
+        if previous.is_some_and(|previous| previous != settings) {
+            return Err(format!(
+                "the configuration lists {name} with two sets of app settings"
+            ));
+        }
+
         let Some(asked) = requests.insert(name.clone(), wanted.clone()) else {
             continue;
         };
@@ -341,7 +377,7 @@ fn requests(packages: Vec<PackageRequest>) -> Result<Requests, String> {
         }
     }
 
-    Ok(requests)
+    Ok((requests, overrides))
 }
 
 fn paths(bins: &BTreeMap<String, PathBuf>) -> Result<BTreeMap<String, String>, String> {
@@ -406,15 +442,21 @@ fn reconcile(
 }
 
 /// A rebuild retires the old key, which stays installable though only its
-/// manifest is still signed.
-fn verify(package: &Package, locked: &Locked, platform: Platform) -> Result<(), String> {
+/// manifest is still signed. App settings never reach a key, so a recipe
+/// changes them without a rebuild, and the entry takes the index's.
+fn verify(package: &Package, locked: &mut Locked, platform: Platform) -> Result<(), String> {
     let outputs = package.versions.get(&locked.version);
     let manifest = locked.manifest.as_ref();
     let is_signed = match outputs.and_then(|outputs| outputs.get(&platform)) {
         Some(output) if output.key == locked.key => {
-            Some(&output.manifest) == manifest
+            let is_signed = Some(&output.manifest) == manifest
                 && output.bins == locked.bins
-                && output.apps == locked.apps
+                && output.apps == locked.apps;
+            if is_signed {
+                locked.app_settings.clone_from(&output.app_settings);
+            }
+
+            is_signed
         }
         _ => manifest.is_some() && package.retired.get(&locked.key) == manifest,
     };
@@ -460,6 +502,7 @@ fn same(current: &BTreeMap<String, Member>, members: &BTreeMap<String, Member>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rootbeer_drv::{AppSettings, Updates};
     use rootbeer_trust::Output;
 
     fn locked(version: &str) -> Locked {
@@ -471,6 +514,7 @@ mod tests {
             is_local: false,
             bins: Default::default(),
             apps: Default::default(),
+            app_settings: Default::default(),
             pin: None,
             extra: Default::default(),
         }
@@ -481,11 +525,16 @@ mod tests {
         let packages = |requests: &[&str]| {
             requests
                 .iter()
-                .map(|request| PackageRequest::parse(request).unwrap())
+                .map(|request| {
+                    (
+                        PackageRequest::parse(request).unwrap(),
+                        Overrides::default(),
+                    )
+                })
                 .collect::<Vec<_>>()
         };
 
-        let accepted = super::requests(packages(&[
+        let (accepted, _) = super::requests(packages(&[
             "jq",
             "fd@10.2.0",
             "jq",
@@ -503,6 +552,28 @@ mod tests {
 
         let error = super::requests(packages(&["jq", "github:jqlang/jq"])).unwrap_err();
         assert_eq!(error, "the configuration lists jq from two sources");
+
+        // Settings declared once apply wherever the package is listed.
+        let orbstack = || PackageRequest::parse("orbstack").unwrap();
+        let updates = |updates| Overrides {
+            updates: Some(updates),
+            location: None,
+        };
+        let declared = vec![
+            (orbstack(), Overrides::default()),
+            (orbstack(), updates(Updates::Itself)),
+        ];
+        let (_, overrides) = super::requests(declared).unwrap();
+        assert_eq!(overrides["orbstack"], updates(Updates::Itself));
+
+        let declared = vec![
+            (orbstack(), updates(Updates::Itself)),
+            (orbstack(), updates(Updates::Rootbeer)),
+        ];
+        assert_eq!(
+            super::requests(declared).unwrap_err(),
+            "the configuration lists orbstack with two sets of app settings"
+        );
     }
 
     #[test]
@@ -565,29 +636,62 @@ mod tests {
             ..Package::default()
         };
         let platform = Platform::Aarch64Macos;
-        let entry = locked("1.8.2");
-        assert!(verify(&package, &entry, platform).is_err());
+        let mut entry = locked("1.8.2");
+        assert!(verify(&package, &mut entry, platform).is_err());
 
         package
             .retired
             .insert(entry.key.clone(), entry.manifest.clone().unwrap());
-        assert!(verify(&package, &entry, platform).is_ok());
+        assert!(verify(&package, &mut entry, platform).is_ok());
 
         let output = Output {
             key: entry.key.clone(),
             manifest: entry.manifest.clone().unwrap(),
             bins: ["jq".to_string()].into(),
             apps: Default::default(),
+            app_settings: Default::default(),
         };
         let outputs = BTreeMap::from([(platform, output)]);
         package.versions.insert("1.8.2".into(), outputs);
-        assert!(verify(&package, &entry, platform).is_err());
+        assert!(verify(&package, &mut entry, platform).is_err());
 
-        let entry = Locked {
+        let mut entry = Locked {
             bins: ["jq".to_string()].into(),
             ..entry
         };
-        assert!(verify(&package, &entry, platform).is_ok());
+        assert!(verify(&package, &mut entry, platform).is_ok());
+    }
+
+    #[test]
+    fn a_kept_entry_takes_the_app_settings_the_index_signed() {
+        let platform = Platform::Aarch64Macos;
+        let apps = BTreeMap::from([("Jq.app".to_string(), "Jq.app".to_string())]);
+        let mut entry = Locked {
+            apps: apps.clone(),
+            ..locked("1.8.2")
+        };
+        let settings = BTreeMap::from([(
+            "Jq.app".to_string(),
+            AppSettings {
+                updates: Updates::Itself,
+                ..AppSettings::default()
+            },
+        )]);
+        let output = Output {
+            key: entry.key.clone(),
+            manifest: entry.manifest.clone().unwrap(),
+            bins: Default::default(),
+            apps,
+            app_settings: settings.clone(),
+        };
+        let package = Package {
+            name: "jq".into(),
+            versions: BTreeMap::from([("1.8.2".into(), BTreeMap::from([(platform, output)]))]),
+            ..Package::default()
+        };
+
+        assert!(verify(&package, &mut entry, platform).is_ok());
+        assert_eq!(entry.app_settings, settings);
     }
 
     #[test]

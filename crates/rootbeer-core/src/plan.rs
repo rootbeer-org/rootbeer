@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use crate::package::PackageRequest;
+use rootbeer_profile::Overrides;
 
 /// Identity location; key material is resolved only when decrypting.
 #[derive(Debug, Clone, PartialEq)]
@@ -116,5 +117,7 @@ pub enum Op {
     },
     Package {
         request: PackageRequest,
+        /// How the configuration asks for the package's apps to be installed.
+        overrides: Overrides,
     },
 }

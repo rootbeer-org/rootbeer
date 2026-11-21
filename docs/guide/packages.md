@@ -58,16 +58,51 @@ To keep a declared app export available in `~/Applications`, install its package
 rb use bobrwm
 ```
 
-Or declare `rb.package("bobrwm")` in Lua and run `rb apply`. Both manage a
-`~/Applications/Bobrwm.app` symlink into the verified package store. Existing apps
-are never overwritten; a conflicting app or unmanaged link makes installation fail.
-User and Lua profiles may share an app link when they select the exact same
-stored bundle; different versions conflict. Rootbeer does not configure login
-items or grant app permissions.
+Or declare `rb.package("bobrwm")` in Lua and run `rb apply`. Both install a copy
+of the bundle at `~/Applications/Bobrwm.app`. On APFS the copy shares the store's
+blocks, so it costs no space. Rootbeer replaces the copy whenever the profile
+selects a different version, and `rb rollback` puts the old one back. An app
+that's running keeps its old version until you restart it.
 
-Remove a package from your user profile with `rb unuse bobrwm`. This removes its
-owned app link when no other profile needs it, while its files stay in the store.
-For Lua-managed apps, remove the declaration and run `rb apply`.
+Apps with system extensions, such as network filters or drivers, only work from
+`/Applications`, so their packages install them there. That needs an admin user,
+who can write to `/Applications` without `sudo`. Rootbeer never asks for it.
+
+Some packages mark an app as updating itself, because its built-in updater
+works. Rootbeer installs it once and then leaves updates to the app. It moves the
+app to a newer packaged version only while the app hasn't updated itself, and
+never back to an older one, even on rollback. `rb generations` shows the version
+that's actually installed.
+
+If an app Rootbeer updates changes on its own, Rootbeer warns and leaves it as it
+is. Delete it to get Rootbeer's copy back, or run `rb apply --force-apps` to
+replace every such app your configuration installs.
+
+To choose for yourself, set `updates` or `location` on the package:
+
+```lua
+rb.package("google-chrome", { updates = "rootbeer" })
+rb.package("orbstack", { location = "system" })
+```
+
+```sh
+rb use google-chrome --updates rootbeer
+rb use orbstack --location system
+```
+
+`rb use` remembers these settings, so a later `rb use --update` keeps them.
+Asking for `user` on an app that needs `/Applications` is an error, as is setting
+either on a package without apps.
+
+Existing apps are never overwritten, and an app Rootbeer didn't install makes
+installation fail. Only one profile can install an app, so declaring it in Lua
+and with `rb use` conflicts. Rootbeer does not configure login items or grant app
+permissions.
+
+Remove a package from your user profile with `rb unuse bobrwm`, which deletes
+its app while its files stay in the store. `rb unuse bobrwm --keep-app` leaves
+the app in place for you to manage. For Lua-managed apps, remove the declaration
+and run `rb apply`.
 
 ## Keep tools installed
 

@@ -6,6 +6,7 @@
 //! entire system that we use to build packages. New fields MUST be optional and
 //! omitted at their default, or every existing key changes.
 
+mod app;
 mod error;
 mod key;
 mod validate;
@@ -14,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::PathBuf;
 
+pub use app::{AppSettings, Location, Updates};
 pub use error::Error;
 pub use key::{Key, Sha256};
 pub use validate::{is_app_name, is_file_name, is_inside, is_package_name, is_version};

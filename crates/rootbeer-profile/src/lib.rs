@@ -13,16 +13,23 @@ use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+mod apps;
 mod lock;
 mod roots;
 #[cfg(test)]
 mod tests;
+mod version;
 
+pub use apps::{Applications, Changed, Deployed, InstalledApp, Overrides, Removal};
 pub use lock::{LOCK_SCHEMA, Lock, Locked};
+pub use rootbeer_drv::{AppSettings, Location, Updates};
 pub use roots::{hold_while_running, roots};
+pub use version::compare_versions;
 
 /// Generations from schema 1 hold only index members, so this rb reads them.
-pub const SCHEMA: u32 = 2;
+/// Schema 3 installs apps as copies, which an older rb would refuse as taken,
+/// so it hands the command to a newer rb instead.
+pub const SCHEMA: u32 = 3;
 const OLDEST_SCHEMA: u32 = 1;
 pub(crate) const RECORD: &str = "generation.json";
 const APPLICATIONS: &str = "Applications";
@@ -63,8 +70,23 @@ pub struct Member {
     pub bins: BTreeSet<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub apps: BTreeMap<String, String>,
+    /// How each app that differs from the default is installed, as the
+    /// index or recipe says.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub app_settings: BTreeMap<String, AppSettings>,
+    /// How the user asked for its apps to be installed instead.
+    #[serde(default, skip_serializing_if = "Overrides::is_empty")]
+    pub overrides: Overrides,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
+}
+
+impl Member {
+    /// How `app` is installed, as its export says unless overridden.
+    pub fn app(&self, app: &str) -> AppSettings {
+        let export = self.app_settings.get(app).copied().unwrap_or_default();
+        self.overrides.apply(export)
+    }
 }
 
 /// A GitHub release asset unpacked into the store, with what it takes to
@@ -338,85 +360,6 @@ impl Profile {
         sync(&self.directory)
     }
 
-    pub fn link_apps(&self, applications: &Path) -> Result<Vec<Error>, Error> {
-        self.writable()?;
-        let farm = self.farm();
-        let apps = match fs::read_dir(&farm) {
-            Ok(entries) => entries
-                .map(|entry| entry.map(|entry| entry.file_name()))
-                .collect::<Result<BTreeSet<_>, _>>()
-                .map_err(io_at(&farm))?,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => BTreeSet::new(),
-            Err(error) => return Err(io_at(&farm)(error)),
-        };
-
-        // We can't remove first because it frees up a name where the casing
-        // might've changed rather than a real name that was removed.
-        let mut problems = Vec::new();
-        match fs::read_dir(applications) {
-            Ok(entries) => {
-                for entry in entries {
-                    let path = match entry {
-                        Ok(entry) => entry.path(),
-                        Err(error) => {
-                            problems.push(io_at(applications)(error));
-                            continue;
-                        }
-                    };
-
-                    let Some(target) = self.target(&path) else {
-                        continue;
-                    };
-
-                    let is_current = target.file_name() == path.file_name()
-                        && target.file_name().is_some_and(|app| apps.contains(app));
-                    if !is_current {
-                        problems.extend(remove(&path).err());
-                    }
-                }
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => problems.push(io_at(applications)(error)),
-        }
-
-        if apps.is_empty() {
-            return Ok(problems);
-        }
-
-        if let Err(error) = fs::create_dir_all(applications) {
-            problems.push(io_at(applications)(error));
-            return Ok(problems);
-        }
-
-        for app in &apps {
-            let path = applications.join(app);
-            let linked = match fs::symlink_metadata(&path) {
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                    symlink(farm.join(app), &path).map_err(io_at(&path))
-                }
-                Err(error) => Err(io_at(&path)(error)),
-                Ok(_) if self.target(&path).is_some() => Ok(()),
-                Ok(_) => Err(taken(&path)),
-            };
-
-            problems.extend(linked.err());
-        }
-
-        Ok(problems)
-    }
-
-    pub fn check_apps<'a>(
-        &self,
-        applications: &Path,
-        apps: impl IntoIterator<Item = &'a str>,
-    ) -> Result<(), Error> {
-        let mut paths = apps.into_iter().map(|app| applications.join(app));
-        match paths.find(|path| fs::symlink_metadata(path).is_ok() && self.target(path).is_none()) {
-            Some(path) => Err(taken(&path)),
-            None => Ok(()),
-        }
-    }
-
     fn target(&self, path: &Path) -> Option<PathBuf> {
         let target = fs::read_link(path).ok()?;
         (target.parent() == Some(self.farm().as_path())).then_some(target)
@@ -616,7 +559,7 @@ fn validate(name: &str, member: &Member) -> Result<(), String> {
         member.is_local,
         &member.bins,
     )?;
-    validate_exports(name, &member.bins, &member.apps)
+    validate_exports(name, &member.bins, &member.apps, &member.app_settings)
 }
 
 /// Every package comes from exactly one place. A release links what its
@@ -659,6 +602,7 @@ pub(crate) fn validate_exports(
     name: &str,
     bins: &BTreeSet<String>,
     apps: &BTreeMap<String, String>,
+    app_settings: &BTreeMap<String, AppSettings>,
 ) -> Result<(), String> {
     if let Some(bin) = bins.iter().find(|bin| !is_file_name(bin)) {
         return Err(format!("{name} has a bin {bin:?} that isn't a plain name"));
@@ -670,8 +614,14 @@ pub(crate) fn validate_exports(
         ));
     }
 
-    match apps.values().find(|path| !is_inside(path)) {
-        Some(path) => Err(format!("{name} has an app at {path:?} outside its output")),
+    if let Some(path) = apps.values().find(|path| !is_inside(path)) {
+        return Err(format!("{name} has an app at {path:?} outside its output"));
+    }
+
+    match app_settings.keys().find(|app| !apps.contains_key(*app)) {
+        Some(app) => Err(format!(
+            "{name} has settings for {app:?}, which it doesn't export"
+        )),
         None => Ok(()),
     }
 }

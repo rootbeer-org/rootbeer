@@ -8,6 +8,8 @@ use super::module::Module;
 use super::vm::{profile_bin_path, PackageBins};
 use crate::package::PackageRequest;
 use crate::plan::{Op, WriteSource};
+use rootbeer_profile::{Location, Overrides, Updates};
+use serde::de::DeserializeOwned;
 
 pub(crate) struct Package;
 
@@ -129,15 +131,20 @@ impl Module for Package {
     }
 }
 
-fn append_packages(lua: &Lua, parsed: Vec<(PackageRequest, Vec<String>)>) -> LuaResult<()> {
+fn append_packages(lua: &Lua, parsed: Vec<Parsed>) -> LuaResult<()> {
     let cx = Ctx::from(lua);
     let bins = package_bins(lua)?;
-    for (request, names) in parsed {
+    for Parsed {
+        request,
+        overrides,
+        names,
+    } in parsed
+    {
         for name in names {
             let path = profile_bin_path(&name);
             bins.insert(name, path);
         }
-        cx.push(Op::Package { request });
+        cx.push(Op::Package { request, overrides });
     }
 
     Ok(())
@@ -148,16 +155,21 @@ fn package_bins(lua: &Lua) -> LuaResult<mlua::AppDataRef<'_, PackageBins>> {
         .ok_or_else(|| LuaError::RuntimeError("package bins aren't set up".into()))
 }
 
-fn parse_request(
-    lua: &Lua,
-    spec: Value,
-    opts: Option<Table>,
-) -> LuaResult<(PackageRequest, Vec<String>)> {
+/// A package request with the commands it exports.
+struct Parsed {
+    request: PackageRequest,
+    overrides: Overrides,
+    names: Vec<String>,
+}
+
+fn parse_request(lua: &Lua, spec: Value, opts: Option<Table>) -> LuaResult<Parsed> {
+    let options = &["asset", "bins", "updates", "location"][..];
     let (request, opts, allowed) = match spec {
-        Value::String(value) => (value.to_str()?.to_string(), opts, &["asset", "bins"][..]),
+        Value::String(value) => (value.to_str()?.to_string(), opts, options),
         Value::Table(table) if opts.is_none() => {
             let request = required(&table, "request")?;
-            (request, Some(table), &["request", "asset", "bins"][..])
+            let allowed = &["request", "asset", "bins", "updates", "location"][..];
+            (request, Some(table), allowed)
         }
         Value::Table(_) => {
             return Err(LuaError::RuntimeError(
@@ -173,8 +185,14 @@ fn parse_request(
     };
 
     let mut request = PackageRequest::parse(&request).map_err(LuaError::RuntimeError)?;
+    let mut overrides = Overrides::default();
     if let Some(opts) = opts {
         fields(&opts, allowed)?;
+        overrides = Overrides {
+            updates: setting::<Updates>(&opts, "updates", "\"rootbeer\" or \"self\"")?,
+            location: setting::<Location>(&opts, "location", "\"user\" or \"system\"")?,
+        };
+
         let asset = optional::<String>(&opts, "asset")?;
         let bins = optional::<Table>(&opts, "bins")?;
         match &mut request {
@@ -213,7 +231,22 @@ fn parse_request(
         validate_command(name)?;
     }
 
-    Ok((request, names))
+    Ok(Parsed {
+        request,
+        overrides,
+        names,
+    })
+}
+
+/// One of an app setting's names, as its type serializes them.
+fn setting<T: DeserializeOwned>(table: &Table, field: &str, names: &str) -> LuaResult<Option<T>> {
+    let Some(value) = optional::<String>(table, field)? else {
+        return Ok(None);
+    };
+
+    serde_json::from_value(serde_json::Value::String(value))
+        .map(Some)
+        .map_err(|_| LuaError::RuntimeError(format!("package field `{field}` must be {names}")))
 }
 
 fn batch_entries(table: Table) -> LuaResult<Vec<Value>> {

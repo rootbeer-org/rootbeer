@@ -2,7 +2,7 @@ use crate::Download;
 use crate::backend::prebuilt;
 use crate::template::Values;
 use mlua::{Lua, LuaOptions, LuaSerdeExt, StdLib, VmState};
-use rootbeer_drv::{Allow, Platform, Sha256};
+use rootbeer_drv::{Allow, AppSettings, Location, Platform, Sha256, Updates};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde::de::IgnoredAny;
@@ -285,7 +285,7 @@ pub(crate) struct Steps {
 #[serde(deny_unknown_fields)]
 pub(crate) struct Outputs {
     pub bins: Option<Bins>,
-    pub apps: Option<BTreeMap<String, String>>,
+    pub apps: Option<BTreeMap<String, App>>,
     pub checks: Option<Vec<Vec<String>>>,
     pub host: Option<BTreeSet<String>>,
 }
@@ -295,6 +295,25 @@ pub(crate) struct Outputs {
 pub(crate) enum Bins {
     Names(Vec<String>),
     Paths(BTreeMap<String, String>),
+}
+
+/// An app bundle's path in the output, with how it's installed when that
+/// differs from the default.
+#[derive(Clone, Deserialize)]
+#[serde(untagged)]
+pub(crate) enum App {
+    Path(String),
+    Settings(AppTable),
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AppTable {
+    path: String,
+    #[serde(default)]
+    updates: Updates,
+    #[serde(default)]
+    location: Location,
 }
 
 /// One version of a recipe on one platform, with every override applied.
@@ -531,6 +550,24 @@ impl Steps {
         [&self.prepare, &self.configure, &self.build, &self.check]
             .iter()
             .any(|phase| !phase.is_empty())
+    }
+}
+
+impl App {
+    pub(crate) fn path(&self) -> &str {
+        match self {
+            App::Path(path) | App::Settings(AppTable { path, .. }) => path,
+        }
+    }
+
+    pub(crate) fn settings(&self) -> AppSettings {
+        match self {
+            App::Path(_) => AppSettings::default(),
+            App::Settings(table) => AppSettings {
+                updates: table.updates,
+                location: table.location,
+            },
+        }
     }
 }
 

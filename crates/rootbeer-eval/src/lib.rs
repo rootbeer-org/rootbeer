@@ -11,7 +11,9 @@ mod template;
 
 use recipe::{DependencyKind as RecipeKind, Recipe};
 pub use recipe::{LineBy, Lines, Rolling, Upstream};
-use rootbeer_drv::{Dependency, DependencyKind, Derivation, Key, Platform, output_path};
+use rootbeer_drv::{
+    AppSettings, Dependency, DependencyKind, Derivation, Key, Platform, output_path,
+};
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -83,6 +85,8 @@ pub struct Metadata {
     pub bins: BTreeSet<String>,
     /// Application bundles by name, at their path in the output.
     pub apps: BTreeMap<String, String>,
+    /// How each app that differs from the default is installed.
+    pub app_settings: BTreeMap<String, AppSettings>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -525,6 +529,7 @@ impl<'a> Evaluation<'a> {
             .transpose()?;
 
         let outputs = &spec.outputs;
+        let apps = outputs.apps.clone().unwrap_or_default();
         let metadata = Metadata {
             description: recipe.description.clone(),
             homepage: recipe.homepage.clone(),
@@ -536,7 +541,15 @@ impl<'a> Evaluation<'a> {
                 .as_ref()
                 .map(|bins| bins.names().into_iter().map(String::from).collect())
                 .unwrap_or_default(),
-            apps: outputs.apps.clone().unwrap_or_default(),
+            apps: apps
+                .iter()
+                .map(|(name, app)| (name.clone(), app.path().to_string()))
+                .collect(),
+            app_settings: apps
+                .iter()
+                .map(|(name, app)| (name.clone(), app.settings()))
+                .filter(|(_, settings)| *settings != AppSettings::default())
+                .collect(),
         };
 
         Ok(Package {

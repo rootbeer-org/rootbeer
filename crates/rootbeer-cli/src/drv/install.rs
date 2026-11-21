@@ -3,7 +3,7 @@ use super::github;
 use super::{store_error, this_platform};
 use data_encoding::HEXLOWER;
 use rootbeer_cache::Cache;
-use rootbeer_drv::{is_package_name, Key, Platform, STORE_ROOT};
+use rootbeer_drv::{is_package_name, AppSettings, Key, Platform, STORE_ROOT};
 use rootbeer_profile::{release_name, Locked, Member, Release};
 use rootbeer_store::{Store, ROOT};
 use rootbeer_trust::{Index, Output, Package};
@@ -144,6 +144,7 @@ pub(crate) enum Wanted {
         key: Key,
         bins: BTreeSet<String>,
         apps: BTreeMap<String, String>,
+        app_settings: BTreeMap<String, AppSettings>,
     },
 }
 
@@ -190,6 +191,7 @@ impl Wanted {
             is_local,
             bins,
             apps,
+            app_settings,
         } = installed;
         match (self, release, is_local) {
             // A line asked for is answered only by what was resolved from
@@ -205,11 +207,12 @@ impl Wanted {
                     key: wanted,
                     bins: names,
                     apps: bundles,
+                    app_settings: settings,
                     ..
                 },
                 None,
                 true,
-            ) => wanted == key && names == bins && bundles == apps,
+            ) => wanted == key && names == bins && bundles == apps && settings == app_settings,
             _ => false,
         }
     }
@@ -224,6 +227,7 @@ pub(crate) struct Installed<'a> {
     is_local: bool,
     bins: &'a BTreeSet<String>,
     apps: &'a BTreeMap<String, String>,
+    app_settings: &'a BTreeMap<String, AppSettings>,
 }
 
 impl<'a> From<&'a Locked> for Installed<'a> {
@@ -236,6 +240,7 @@ impl<'a> From<&'a Locked> for Installed<'a> {
             is_local: locked.is_local,
             bins: &locked.bins,
             apps: &locked.apps,
+            app_settings: &locked.app_settings,
         }
     }
 }
@@ -250,6 +255,7 @@ impl<'a> From<&'a Member> for Installed<'a> {
             is_local: member.is_local,
             bins: &member.bins,
             apps: &member.apps,
+            app_settings: &member.app_settings,
         }
     }
 }
@@ -455,6 +461,7 @@ mod tests {
             manifest: format!("sha256:{}", "0".repeat(64)),
             bins: BTreeSet::new(),
             apps: BTreeMap::new(),
+            app_settings: BTreeMap::new(),
         };
 
         let package = Package {
@@ -505,6 +512,7 @@ mod tests {
             manifest: format!("sha256:{}", "0".repeat(64)),
             bins: BTreeSet::new(),
             apps: BTreeMap::new(),
+            app_settings: BTreeMap::new(),
         };
         let built = |platforms: &[Platform]| {
             platforms
