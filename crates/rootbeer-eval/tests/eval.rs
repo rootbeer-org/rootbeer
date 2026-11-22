@@ -2,7 +2,7 @@
 
 use rootbeer_drv::{AppSettings, DependencyKind, Derivation, Location, Platform, Updates};
 use rootbeer_eval::{Catalog, Error, Host, LineBy, Lines, Patches, Target};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 const FIXTURES: [(&str, &str); 13] = [
     ("7zip.lua", include_str!("fixtures/7zip.lua")),
@@ -920,4 +920,47 @@ fn a_version_belongs_to_the_line_its_leading_numbers_name() {
     assert_eq!(minor.line("7.1.2-35"), Some(vec![7, 1]));
     assert_eq!(minor.line("3"), None);
     assert_eq!(major.line("v26"), None);
+}
+
+#[test]
+fn metadata_says_where_an_output_comes_from_and_what_it_needs() {
+    let finder = 3;
+    let mut fixtures = FIXTURES;
+    let with_host = FIXTURES[finder].1.replace(
+        r#"bins = { "finder" },"#,
+        r#"bins = { "finder" }, host = { "libc.so.6", "$ORIGIN/../lib/libf.so" },"#,
+    );
+    fixtures[finder].1 = &with_host;
+
+    let catalog = Catalog::parse(fixtures).unwrap();
+    let graph = catalog.evaluate(&hosts("a"), &catalog.targets()).unwrap();
+    let metadata = |name: &str| {
+        let (_, package) = graph
+            .packages
+            .iter()
+            .find(|(target, _)| target.name == name)
+            .unwrap();
+        package.metadata.clone()
+    };
+
+    let finder = metadata("finder");
+    assert_eq!(
+        finder.repository.as_deref(),
+        Some("https://github.com/example/finder")
+    );
+    assert_eq!(finder.tag.as_deref(), Some("v10.5.0"));
+    assert_eq!(finder.build, "prebuilt");
+    assert_eq!(finder.host, BTreeSet::from(["libc.so.6".to_string()]));
+
+    let auto = metadata("auto");
+    assert_eq!((auto.repository, auto.tag), (None, None));
+    assert_eq!(auto.build, "autotools");
+    assert_eq!(
+        auto.runtime_dependencies,
+        BTreeSet::from(["libz".to_string()])
+    );
+
+    let gopher = metadata("gopher");
+    assert_eq!(gopher.build, "go");
+    assert!(gopher.runtime_dependencies.is_empty());
 }

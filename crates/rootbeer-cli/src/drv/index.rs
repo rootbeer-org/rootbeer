@@ -2,7 +2,7 @@ use super::cache::Registry;
 use super::{load, Sources};
 use rootbeer_drv::{Key, Platform};
 use rootbeer_eval::{Graph, Target};
-use rootbeer_trust::{Output, Package};
+use rootbeer_trust::{Details, Output, Package};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
@@ -109,6 +109,7 @@ fn packages(
             if is_default || !is_described {
                 package.description.clone_from(&metadata.description);
                 package.homepage.clone_from(&metadata.homepage);
+                package.repository = metadata.repository.clone().unwrap_or_default();
                 package.license.clone_from(&metadata.license);
                 package.aliases = metadata.aliases.iter().cloned().collect();
                 package.maintainers.clone_from(&metadata.maintainers);
@@ -127,6 +128,12 @@ fn packages(
                 bins: metadata.bins.clone(),
                 apps: metadata.apps.clone(),
                 app_settings: metadata.app_settings.clone(),
+                details: Details {
+                    build: metadata.build.clone(),
+                    tag: metadata.tag.clone(),
+                    runtime_dependencies: metadata.runtime_dependencies.clone(),
+                    host: metadata.host.clone(),
+                },
             };
 
             package
@@ -186,6 +193,7 @@ mod tests {
                     bins: [target.name.clone()].into(),
                     apps: BTreeMap::new(),
                     app_settings: BTreeMap::new(),
+                    ..Metadata::default()
                 },
             };
             graph.packages.insert(target.clone(), package);
