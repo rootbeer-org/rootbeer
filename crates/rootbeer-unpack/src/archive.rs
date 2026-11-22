@@ -18,7 +18,10 @@ pub(crate) fn zip(archive: &Path, tree: &Tree) -> Result<(), String> {
     let mut described = Vec::new();
     for index in 0..archive.len() {
         let mut entry = archive.by_index(index).map_err(|error| error.to_string())?;
-        let name = entry.name().to_string();
+        let name = entry
+            .name()
+            .map_err(|error| error.to_string())?
+            .into_owned();
         if is_apple_double(&name) {
             // Only macOS can hold the attributes, and elsewhere the file is
             // dropped as before.

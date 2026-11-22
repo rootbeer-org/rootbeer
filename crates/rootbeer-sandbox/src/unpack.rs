@@ -134,17 +134,18 @@ fn zip(file: File, out: &Path) -> io::Result<()> {
     let mut archive = zip::ZipArchive::new(file)?;
     for index in 0..archive.len() {
         let mut entry = archive.by_index(index)?;
+        let name = entry.name().map_err(io::Error::other)?.into_owned();
         let Some(relative) = entry.enclosed_name() else {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("{} leaves the output", entry.name()),
+                format!("{name} leaves the output"),
             ));
         };
 
         if entry.is_symlink() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("{} is a symlink, which zips can't hold here", entry.name()),
+                format!("{name} is a symlink, which zips can't hold here"),
             ));
         }
 
