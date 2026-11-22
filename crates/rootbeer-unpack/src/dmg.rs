@@ -44,53 +44,74 @@ pub(crate) fn is_image(archive: &Path) -> Result<bool, String> {
     Ok(&magic == b"koly")
 }
 
+#[derive(Clone, Copy)]
+enum Filesystem {
+    Apfs,
+    Hfs,
+}
+
 /// Unpacks the filesystem in a disk image, HFS+ or APFS, with the volume's
 /// contents at the top of `tree`.
 pub(crate) fn unpack(archive: &Path, tree: &Tree) -> Result<(), String> {
     let mut image = udif::DmgReader::open(archive).map_err(|error| error.to_string())?;
 
-    let filesystems = image
+    // The tool that made the image names its partitions, and some name the
+    // filesystem only "disk image", so each one is checked for a volume.
+    let partitions = image
         .partitions()
         .iter()
-        .filter(|partition| {
-            ["Apple_HFS", "Apple_HFSX", "Apple_APFS"]
-                .iter()
-                .any(|kind| partition.name.contains(kind))
-        })
         .map(|partition| partition.id)
         .collect::<Vec<_>>();
+    let mut found = Vec::new();
+    for partition in partitions {
+        let mut raw = tempfile::tempfile().map_err(|error| error.to_string())?;
+        image
+            .decompress_partition_to(partition, &mut raw)
+            .map_err(|error| error.to_string())?;
 
-    let [partition] = filesystems.as_slice() else {
+        if let Some(filesystem) = filesystem(&mut raw)? {
+            found.push((filesystem, raw));
+        }
+    }
+
+    let count = found.len();
+    let Ok([(filesystem, raw)]) = <[_; 1]>::try_from(found) else {
         return Err(format!(
-            "expected one HFS+ or APFS partition in the image, found {}",
-            filesystems.len()
+            "expected one HFS+ or APFS partition in the image, found {count}"
         ));
     };
 
-    let mut raw = tempfile::tempfile().map_err(|error| error.to_string())?;
-    image
-        .decompress_partition_to(*partition, &mut raw)
-        .map_err(|error| error.to_string())?;
-
-    let mut magic = [0u8; 1028];
-    raw.seek(SeekFrom::Start(0))
-        .and_then(|_| raw.read_exact(&mut magic))
-        .map_err(|error| format!("the partition is too small to hold a filesystem ({error})"))?;
-    raw.seek(SeekFrom::Start(0))
-        .map_err(|error| error.to_string())?;
-
     let raw = BufReader::new(raw);
-    match (magic.get(32..36), magic.get(1024..1026)) {
-        (Some(b"NXSB"), _) => {
+    match filesystem {
+        Filesystem::Apfs => {
             let volume = apfs::ApfsVolume::open(raw).map_err(|error| error.to_string())?;
             copy(volume, tree)
         }
-        (_, Some(b"H+" | b"HX")) => {
+        Filesystem::Hfs => {
             let volume = hfsplus::HfsVolume::open(raw).map_err(|error| error.to_string())?;
             copy(volume, tree)
         }
-        _ => Err("the partition holds neither HFS+ nor APFS".into()),
     }
+}
+
+/// The filesystem a partition holds, read from the signature in its first
+/// blocks, with the partition rewound to its start.
+fn filesystem(raw: &mut std::fs::File) -> Result<Option<Filesystem>, String> {
+    let mut magic = [0u8; 1028];
+    raw.seek(SeekFrom::Start(0))
+        .map_err(|error| error.to_string())?;
+    let is_long_enough = raw.read_exact(&mut magic).is_ok();
+    raw.seek(SeekFrom::Start(0))
+        .map_err(|error| error.to_string())?;
+    if !is_long_enough {
+        return Ok(None);
+    }
+
+    Ok(match (magic.get(32..36), magic.get(1024..1026)) {
+        (Some(b"NXSB"), _) => Some(Filesystem::Apfs),
+        (_, Some(b"H+" | b"HX")) => Some(Filesystem::Hfs),
+        _ => None,
+    })
 }
 
 fn copy(mut volume: impl Volume, tree: &Tree) -> Result<(), String> {
