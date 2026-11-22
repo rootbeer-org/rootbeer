@@ -263,8 +263,15 @@ pub(super) fn helper_pull(
     let copied = io::copy(&mut archive, &mut stdin);
     drop(stdin);
 
+    // A helper that fails stops reading, which breaks the pipe. Its own error,
+    // printed above, is the cause then, not the download.
     let status = child.wait().map_err(|error| error.to_string())?;
-    copied.map_err(|error| format!("downloading {key}: {error}"))?;
+    match copied {
+        Err(error) if error.kind() == io::ErrorKind::BrokenPipe && !status.success() => {}
+        Err(error) => return Err(format!("downloading {key}: {error}")),
+        Ok(_) => {}
+    }
+
     if !status.success() {
         return Err(format!("{HELPER} pull {key} {status}"));
     }
