@@ -224,6 +224,18 @@ pub(crate) enum Backend {
     Zig,
 }
 
+impl Backend {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Backend::Autotools => "autotools",
+            Backend::Custom => "custom",
+            Backend::Go => "go",
+            Backend::Rust => "rust",
+            Backend::Zig => "zig",
+        }
+    }
+}
+
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Dependency {
@@ -451,6 +463,15 @@ impl Recipe {
 }
 
 impl Upstream {
+    /// The repository's web address, from `github` or an HTTPS `git`.
+    pub fn repository(&self) -> Option<String> {
+        if let Some(github) = &self.github {
+            return Some(format!("https://github.com/{github}"));
+        }
+
+        self.git.clone().filter(|git| git.starts_with("https://"))
+    }
+
     fn tag_for(&self, version: &str) -> String {
         let version = match &self.separator {
             Some(separator) => version.replace('.', separator),

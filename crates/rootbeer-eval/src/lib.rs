@@ -74,7 +74,7 @@ pub struct Package {
 }
 
 /// Metadata published alongside a package, used for search and display.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Metadata {
     pub description: String,
     pub homepage: String,
@@ -87,6 +87,17 @@ pub struct Metadata {
     pub apps: BTreeMap<String, String>,
     /// How each app that differs from the default is installed.
     pub app_settings: BTreeMap<String, AppSettings>,
+    /// The upstream repository's web address, when the recipe names one.
+    pub repository: Option<String>,
+    /// The tag upstream released this version under.
+    pub tag: Option<String>,
+    /// How the output is made. Either `prebuilt` or the source build's
+    /// backend.
+    pub build: String,
+    /// Packages the output needs when it runs.
+    pub runtime_dependencies: BTreeSet<String>,
+    /// What the output expects the host to provide, such as a soname.
+    pub host: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -505,11 +516,12 @@ impl<'a> Evaluation<'a> {
         dependencies: Vec<Dependency>,
     ) -> Result<Package, String> {
         let spec = &package.resolved.spec;
-        let build = match (&spec.prebuilt, &spec.source, &spec.build) {
+        let (build, method) = match (&spec.prebuilt, &spec.source, &spec.build) {
             (Some(prebuilt), None, _) => {
                 let (fetch, install) = package.download(prebuilt)?;
                 let source = self.insert(Derivation::Fetch(fetch))?;
-                package.unpack(install, prebuilt, source, dependencies)?
+                let build = package.unpack(install, prebuilt, source, dependencies)?;
+                (build, "prebuilt")
             }
             (None, Some(source), Some(build)) => {
                 let source_key = self.insert(Derivation::Fetch(package.source(source)?))?;
@@ -520,7 +532,11 @@ impl<'a> Evaluation<'a> {
                     inputs.insert("vendor".into(), self.insert(Derivation::Build(vendor))?);
                 }
 
-                package.compile(source, build, inputs, dependencies)?
+                let backend = build.backend.name();
+                (
+                    package.compile(source, build, inputs, dependencies)?,
+                    backend,
+                )
             }
             (Some(_), Some(_), _) => {
                 return Err("a platform is prebuilt or built from source, not both".into());
@@ -537,11 +553,40 @@ impl<'a> Evaluation<'a> {
             .cloned()
             .collect();
 
+        // A shared library linked for run time stays referenced when it runs
+        let runtime_dependencies = build
+            .dependencies
+            .iter()
+            .filter(|dependency| match dependency.kind {
+                DependencyKind::Runtime => true,
+                DependencyKind::Linked => self.shared.contains(&dependency.key),
+                DependencyKind::Build => false,
+            })
+            .map(|dependency| dependency.name.clone())
+            .collect();
+        // A reference the loader resolves from the output asks nothing of the host
+        let host = build
+            .host
+            .iter()
+            .filter(|reference| {
+                let relative = ["$ORIGIN", "@executable_path", "@loader_path", "@rpath"];
+                !relative.iter().any(|prefix| reference.starts_with(prefix))
+            })
+            .cloned()
+            .collect();
+
         let build = self.insert(Derivation::Build(build))?;
         let check = package
             .check(&build, runtime)?
             .map(|check| self.insert(Derivation::Check(check)))
             .transpose()?;
+
+        let values = &package.resolved.values;
+        let upstream = recipe
+            .platforms
+            .get(&values.platform)
+            .and_then(|platform| platform.upstream.as_ref())
+            .or(recipe.upstream.as_ref());
 
         let outputs = &spec.outputs;
         let apps = outputs.apps.clone().unwrap_or_default();
@@ -565,6 +610,11 @@ impl<'a> Evaluation<'a> {
                 .map(|(name, app)| (name.clone(), app.settings()))
                 .filter(|(_, settings)| *settings != AppSettings::default())
                 .collect(),
+            repository: upstream.and_then(Upstream::repository),
+            tag: upstream.map(|_| values.tag.clone()),
+            build: method.to_string(),
+            runtime_dependencies,
+            host,
         };
 
         Ok(Package {

@@ -650,6 +650,7 @@ mod tests {
             bins: ["jq".to_string()].into(),
             apps: Default::default(),
             app_settings: Default::default(),
+            details: Default::default(),
         };
         let outputs = BTreeMap::from([(platform, output)]);
         package.versions.insert("1.8.2".into(), outputs);
@@ -683,6 +684,7 @@ mod tests {
             bins: Default::default(),
             apps,
             app_settings: settings.clone(),
+            details: Default::default(),
         };
         let package = Package {
             name: "jq".into(),

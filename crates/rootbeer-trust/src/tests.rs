@@ -175,6 +175,7 @@ fn package(name: &str) -> Package {
         bins: BTreeSet::from([name.into()]),
         apps: BTreeMap::new(),
         app_settings: BTreeMap::new(),
+        details: Default::default(),
     };
 
     Package {
@@ -548,6 +549,50 @@ fn timestamp_version(fixture: &Fixture) -> u64 {
     let path = fixture.path("repository/metadata/timestamp.json");
     let timestamp: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
     timestamp["signed"]["version"].as_u64().unwrap()
+}
+
+#[test]
+fn details_sit_beside_an_output_and_a_bad_one_loses_only_itself() {
+    let platform = Platform::Aarch64Linux;
+    let mut package = package("zstd");
+    package.repository = "https://github.com/facebook/zstd".into();
+    package
+        .versions
+        .values_mut()
+        .flat_map(|outputs| outputs.values_mut())
+        .for_each(|output| {
+            output.details = Details {
+                build: "autotools".into(),
+                tag: Some("v1.0".into()),
+                runtime_dependencies: BTreeSet::from(["libz".into()]),
+                host: BTreeSet::from(["libc.so.6".into()]),
+            };
+        });
+
+    let json = serde_json::to_value(&package).unwrap();
+    let output = &json["versions"]["1.0"]["aarch64-linux"];
+    assert_eq!(output["build"], "autotools");
+    assert_eq!(output["tag"], "v1.0");
+    assert_eq!(output["runtime_dependencies"], serde_json::json!(["libz"]));
+    assert_eq!(output["host"], serde_json::json!(["libc.so.6"]));
+    assert_eq!(
+        serde_json::from_value::<Package>(json.clone()).unwrap(),
+        package
+    );
+
+    let mut bad = json;
+    bad["repository"] = "javascript:alert(1)".into();
+    bad["versions"]["1.0"]["aarch64-linux"]["runtime_dependencies"] =
+        serde_json::json!(["libz", "../etc"]);
+    let read = serde_json::from_value::<Package>(bad).unwrap();
+    assert_eq!(read.repository, "");
+    assert_eq!(
+        read.output(platform, None)
+            .unwrap()
+            .details
+            .runtime_dependencies,
+        BTreeSet::from(["libz".to_string()])
+    );
 }
 
 #[test]

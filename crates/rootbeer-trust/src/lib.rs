@@ -28,6 +28,10 @@ pub struct Package {
     pub name: String,
     pub description: String,
     pub homepage: String,
+    /// The upstream repository's web address. Clients from before this field
+    /// ignore it.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub repository: String,
     pub license: String,
     pub aliases: BTreeSet<String>,
     pub maintainers: Vec<String>,
@@ -54,6 +58,28 @@ pub struct Output {
     /// before this field ignore it.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub app_settings: BTreeMap<String, AppSettings>,
+    /// Where the output comes from and what it needs. Clients from before
+    /// these fields ignore them.
+    #[serde(flatten)]
+    pub details: Details,
+}
+
+/// What a recipe says about an output for display. Installing never reads it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Details {
+    /// How the output is made. Either `prebuilt` or the source build's
+    /// backend.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub build: String,
+    /// The tag upstream released this version under.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+    /// Packages the output needs when it runs.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub runtime_dependencies: BTreeSet<String>,
+    /// What the output expects the host to provide, such as a soname.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub host: BTreeSet<String>,
 }
 
 pub struct Index {
@@ -78,6 +104,8 @@ struct Entry {
     description: String,
     #[serde(default)]
     homepage: String,
+    #[serde(default)]
+    repository: String,
     #[serde(default)]
     license: String,
     #[serde(default)]
@@ -104,6 +132,8 @@ struct RawOutput {
     apps: BTreeMap<String, String>,
     #[serde(default)]
     app_settings: BTreeMap<String, AppSettings>,
+    #[serde(flatten)]
+    details: Details,
 }
 
 impl Index {
@@ -316,10 +346,16 @@ impl TryFrom<Entry> for Package {
             .filter(|alias| is_package_name(alias) && *alias != entry.name)
             .collect();
 
+        // A repository that isn't a web address only loses its link.
+        let repository = Some(entry.repository)
+            .filter(|repository| repository.starts_with("https://"))
+            .unwrap_or_default();
+
         Ok(Package {
             name: entry.name,
             description: entry.description,
             homepage: entry.homepage,
+            repository,
             license: entry.license,
             aliases,
             maintainers: entry.maintainers,
@@ -335,7 +371,7 @@ impl TryFrom<Entry> for Package {
 impl TryFrom<RawOutput> for Output {
     type Error = String;
 
-    fn try_from(raw: RawOutput) -> Result<Output, String> {
+    fn try_from(mut raw: RawOutput) -> Result<Output, String> {
         if !is_digest(&raw.manifest) {
             return Err(format!("{:?} isn't a sha256 digest", raw.manifest));
         }
@@ -360,12 +396,18 @@ impl TryFrom<RawOutput> for Output {
             return Err(format!("{name:?} has settings but isn't an app"));
         }
 
+        // A bad dependency name only loses that name, so the output installs.
+        raw.details
+            .runtime_dependencies
+            .retain(|name| is_package_name(name));
+
         Ok(Output {
             key: raw.key,
             manifest: raw.manifest,
             bins: raw.bins,
             apps: raw.apps,
             app_settings: raw.app_settings,
+            details: raw.details,
         })
     }
 }

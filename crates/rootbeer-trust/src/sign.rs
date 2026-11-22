@@ -307,16 +307,34 @@ fn merge(
         return Ok(merged);
     };
 
-    let listed =
-        |map: &Map<String, Value>| (map.get("versions").cloned(), map.get("default").cloned());
-    let was = listed(&previous);
-
     let object = |map: &Map<String, Value>, field: &str| {
         map.get(field)
             .and_then(Value::as_object)
             .cloned()
             .unwrap_or_default()
     };
+
+    // Only keys and manifests mark an update, not new details on an output.
+    let listed = |map: &Map<String, Value>| {
+        let outputs = object(map, "versions")
+            .into_iter()
+            .flat_map(|(version, outputs)| {
+                let outputs = outputs.as_object().cloned().unwrap_or_default();
+                outputs.into_iter().map(move |(platform, output)| {
+                    let key = output.get("key").cloned();
+                    (
+                        version.clone(),
+                        platform,
+                        key,
+                        output.get("manifest").cloned(),
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+
+        (outputs, map.get("default").cloned())
+    };
+    let was = listed(&previous);
 
     let mut retired = object(&previous, "retired");
     retired.extend(object(&merged, "retired"));
@@ -493,6 +511,15 @@ mod tests {
 
         let rolled_back = merge(Some(newer), &zstd(&["1.0", "2.0"]), 500).unwrap();
         assert_eq!(dates(&rolled_back), (Some(100), Some(500)));
+
+        let mut detailed = zstd(&["2.0"]);
+        detailed
+            .versions
+            .values_mut()
+            .flat_map(|outputs| outputs.values_mut())
+            .for_each(|output| output.details.build = "zig".into());
+        let same = merge(Some(dropped.clone()), &detailed, 450).unwrap();
+        assert_eq!(dates(&same), (Some(100), Some(300)));
 
         let mut undated = dropped;
         undated.retain(|field, _| field != "added" && field != "updated");

@@ -462,6 +462,7 @@ mod tests {
             bins: BTreeSet::new(),
             apps: BTreeMap::new(),
             app_settings: BTreeMap::new(),
+            details: Default::default(),
         };
 
         let package = Package {
@@ -513,6 +514,7 @@ mod tests {
             bins: BTreeSet::new(),
             apps: BTreeMap::new(),
             app_settings: BTreeMap::new(),
+            details: Default::default(),
         };
         let built = |platforms: &[Platform]| {
             platforms

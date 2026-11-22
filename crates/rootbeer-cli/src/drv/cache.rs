@@ -356,6 +356,7 @@ mod tests {
                 bins: BTreeSet::new(),
                 apps: BTreeMap::new(),
                 app_settings: BTreeMap::new(),
+                details: Default::default(),
             };
 
             Package {

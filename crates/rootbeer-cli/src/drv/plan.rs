@@ -198,16 +198,7 @@ mod tests {
             platform,
         };
 
-        let metadata = Metadata {
-            description: String::new(),
-            homepage: String::new(),
-            license: String::new(),
-            aliases: Vec::new(),
-            maintainers: Vec::new(),
-            bins: Default::default(),
-            apps: Default::default(),
-            app_settings: Default::default(),
-        };
+        let metadata = Metadata::default();
 
         graph.packages.insert(
             target.clone(),
