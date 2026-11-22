@@ -180,17 +180,13 @@ jobs:
           path: ${{ runner.temp }}/served/*.json
           if-no-files-found: ignore
 
-  deploy:
-    name: Deploy
+  site:
+    name: Build the site
     needs: sign
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -221,6 +217,19 @@ jobs:
         with:
           path: .vitepress/dist
 
+  # Deploying in the job that uploads sometimes finds no artifact yet, and
+  # deploy-pages doesn't retry that.
+  deploy:
+    name: Deploy
+    needs: site
+    if: ${{ !cancelled() && needs.site.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+    steps:
       - name: Deploy to GitHub Pages
         uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
 
