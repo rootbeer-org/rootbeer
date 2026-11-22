@@ -1,13 +1,22 @@
 use crate::{Error, io_at};
+use rustix::fs::XattrFlags;
+use rustix::io::Errno;
 use std::fs;
 use std::io::{self, Read, Write};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path};
+use std::time::{Duration, UNIX_EPOCH};
 use tar::{Builder, EntryType, Header};
 use walkdir::WalkDir;
 
 // Maximizing compression size since network is the bottleneck
 const LEVEL: i32 = 19;
+
+// A signed file with nowhere to hold its signature, like a jar in an app
+// bundle, keeps it in these extended attributes. No others are kept, since
+// the system adds its own, like quarantine and provenance.
+const KEPT: &str = "com.apple.cs.";
+const PAX_ATTRIBUTE: &str = "SCHILY.xattr.";
 
 /// Writes a directory into a deterministic zstd archive
 pub fn pack(directory: &Path, writer: impl Write) -> Result<(), Error> {
@@ -41,6 +50,18 @@ pub fn pack(directory: &Path, writer: impl Write) -> Result<(), Error> {
         } else if file_type.is_file() {
             let file = fs::File::open(path).map_err(io_at(path))?;
             let metadata = file.metadata().map_err(io_at(path))?;
+            let attributes = attributes(&file, path)?
+                .into_iter()
+                .map(|(name, value)| (format!("{PAX_ATTRIBUTE}{name}"), value))
+                .collect::<Vec<_>>();
+            builder
+                .append_pax_extensions(
+                    attributes
+                        .iter()
+                        .map(|(key, value)| (key.as_str(), value.as_slice())),
+                )
+                .map_err(io_at(path))?;
+
             header.set_entry_type(EntryType::Regular);
             header.set_mode(metadata.permissions().mode() & 0o555);
             header.set_size(metadata.len());
@@ -101,11 +122,45 @@ pub(crate) fn unpack(reader: impl Read, directory: &Path) -> Result<(), Error> {
             )));
         }
 
-        match entry.header().entry_type() {
+        // Packing keeps extended attributes only on files.
+        let kind = entry.header().entry_type();
+        let attributes = pax_attributes(&mut entry, &relative.display().to_string())?;
+        if !attributes.is_empty() && kind != EntryType::Regular {
+            return Err(Error::Archive(format!(
+                "{} has extended attributes but isn't a file",
+                relative.display()
+            )));
+        }
+
+        match kind {
             // Made writable until the end, so their contents can be unpacked.
             EntryType::Directory => fs::create_dir(&path).map_err(io_at(&path))?,
-            EntryType::Regular | EntryType::Symlink => {
+            EntryType::Symlink => {
                 entry.unpack(&path).map_err(io_at(&path))?;
+            }
+            // Writable until sealed too, since only the owner of a writable
+            // file can set its extended attributes.
+            EntryType::Regular => {
+                let modified = entry.header().mtime().map_err(io_at(&path))?;
+                let mut file = fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(mode | 0o200)
+                    .open(&path)
+                    .map_err(io_at(&path))?;
+                io::copy(&mut entry, &mut file).map_err(io_at(&path))?;
+
+                for (name, value) in attributes {
+                    rustix::fs::fsetxattr(&file, name.as_str(), &value, XattrFlags::empty())
+                        .map_err(|error| io_at(&path)(error.into()))?;
+                }
+
+                let modified = UNIX_EPOCH
+                    .checked_add(Duration::from_secs(modified))
+                    .ok_or_else(|| {
+                        Error::Archive(format!("{} has mtime {modified}", relative.display()))
+                    })?;
+                file.set_modified(modified).map_err(io_at(&path))?;
             }
             other => {
                 return Err(Error::Archive(format!(
@@ -117,6 +172,80 @@ pub(crate) fn unpack(reader: impl Read, directory: &Path) -> Result<(), Error> {
     }
 
     Ok(())
+}
+
+/// The extended attributes an archive keeps for `file`, sorted so packing
+/// stays deterministic.
+fn attributes(file: &fs::File, path: &Path) -> Result<Vec<(String, Vec<u8>)>, Error> {
+    let at = |error: Errno| io_at(path)(error.into());
+    let names = match sized(|buffer| rustix::fs::flistxattr(file, buffer)) {
+        // Linux gives the two the same number, so they can't both be patterns.
+        Err(error) if [Errno::NOTSUP, Errno::OPNOTSUPP].contains(&error) => {
+            return Ok(Vec::new());
+        }
+        names => names.map_err(at)?,
+    };
+
+    let mut kept = Vec::new();
+    for name in names.split(|byte| *byte == 0) {
+        let Some(name) = std::str::from_utf8(name)
+            .ok()
+            .filter(|name| name.starts_with(KEPT))
+        else {
+            continue;
+        };
+
+        let value = sized(|buffer| rustix::fs::fgetxattr(file, name, buffer)).map_err(at)?;
+        kept.push((name.to_string(), value));
+    }
+
+    kept.sort();
+    Ok(kept)
+}
+
+/// Reads a value whose size is asked for first, as the xattr calls report.
+fn sized(mut call: impl FnMut(&mut [u8]) -> Result<usize, Errno>) -> Result<Vec<u8>, Errno> {
+    let size = call(&mut [])?;
+    let mut buffer = vec![0; size];
+    let size = call(&mut buffer)?;
+    buffer.truncate(size);
+    Ok(buffer)
+}
+
+/// The extended attributes an entry's PAX records carry. Any the archive
+/// wouldn't have kept refuses it.
+fn pax_attributes<R: Read>(
+    entry: &mut tar::Entry<R>,
+    relative: &str,
+) -> Result<Vec<(String, Vec<u8>)>, Error> {
+    let Some(records) = entry
+        .pax_extensions()
+        .map_err(|error| Error::Archive(error.to_string()))?
+    else {
+        return Ok(Vec::new());
+    };
+
+    let mut attributes = Vec::new();
+    for record in records {
+        let record = record.map_err(|error| Error::Archive(error.to_string()))?;
+        let Some(name) = record
+            .key()
+            .ok()
+            .and_then(|key| key.strip_prefix(PAX_ATTRIBUTE))
+        else {
+            continue;
+        };
+
+        if !name.starts_with(KEPT) {
+            return Err(Error::Archive(format!(
+                "{relative} has the extended attribute {name}"
+            )));
+        }
+
+        attributes.push((name.to_string(), record.value_bytes().to_vec()));
+    }
+
+    Ok(attributes)
 }
 
 pub(crate) fn seal(root: &Path) -> Result<(), Error> {

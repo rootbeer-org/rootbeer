@@ -51,9 +51,10 @@ impl Tree {
             return Err("an archive entry has no name".into());
         };
 
+        // The owner keeps write access so extended attributes can be set.
         let at = |error: io::Error| format!("{}: {error}", path.display());
         let file = File::create_new(&path).map_err(at)?;
-        file.set_permissions(fs::Permissions::from_mode(mode & 0o755))
+        file.set_permissions(fs::Permissions::from_mode(mode & 0o755 | 0o200))
             .map_err(at)?;
         Ok(file)
     }
@@ -73,25 +74,13 @@ impl Tree {
             return Err("an archive entry has no name".into());
         };
 
-        let mut directory = self.root.clone();
-        let relative = found
-            .strip_prefix(&self.root)
-            .unwrap_or(&found)
-            .to_path_buf();
-        for component in relative.components() {
-            directory.push(component);
-            let metadata = fs::symlink_metadata(&directory);
-            let is_followable = match &metadata {
-                Ok(metadata) if directory == found => metadata.is_file(),
-                Ok(metadata) => metadata.is_dir(),
-                Err(_) => false,
-            };
-
-            if !is_followable {
-                return Err(format!(
-                    "{path} links to {original}, which isn't a file it holds"
-                ));
-            }
+        if !self
+            .reached(&found)
+            .is_some_and(|metadata| metadata.is_file())
+        {
+            return Err(format!(
+                "{path} links to {original}, which isn't a file it holds"
+            ));
         }
 
         let Some(path) = self.place(path)? else {
@@ -99,6 +88,59 @@ impl Tree {
         };
 
         fs::hard_link(&found, &path).map_err(|error| format!("{}: {error}", path.display()))
+    }
+
+    /// Sets extended attributes on a file this tree already holds, reached
+    /// without a symlink. Anything else is skipped, since the store keeps
+    /// attributes only on files.
+    pub(crate) fn set_attributes(
+        &self,
+        path: &str,
+        attributes: &[(String, Vec<u8>)],
+    ) -> Result<(), String> {
+        let Some(found) = self.inside(path)? else {
+            return Ok(());
+        };
+
+        if !self
+            .reached(&found)
+            .is_some_and(|metadata| metadata.is_file())
+        {
+            return Ok(());
+        }
+
+        for (name, value) in attributes {
+            rustix::fs::lsetxattr(
+                &found,
+                name.as_str(),
+                value,
+                rustix::fs::XattrFlags::empty(),
+            )
+            .map_err(|error| format!("{}: {name}: {error}", found.display()))?;
+        }
+
+        Ok(())
+    }
+
+    /// What `found` is, when every directory above it is a directory and it
+    /// isn't a symlink.
+    fn reached(&self, found: &Path) -> Option<fs::Metadata> {
+        let relative = found.strip_prefix(&self.root).ok()?;
+        let mut directory = self.root.clone();
+        let mut metadata = None;
+        for component in relative.components() {
+            if metadata
+                .as_ref()
+                .is_some_and(|metadata: &fs::Metadata| !metadata.is_dir())
+            {
+                return None;
+            }
+
+            directory.push(component);
+            metadata = Some(fs::symlink_metadata(&directory).ok()?);
+        }
+
+        metadata.filter(|metadata| !metadata.file_type().is_symlink())
     }
 
     /// Where `path` lands, with each directory above it made. None is the
@@ -187,6 +229,24 @@ mod tests {
         let error = tree.hard_link("stolen", "link/passwd").unwrap_err();
         assert!(error.contains("isn't a file it holds"), "{error}");
         tree.hard_link("again", "a/b/file").unwrap();
+
+        let signature = [("com.apple.cs.CodeSignature".to_string(), b"signed".to_vec())];
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("target"), "").unwrap();
+        tree.symlink("away", outside.path().to_str().unwrap())
+            .unwrap();
+        tree.set_attributes("away/target", &signature).unwrap();
+        tree.set_attributes("nothing", &signature).unwrap();
+        let mut value = [0u8; 16];
+        let outside_target = outside.path().join("target");
+        assert!(
+            rustix::fs::getxattr(
+                &outside_target,
+                "com.apple.cs.CodeSignature",
+                &mut value[..]
+            )
+            .is_err()
+        );
 
         assert!(tree.file("a/b/file", 0o644, &mut "".as_bytes()).is_err());
         tree.directory("a/b", 0o700).unwrap();

@@ -2,6 +2,7 @@
 //! images and installer packages, on any platform and without mounting
 //! anything.
 
+mod apple_double;
 mod archive;
 mod cpio;
 mod dmg;
