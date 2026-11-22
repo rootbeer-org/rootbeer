@@ -87,15 +87,17 @@ fn packing_is_deterministic_and_round_trips() {
 fn code_signatures_in_extended_attributes_round_trip_alone() {
     use rustix::fs::{XattrFlags, getxattr, setxattr};
 
+    // A real signature is binary, newlines and all.
+    let signature = (0..=255).collect::<Vec<u8>>();
     let source = tempfile::tempdir().unwrap();
     let jar = source.path().join("app.jar");
     fs::write(&jar, "PK").unwrap();
     for (name, value) in [
-        ("com.apple.cs.CodeSignature", "signed"),
-        ("com.apple.cs.CodeDirectory", "hashes"),
-        ("com.apple.quarantine", "downloaded"),
+        ("com.apple.cs.CodeSignature", signature.as_slice()),
+        ("com.apple.cs.CodeDirectory", b"hashes"),
+        ("com.apple.quarantine", b"downloaded"),
     ] {
-        setxattr(&jar, name, value.as_bytes(), XattrFlags::empty()).unwrap();
+        setxattr(&jar, name, value, XattrFlags::empty()).unwrap();
     }
 
     fs::set_permissions(&jar, fs::Permissions::from_mode(0o444)).unwrap();
@@ -106,9 +108,9 @@ fn code_signatures_in_extended_attributes_round_trip_alone() {
     seal(target.path()).unwrap();
 
     let unpacked = target.path().join("app.jar");
-    let mut value = [0u8; 16];
+    let mut value = [0u8; 512];
     let size = getxattr(&unpacked, "com.apple.cs.CodeSignature", &mut value[..]).unwrap();
-    assert_eq!(value.get(..size), Some(&b"signed"[..]));
+    assert_eq!(value.get(..size), Some(signature.as_slice()));
     assert!(getxattr(&unpacked, "com.apple.quarantine", &mut value[..]).is_err());
 
     let mode = fs::metadata(&unpacked).unwrap().permissions().mode();
@@ -118,13 +120,23 @@ fn code_signatures_in_extended_attributes_round_trip_alone() {
 }
 
 #[test]
+fn long_link_targets_round_trip() {
+    let source = tempfile::tempdir().unwrap();
+    let target = "t".repeat(150);
+    symlink(&target, source.path().join("link")).unwrap();
+    let bytes = packed(source.path());
+
+    let unpacked = tempfile::tempdir().unwrap();
+    unpack(bytes.as_slice(), unpacked.path()).unwrap();
+    let read = fs::read_link(unpacked.path().join("link")).unwrap();
+    assert_eq!(read, Path::new(&target));
+}
+
+#[test]
 fn unpacking_refuses_extended_attributes_it_wouldnt_keep() {
-    let archive = |attribute: &str, kind: EntryType| {
+    let archive = |key: &str, value: &[u8], kind: EntryType| {
         let mut builder = tar::Builder::new(Vec::new());
-        let key = format!("SCHILY.xattr.{attribute}");
-        builder
-            .append_pax_extensions([(key.as_str(), &b"x"[..])])
-            .unwrap();
+        builder.append_pax_extensions([(key, value)]).unwrap();
         let mut header = Header::new_gnu();
         header.set_entry_type(kind);
         header.set_mode(0o555);
@@ -135,21 +147,26 @@ fn unpacking_refuses_extended_attributes_it_wouldnt_keep() {
         zstd::encode_all(builder.into_inner().unwrap().as_slice(), 0).unwrap()
     };
 
-    let cases = [
+    // The newline in the second value doesn't end its record, so the size
+    // record it seems to hold is never read.
+    let cases: [(&str, &[u8], _, _); 3] = [
         (
-            "com.apple.quarantine",
+            "SCHILY.xattr.com.apple.quarantine",
+            b"x",
             EntryType::Regular,
             "com.apple.quarantine",
         ),
         (
-            "com.apple.cs.CodeSignature",
+            "SCHILY.xattr.com.apple.cs.CodeSignature",
+            b"\n9 size=1\n",
             EntryType::Directory,
             "isn't a file",
         ),
+        ("size", b"1", EntryType::Regular, "PAX record size"),
     ];
-    for (attribute, kind, reason) in cases {
+    for (key, value, kind, reason) in cases {
         let target = tempfile::tempdir().unwrap();
-        let bytes = archive(attribute, kind);
+        let bytes = archive(key, value, kind);
         let error = unpack(bytes.as_slice(), target.path()).unwrap_err();
         assert!(error.to_string().contains(reason), "{error}");
     }
@@ -202,6 +219,29 @@ fn unpacking_refuses_what_packing_never_writes() {
             ]),
         ),
         ("Link entry", raw(&[("hard", EntryType::Link, 0o444, "x")])),
+        (
+            "malformed PAX record",
+            raw(&[
+                (
+                    "pax",
+                    EntryType::XHeader,
+                    0o444,
+                    "99 SCHILY.xattr.com.apple.cs.A=y\n",
+                ),
+                ("file", EntryType::Regular, 0o444, ""),
+            ]),
+        ),
+        (
+            "header for no entry",
+            raw(&[("@LongLink", long_name, 0o444, "file")]),
+        ),
+        (
+            "link target but isn't a symlink",
+            raw(&[
+                ("@LongLink", EntryType::GNULongLink, 0o444, "elsewhere"),
+                ("file", EntryType::Regular, 0o444, ""),
+            ]),
+        ),
         (
             "mode 4555",
             raw(&[("suid", EntryType::Regular, 0o4555, "")]),
