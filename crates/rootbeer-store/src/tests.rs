@@ -82,6 +82,79 @@ fn packing_is_deterministic_and_round_trips() {
     writable(target.path());
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn code_signatures_in_extended_attributes_round_trip_alone() {
+    use rustix::fs::{XattrFlags, getxattr, setxattr};
+
+    let source = tempfile::tempdir().unwrap();
+    let jar = source.path().join("app.jar");
+    fs::write(&jar, "PK").unwrap();
+    for (name, value) in [
+        ("com.apple.cs.CodeSignature", "signed"),
+        ("com.apple.cs.CodeDirectory", "hashes"),
+        ("com.apple.quarantine", "downloaded"),
+    ] {
+        setxattr(&jar, name, value.as_bytes(), XattrFlags::empty()).unwrap();
+    }
+
+    fs::set_permissions(&jar, fs::Permissions::from_mode(0o444)).unwrap();
+    let bytes = packed(source.path());
+
+    let target = tempfile::tempdir().unwrap();
+    unpack(bytes.as_slice(), target.path()).unwrap();
+    seal(target.path()).unwrap();
+
+    let unpacked = target.path().join("app.jar");
+    let mut value = [0u8; 16];
+    let size = getxattr(&unpacked, "com.apple.cs.CodeSignature", &mut value[..]).unwrap();
+    assert_eq!(value.get(..size), Some(&b"signed"[..]));
+    assert!(getxattr(&unpacked, "com.apple.quarantine", &mut value[..]).is_err());
+
+    let mode = fs::metadata(&unpacked).unwrap().permissions().mode();
+    assert_eq!(mode & 0o7777, 0o444);
+    assert_eq!(packed(target.path()), bytes);
+    writable(target.path());
+}
+
+#[test]
+fn unpacking_refuses_extended_attributes_it_wouldnt_keep() {
+    let archive = |attribute: &str, kind: EntryType| {
+        let mut builder = tar::Builder::new(Vec::new());
+        let key = format!("SCHILY.xattr.{attribute}");
+        builder
+            .append_pax_extensions([(key.as_str(), &b"x"[..])])
+            .unwrap();
+        let mut header = Header::new_gnu();
+        header.set_entry_type(kind);
+        header.set_mode(0o555);
+        header.set_size(0);
+        builder
+            .append_data(&mut header, "entry", std::io::empty())
+            .unwrap();
+        zstd::encode_all(builder.into_inner().unwrap().as_slice(), 0).unwrap()
+    };
+
+    let cases = [
+        (
+            "com.apple.quarantine",
+            EntryType::Regular,
+            "com.apple.quarantine",
+        ),
+        (
+            "com.apple.cs.CodeSignature",
+            EntryType::Directory,
+            "isn't a file",
+        ),
+    ];
+    for (attribute, kind, reason) in cases {
+        let target = tempfile::tempdir().unwrap();
+        let bytes = archive(attribute, kind);
+        let error = unpack(bytes.as_slice(), target.path()).unwrap_err();
+        assert!(error.to_string().contains(reason), "{error}");
+    }
+}
+
 #[test]
 fn sealing_makes_an_unpacked_archive_readable_by_all() {
     let archive = raw(&[
