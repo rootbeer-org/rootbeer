@@ -2325,6 +2325,7 @@ dependencies = [
  "hfsplus",
  "pbzx",
  "quick-xml 0.42.0",
+ "rustix",
  "tar",
  "tempfile",
  "udif",
