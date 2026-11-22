@@ -17,7 +17,7 @@ tar = "0.4"
 tempfile = "3"
 ureq = "3"
 walkdir = "2"
-zip = { version = "2.4", default-features = false, features = ["deflate"] }
+zip = { version = "9.0.5", default-features = false, features = ["deflate"] }
 
 [lints.clippy]
 unwrap_used = "deny"
