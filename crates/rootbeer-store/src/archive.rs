@@ -1,10 +1,12 @@
 use crate::{Error, io_at};
 use rustix::fs::XattrFlags;
 use rustix::io::Errno;
+use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Read, Write};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-use std::path::{Component, Path};
+use std::os::unix::ffi::OsStringExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt, symlink};
+use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
 use tar::{Builder, EntryType, Header};
 use walkdir::WalkDir;
@@ -17,6 +19,9 @@ const LEVEL: i32 = 19;
 // the system adds its own, like quarantine and provenance.
 const KEPT: &str = "com.apple.cs.";
 const PAX_ATTRIBUTE: &str = "SCHILY.xattr.";
+
+// Packing never writes a PAX header or long name anywhere near this long.
+const LONGEST_HEADER: u64 = 16 << 20;
 
 /// Writes a directory into a deterministic zstd archive
 pub fn pack(directory: &Path, writer: impl Write) -> Result<(), Error> {
@@ -84,13 +89,32 @@ pub fn pack(directory: &Path, writer: impl Write) -> Result<(), Error> {
 pub(crate) fn unpack(reader: impl Read, directory: &Path) -> Result<(), Error> {
     let decoder = zstd::Decoder::new(reader).map_err(io_at(directory))?;
     let mut archive = tar::Archive::new(decoder);
-    archive.set_overwrite(false);
 
+    // Raw entries hand over PAX headers and long names unread, since the tar
+    // crate splits PAX records at newlines and a signature can hold one.
     let root = fs::canonicalize(directory).map_err(io_at(directory))?;
-    let entries = archive.entries().map_err(io_at(directory))?;
+    let entries = archive.entries().map_err(io_at(directory))?.raw(true);
+    let mut held = Held::default();
     for entry in entries {
         let mut entry = entry.map_err(io_at(directory))?;
-        let relative = entry.path().map_err(io_at(directory))?.into_owned();
+        let kind = entry.header().entry_type();
+        let slot = match kind {
+            EntryType::XHeader => Some(&mut held.records),
+            EntryType::GNULongName => Some(&mut held.name),
+            EntryType::GNULongLink => Some(&mut held.target),
+            _ => None,
+        };
+
+        if let Some(slot) = slot {
+            hold(&mut entry, slot)?;
+            continue;
+        }
+
+        let name = match held.name.take() {
+            Some(name) => name.strip_suffix(&[0]).unwrap_or(&name).to_vec(),
+            None => entry.header().path_bytes().into_owned(),
+        };
+        let relative = PathBuf::from(OsString::from_vec(name));
 
         let is_plain = relative
             .components()
@@ -123,11 +147,19 @@ pub(crate) fn unpack(reader: impl Read, directory: &Path) -> Result<(), Error> {
         }
 
         // Packing keeps extended attributes only on files.
-        let kind = entry.header().entry_type();
-        let attributes = pax_attributes(&mut entry, &relative.display().to_string())?;
+        let records = held.records.take().unwrap_or_default();
+        let attributes = pax_attributes(&records, &relative)?;
         if !attributes.is_empty() && kind != EntryType::Regular {
             return Err(Error::Archive(format!(
                 "{} has extended attributes but isn't a file",
+                relative.display()
+            )));
+        }
+
+        let target = held.target.take();
+        if target.is_some() && kind != EntryType::Symlink {
+            return Err(Error::Archive(format!(
+                "{} has a link target but isn't a symlink",
                 relative.display()
             )));
         }
@@ -136,7 +168,17 @@ pub(crate) fn unpack(reader: impl Read, directory: &Path) -> Result<(), Error> {
             // Made writable until the end, so their contents can be unpacked.
             EntryType::Directory => fs::create_dir(&path).map_err(io_at(&path))?,
             EntryType::Symlink => {
-                entry.unpack(&path).map_err(io_at(&path))?;
+                let target = match target {
+                    Some(target) => target.strip_suffix(&[0]).unwrap_or(&target).to_vec(),
+                    None => entry
+                        .header()
+                        .link_name_bytes()
+                        .ok_or_else(|| {
+                            Error::Archive(format!("{} links nowhere", relative.display()))
+                        })?
+                        .into_owned(),
+                };
+                symlink(OsString::from_vec(target), &path).map_err(io_at(&path))?;
             }
             // Writable until sealed too, since only the owner of a writable
             // file can set its extended attributes.
@@ -171,6 +213,44 @@ pub(crate) fn unpack(reader: impl Read, directory: &Path) -> Result<(), Error> {
         }
     }
 
+    if held.records.is_some() || held.name.is_some() || held.target.is_some() {
+        return Err(Error::Archive(
+            "the archive ends with a header for no entry".into(),
+        ));
+    }
+
+    Ok(())
+}
+
+/// What the header entries before an entry say about it.
+#[derive(Default)]
+struct Held {
+    records: Option<Vec<u8>>,
+    name: Option<Vec<u8>>,
+    target: Option<Vec<u8>>,
+}
+
+/// Reads a header entry's data for the entry after it.
+fn hold<R: Read>(entry: &mut tar::Entry<R>, slot: &mut Option<Vec<u8>>) -> Result<(), Error> {
+    let kind = entry.header().entry_type();
+    if slot.is_some() {
+        return Err(Error::Archive(format!(
+            "an archive has two {kind:?} entries for one entry"
+        )));
+    }
+
+    if entry.size() > LONGEST_HEADER {
+        return Err(Error::Archive(format!(
+            "an archive has a {kind:?} entry of {} bytes",
+            entry.size()
+        )));
+    }
+
+    let mut data = Vec::new();
+    entry
+        .read_to_end(&mut data)
+        .map_err(|error| Error::Archive(error.to_string()))?;
+    *slot = Some(data);
     Ok(())
 }
 
@@ -212,37 +292,53 @@ fn sized(mut call: impl FnMut(&mut [u8]) -> Result<usize, Errno>) -> Result<Vec<
     Ok(buffer)
 }
 
-/// The extended attributes an entry's PAX records carry. Any the archive
-/// wouldn't have kept refuses it.
-fn pax_attributes<R: Read>(
-    entry: &mut tar::Entry<R>,
-    relative: &str,
+/// The extended attributes a PAX header carries. Records are read by their
+/// length, since a value can hold a newline. Any other record refuses the
+/// archive, so no reader finds a size or path in it that this one skips.
+pub(crate) fn pax_attributes(
+    mut records: &[u8],
+    relative: &Path,
 ) -> Result<Vec<(String, Vec<u8>)>, Error> {
-    let Some(records) = entry
-        .pax_extensions()
-        .map_err(|error| Error::Archive(error.to_string()))?
-    else {
-        return Ok(Vec::new());
-    };
+    let malformed = || Error::Archive(format!("{} has a malformed PAX record", relative.display()));
 
     let mut attributes = Vec::new();
-    for record in records {
-        let record = record.map_err(|error| Error::Archive(error.to_string()))?;
-        let Some(name) = record
-            .key()
-            .ok()
-            .and_then(|key| key.strip_prefix(PAX_ATTRIBUTE))
+    while !records.is_empty() {
+        let space = records
+            .iter()
+            .position(|byte| *byte == b' ')
+            .ok_or_else(malformed)?;
+        let length = records
+            .get(..space)
+            .and_then(|digits| std::str::from_utf8(digits).ok())
+            .filter(|digits| digits.bytes().all(|digit| digit.is_ascii_digit()))
+            .and_then(|digits| digits.parse::<usize>().ok())
+            .ok_or_else(malformed)?;
+        let (record, rest) = records.split_at_checked(length).ok_or_else(malformed)?;
+        records = rest;
+
+        let body = record
+            .get(space.saturating_add(1)..)
+            .and_then(|body| body.strip_suffix(b"\n"))
+            .ok_or_else(malformed)?;
+        let (key, value) = body
+            .iter()
+            .position(|byte| *byte == b'=')
+            .and_then(|equals| body.split_at_checked(equals))
+            .ok_or_else(malformed)?;
+        let value = value.get(1..).ok_or_else(malformed)?;
+        let key = std::str::from_utf8(key).map_err(|_| malformed())?;
+
+        let Some(name) = key
+            .strip_prefix(PAX_ATTRIBUTE)
+            .filter(|name| name.starts_with(KEPT))
         else {
-            continue;
+            return Err(Error::Archive(format!(
+                "{} has the PAX record {key}",
+                relative.display()
+            )));
         };
 
-        if !name.starts_with(KEPT) {
-            return Err(Error::Archive(format!(
-                "{relative} has the extended attribute {name}"
-            )));
-        }
-
-        attributes.push((name.to_string(), record.value_bytes().to_vec()));
+        attributes.push((name.to_string(), value.to_vec()));
     }
 
     Ok(attributes)
