@@ -33,8 +33,8 @@ pub struct Download {
     pub url: String,
     /// The GitHub release asset `url` names, whose digest GitHub publishes
     pub release: Option<ReleaseAsset>,
-    /// How an extract reads a prebuilt archive, whose tree a version can
-    /// record. A source or a raw binary has none.
+    /// How an extract reads the archive, whose tree a version can record. A
+    /// raw binary has none.
     pub extract: Option<Format>,
 }
 
@@ -465,10 +465,10 @@ impl<'a> Evaluation<'a> {
             (None, None) => &[],
         };
 
-        // A prebuilt version that records its tree is extracted by rb, so an
-        // unpacker the recipe still declares for its other versions is left
-        // out of this one's key.
-        let is_extracted = resolved.spec.prebuilt.is_some() && resolved.tree.is_some();
+        // A version that records its tree is extracted by rb, so an unpacker
+        // the recipe still declares for its other versions is left out of
+        // this one's key.
+        let is_extracted = resolved.tree.is_some();
         let declared = declared.iter().filter(|declared| {
             let is_unpacker = matches!(declared.kind, RecipeKind::Build)
                 && backend::is_unpacker(&declared.package);
@@ -575,7 +575,15 @@ impl<'a> Evaluation<'a> {
                 (build, "prebuilt")
             }
             (None, Some(source), Some(build)) => {
-                let source_key = self.insert(Derivation::Fetch(package.source(source)?))?;
+                let fetched = self.insert(Derivation::Fetch(package.source(source)?))?;
+                let source_key = match package.resolved.tree {
+                    Some(tree) => self.insert(Derivation::Extract(Extract {
+                        tree: tree.clone(),
+                        source: fetched,
+                        format: source.archive.format(),
+                    }))?,
+                    None => fetched,
+                };
                 let vendor = package.vendor(source, build.backend, &source_key, &dependencies)?;
 
                 let mut inputs = BTreeMap::from([("source".to_string(), source_key)]);

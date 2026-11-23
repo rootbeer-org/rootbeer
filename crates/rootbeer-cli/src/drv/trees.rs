@@ -1,5 +1,5 @@
-//! Records the digest of each prebuilt archive's unpacked tree, which pins
-//! the tree so rb extracts it and no unpacker reaches a key.
+//! Records the digest of each archive's unpacked tree, prebuilt or source,
+//! which pins the tree so rb extracts it and no unpacker reaches a key.
 
 use super::{bump, github, load, Sources};
 use rootbeer_drv::{fetch_path, Derivation, Fetch, Format, Platform, Sha256};
@@ -47,6 +47,9 @@ pub(super) fn trees(args: &Args) -> Result<(), String> {
         false => args.names.clone(),
     };
 
+    // A source downloads the same archive on every platform, so each archive
+    // is unpacked once.
+    let mut unpacked = BTreeMap::<(Sha256, Format), Sha256>::new();
     for name in &names {
         if !catalog.contains(name) {
             return Err(format!("{name} isn't in the catalog"));
@@ -61,14 +64,21 @@ pub(super) fn trees(args: &Args) -> Result<(), String> {
                     continue;
                 };
 
-                let tree = match fetched(&pinned.download.url, &pinned.sha256)? {
-                    Some(archive) => {
+                let archive = (pinned.sha256.clone(), format);
+                let tree = match (
+                    unpacked.get(&archive),
+                    fetched(&pinned.download.url, &pinned.sha256)?,
+                ) {
+                    (Some(tree), _) => Ok(tree.clone()),
+                    (None, Some(archive)) => {
                         rootbeer_sandbox::tree(&archive, format).map_err(|error| error.to_string())
                     }
-                    None => download(&pinned.download.url, Some(&pinned.sha256), format)
+                    (None, None) => download(&pinned.download.url, Some(&pinned.sha256), format)
                         .map(|(_, tree)| tree),
                 }
                 .map_err(at)?;
+
+                unpacked.insert(archive, tree.clone());
 
                 recorded
                     .entry(version.to_string())

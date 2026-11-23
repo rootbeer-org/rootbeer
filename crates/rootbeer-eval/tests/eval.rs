@@ -1109,3 +1109,48 @@ fn an_extracted_build_copies_out_of_the_tree() {
         .to_string();
     assert!(error.contains("a raw binary has no tree"), "{error}");
 }
+
+const PAGES: (&str, &str) = ("pages.lua", include_str!("fixtures/pages.lua"));
+
+#[test]
+fn an_extracted_source_is_copied_not_unpacked() {
+    let graph = evaluated(&[PAGES, RB_UNPACK]);
+    for (label, copy) in [
+        ("pages@2.0-aarch64-macos", r#"ditto "${source}" ."#),
+        (
+            "pages@2.0-x86_64-linux",
+            r#"cp -R --preserve=mode,timestamps --reflink=auto "${source}/." ."#,
+        ),
+    ] {
+        let (_, build) = built(&graph, label);
+        assert!(build.dependencies.is_empty(), "{build}");
+        assert!(!build.script.contains("rb-unpack"), "{build}");
+        assert!(build.script.contains(copy), "{build}");
+        assert!(build.script.contains("cd pages-2.0"), "{build}");
+        assert!(build.script.contains("patch --batch -p1"), "{build}");
+
+        let Some(Derivation::Extract(extract)) = graph.derivations.get(&build.inputs["source"])
+        else {
+            panic!("{build}");
+        };
+        assert_eq!(extract.tree.as_str(), "c".repeat(64));
+        assert_eq!(extract.format, rootbeer_drv::Format::TarBz2);
+        assert!(matches!(
+            graph.derivations.get(&extract.source),
+            Some(Derivation::Fetch(_))
+        ));
+    }
+
+    let (old, unextracted) = built(&graph, "pages@1.0-aarch64-macos");
+    assert!(
+        unextracted.script.contains("rb-unpack tar.bz2"),
+        "{unextracted}"
+    );
+
+    // A new rb-unpack rekeys only the version it still unpacks.
+    let (key, _) = built(&graph, "pages@2.0-aarch64-macos");
+    let released = RB_UNPACK.1.replace(&"d".repeat(64), &"f".repeat(64));
+    let graph = evaluated(&[PAGES, ("rb-unpack.lua", &released)]);
+    assert_eq!(built(&graph, "pages@2.0-aarch64-macos").0, key);
+    assert_ne!(built(&graph, "pages@1.0-aarch64-macos").0, old);
+}

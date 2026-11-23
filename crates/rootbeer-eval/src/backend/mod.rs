@@ -236,15 +236,20 @@ impl Package<'_> {
 
     // Unpacks the source and applies patches
     fn prepare(&self, source: &Source, dependencies: &[Dependency]) -> Result<Vec<String>, String> {
-        let unpacker = match source.archive {
-            ArchiveFormat::Zip => unpacker(dependencies, "zip source", "build.dependencies")?,
-            ArchiveFormat::TarBz2 => {
-                unpacker(dependencies, "tar.bz2 source", "build.dependencies")?
+        let mut lines = match self.resolved.tree {
+            Some(_) => copy_source(self.resolved.values.platform),
+            None => {
+                let field = "build.dependencies";
+                let unpacker = match source.archive {
+                    ArchiveFormat::Zip => unpacker(dependencies, "zip source", field)?,
+                    ArchiveFormat::TarBz2 => unpacker(dependencies, "tar.bz2 source", field)?,
+                    ArchiveFormat::TarGz | ArchiveFormat::TarXz => Unpacker::Tar,
+                };
+
+                vec![extract(source.archive, ".", unpacker)]
             }
-            ArchiveFormat::TarGz | ArchiveFormat::TarXz => Unpacker::Tar,
         };
 
-        let mut lines = vec![extract(source.archive, ".", unpacker)];
         if let Some(prefix) = &source.strip_prefix {
             lines.push(format!(
                 "cd {}",
@@ -334,6 +339,20 @@ fn extract(format: ArchiveFormat, directory: &str, unpacker: Unpacker) -> String
         (ArchiveFormat::Zip, _) => rb_unpack("zip", directory),
         (ArchiveFormat::TarBz2, _) => rb_unpack("tar.bz2", directory),
     }
+}
+
+/// Copies an extracted source into the build's directory. Every file keeps
+/// the one time the extract gives it, so make never finds a generated file
+/// older than what it came from and tries to remake it.
+fn copy_source(platform: Platform) -> Vec<String> {
+    let copy = match platform {
+        Platform::Aarch64Macos => format!("ditto {SOURCE} ."),
+        Platform::Aarch64Linux | Platform::X86_64Linux => {
+            r#"cp -R --preserve=mode,timestamps --reflink=auto "${source}/." ."#.into()
+        }
+    };
+
+    vec![copy, "chmod -R u+w .".into()]
 }
 
 fn rb_unpack(format: &str, directory: &str) -> String {
