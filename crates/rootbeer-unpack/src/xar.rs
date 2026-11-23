@@ -4,7 +4,6 @@ use quick_xml::events::Event;
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
-use std::path::Path;
 
 const MAGIC: &[u8] = b"xar!";
 
@@ -42,8 +41,7 @@ struct Node {
 }
 
 impl Xar {
-    pub(crate) fn open(path: &Path) -> Result<Xar, String> {
-        let file = File::open(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    pub(crate) fn open(file: File) -> Result<Xar, String> {
         let mut file = BufReader::new(file);
 
         let mut header = [0u8; 28];

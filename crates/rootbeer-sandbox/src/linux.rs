@@ -37,6 +37,35 @@ pub(crate) fn staging(directory: &Path) -> PathBuf {
 /// `bwrap` with fresh namespaces allow us to isolate network access and FS
 /// access. Also locks down write access to the build directory and outputs.
 pub(crate) fn command(reads: &[String], directory: &Path, has_network: bool) -> Command {
+    let mut command = base(has_network);
+    command.arg("--bind").arg(directory).arg(WORKSPACE);
+    command
+        .arg("--bind")
+        .arg(staging(directory))
+        .arg(STORE_ROOT);
+    for path in reads {
+        command.args(["--ro-bind", path, path]);
+    }
+
+    command.args(["--remount-ro", "/"]);
+    command.args(["--chdir", &format!("{WORKSPACE}/src"), "--"]);
+    command
+}
+
+/// `bwrap` for a tool, which reads only `program` beyond the host's defaults
+/// and writes only `scratch`, each at its own path.
+pub(crate) fn tool(program: &str, scratch: &Path) -> Command {
+    let mut command = base(false);
+    command.args(["--ro-bind", program, program]);
+    command.arg("--bind").arg(scratch).arg(scratch);
+    command.args(["--remount-ro", "/"]);
+    command.arg("--chdir").arg(scratch).arg("--");
+    command
+}
+
+/// Fresh namespaces with the host's `/usr`, devices, and the few files under
+/// `/etc` a toolchain reads, all read-only.
+fn base(has_network: bool) -> Command {
     let mut command = Command::new("/usr/bin/bwrap");
     command.arg("--unshare-all");
     if has_network {
@@ -76,17 +105,6 @@ pub(crate) fn command(reads: &[String], directory: &Path, has_network: bool) -> 
         command.args(["--ro-bind-try", path, path]);
     }
 
-    command.arg("--bind").arg(directory).arg(WORKSPACE);
-    command
-        .arg("--bind")
-        .arg(staging(directory))
-        .arg(STORE_ROOT);
-    for path in reads {
-        command.args(["--ro-bind", path, path]);
-    }
-
-    command.args(["--remount-ro", "/"]);
-    command.args(["--chdir", &format!("{WORKSPACE}/src"), "--"]);
     command
 }
 

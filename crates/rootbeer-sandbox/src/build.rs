@@ -1,8 +1,8 @@
 use crate::{Error, Request, darwin, derivation, io_at, linux, scan};
 use rootbeer_drv::{Allow, Build, Check};
 use rootbeer_drv::{
-    Dependency, DependencyKind, Derivation, Key, Platform, STORE_ROOT, fetch_path, linked_closure,
-    output_path,
+    Dependency, DependencyKind, Derivation, Key, Platform, STORE_ROOT, extract_path, fetch_path,
+    linked_closure, output_path,
 };
 use rustix::process::{Pid, Signal, WaitId, WaitIdOptions};
 use std::collections::{BTreeMap, BTreeSet};
@@ -74,8 +74,9 @@ pub(crate) fn build(request: &mut Request, build: &Build) -> Result<BTreeSet<Key
     sandbox.out = Some(out_path);
 
     // Outputs might reference runtime dependencies, but never what was
-    // fetched with network, which is scanned only as an input. Libraries a
-    // linked one links count too, since configure records PKG_CONFIG_PATH.
+    // fetched with network, which is scanned only as an input, or an extract,
+    // which is never published. Libraries a linked one links count too, since
+    // configure records PKG_CONFIG_PATH.
     let mut allowed = sandbox.closure.clone();
     allowed.extend(
         build
@@ -84,9 +85,10 @@ pub(crate) fn build(request: &mut Request, build: &Build) -> Result<BTreeSet<Key
             .filter(|dependency| dependency.kind == DependencyKind::Runtime)
             .map(|dependency| dependency.key.clone()),
     );
-    allowed.retain(|key| {
-        let derivation = request.graph.get(key);
-        !matches!(derivation, Some(Derivation::Build(build)) if build.sandbox.ends_with(NETWORK))
+    allowed.retain(|key| match request.graph.get(key) {
+        Some(Derivation::Build(build)) => !build.sandbox.ends_with(NETWORK),
+        Some(Derivation::Extract(_)) => false,
+        _ => true,
     });
 
     let built = sandbox.run(request, &build.script).and_then(|()| {
@@ -308,6 +310,7 @@ impl Sandbox {
             Derivation::Fetch(_) => fetch_path(key),
             Derivation::Build(build) => output_path(key, &build.name, &build.version, "out"),
             Derivation::Unpack(unpack) => output_path(key, &unpack.name, &unpack.version, "out"),
+            Derivation::Extract(_) => extract_path(key),
             Derivation::Check(_) => {
                 return Err(failure(
                     request.key,

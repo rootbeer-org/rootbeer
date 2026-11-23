@@ -1,12 +1,14 @@
 //! rootbeer-sandbox realizes a derivation into the store. It fetches assets,
-//! unpacks them, builds the derivation in a sandbox, and scans outputs for
-//! references.
+//! unpacks them with rb's own sandboxed tools, builds the derivation in a
+//! sandbox, and scans outputs for references.
 
 mod build;
 mod darwin;
+mod extract;
 mod fetch;
 mod linux;
 mod scan;
+pub mod tool;
 mod unpack;
 
 use rootbeer_drv::{Derivation, Key};
@@ -16,6 +18,7 @@ use std::io::{self, Write};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
+pub use extract::{tree, unpack};
 pub use unpack::executables;
 
 /// One derivation to realize. Everything it names must already be realized.
@@ -47,9 +50,11 @@ pub enum Error {
         path: PathBuf,
         source: io::Error,
     },
+    /// A tool rb ran on untrusted input failed.
+    Tool(String),
 }
 
-/// Fetches, unpacks, builds, or checks a derivation, replacing any partial output an
+/// Fetches, unpacks, extracts, builds, or checks a derivation, replacing any partial output an
 /// interrupted attempt left at its store path. Returns the output's runtime
 /// references when successful.
 pub fn realize(request: &mut Request) -> Result<BTreeSet<Key>, Error> {
@@ -58,6 +63,9 @@ pub fn realize(request: &mut Request) -> Result<BTreeSet<Key>, Error> {
         Derivation::Build(build) => build::build(request, build),
         Derivation::Check(check) => build::check(request, check).map(|()| BTreeSet::new()),
         Derivation::Unpack(unpack) => unpack::unpack(request, unpack),
+        Derivation::Extract(extract) => {
+            extract::extract(request, extract).map(|()| BTreeSet::new())
+        }
     }
 }
 
@@ -105,6 +113,7 @@ impl fmt::Display for Error {
                 problems.join("\n  ")
             ),
             Error::Io { path, source } => write!(f, "{}: {source}", path.display()),
+            Error::Tool(reason) => f.write_str(reason),
         }
     }
 }

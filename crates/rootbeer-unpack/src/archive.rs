@@ -1,19 +1,18 @@
 use crate::apple_double;
 use crate::tree::Tree;
 use bzip2::read::BzDecoder;
+use flate2::read::GzDecoder;
+use lzma_rust2::XzReader;
 use std::fs::File;
-use std::io::{self, BufReader, Read};
-use std::path::Path;
-use std::time::{Duration, UNIX_EPOCH};
+use std::io::{BufReader, Read};
 use tar::EntryType;
 
 // Attributes hold a signature or two, so anything near this is corrupt.
 const LONGEST_APPLE_DOUBLE: u64 = 16 * 1024 * 1024;
 
-pub(crate) fn zip(archive: &Path, tree: &Tree) -> Result<(), String> {
-    let file = File::open(archive).map_err(|error| format!("{}: {error}", archive.display()))?;
+pub(crate) fn zip(archive: File, tree: &mut Tree) -> Result<(), String> {
     let mut archive =
-        zip::ZipArchive::new(BufReader::new(file)).map_err(|error| error.to_string())?;
+        zip::ZipArchive::new(BufReader::new(archive)).map_err(|error| error.to_string())?;
 
     let mut described = Vec::new();
     for index in 0..archive.len() {
@@ -23,10 +22,7 @@ pub(crate) fn zip(archive: &Path, tree: &Tree) -> Result<(), String> {
             .map_err(|error| error.to_string())?
             .into_owned();
         if is_apple_double(&name) {
-            // Only macOS can hold the attributes, and elsewhere the file is
-            // dropped as before.
-            if let (true, Some(file)) = (cfg!(target_os = "macos"), apple_double::described(&name))
-            {
+            if let Some(file) = apple_double::described(&name) {
                 let mut bytes = Vec::new();
                 (&mut entry)
                     .take(LONGEST_APPLE_DOUBLE)
@@ -44,7 +40,7 @@ pub(crate) fn zip(archive: &Path, tree: &Tree) -> Result<(), String> {
             .unix_mode()
             .unwrap_or(if entry.is_dir() { 0o755 } else { 0o644 });
         if entry.is_dir() {
-            tree.directory(&name, mode)?;
+            tree.directory(&name)?;
         } else if entry.is_symlink() {
             let mut target = String::new();
             entry
@@ -77,9 +73,22 @@ fn is_apple_double(name: &str) -> bool {
             .is_some_and(|file| file.starts_with("._"))
 }
 
-pub(crate) fn tar_bz2(archive: &Path, tree: &Tree) -> Result<(), String> {
-    let file = File::open(archive).map_err(|error| format!("{}: {error}", archive.display()))?;
-    let mut archive = tar::Archive::new(BzDecoder::new(BufReader::new(file)));
+/// How a tar archive is compressed.
+#[derive(Clone, Copy)]
+pub(crate) enum Compression {
+    Gzip,
+    Xz,
+    Bzip2,
+}
+
+pub(crate) fn tar(archive: File, compression: Compression, tree: &mut Tree) -> Result<(), String> {
+    let file = BufReader::new(archive);
+    let reader: Box<dyn Read> = match compression {
+        Compression::Gzip => Box::new(GzDecoder::new(file)),
+        Compression::Xz => Box::new(XzReader::new(file, true)),
+        Compression::Bzip2 => Box::new(BzDecoder::new(file)),
+    };
+    let mut archive = tar::Archive::new(reader);
 
     for entry in archive.entries().map_err(|error| error.to_string())? {
         let mut entry = entry.map_err(|error| error.to_string())?;
@@ -98,20 +107,11 @@ pub(crate) fn tar_bz2(archive: &Path, tree: &Tree) -> Result<(), String> {
         };
 
         match entry.header().entry_type() {
-            EntryType::Directory => tree.directory(&path, mode)?,
+            EntryType::Directory => tree.directory(&path)?,
             EntryType::Symlink => tree.symlink(&path, &link()?)?,
             EntryType::Link => tree.hard_link(&path, &link()?)?,
-            // Source builds compare mtimes, so make would try to rebuild
-            // generated files that look older than their sources.
             EntryType::Regular | EntryType::Continuous => {
-                let modified = entry.header().mtime().map_err(|error| error.to_string())?;
-                let mut file = tree.create(&path, mode)?;
-                io::copy(&mut entry, &mut file).map_err(|error| format!("{path}: {error}"))?;
-                let modified = UNIX_EPOCH
-                    .checked_add(Duration::from_secs(modified))
-                    .ok_or_else(|| format!("{path} has mtime {modified}"))?;
-                file.set_modified(modified)
-                    .map_err(|error| format!("{path}: {error}"))?;
+                tree.file(&path, mode, &mut entry)?;
             }
             // Extended headers that carry metadata for the next entry.
             EntryType::XGlobalHeader | EntryType::XHeader => {}
@@ -129,6 +129,8 @@ pub(crate) fn tar_bz2(archive: &Path, tree: &Tree) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tree::tests::entries;
+    use rootbeer_tree::Kind;
 
     #[test]
     fn apple_double_files_are_recognized_anywhere() {
@@ -140,52 +142,71 @@ mod tests {
     }
 
     #[test]
-    fn tar_entries_keep_their_mtimes() {
-        let mut builder = tar::Builder::new(bzip2::write::BzEncoder::new(
-            Vec::new(),
-            bzip2::Compression::fast(),
-        ));
-        for (name, modified) in [("src/doc.texi", 1_000), ("src/doc.info", 2_000)] {
+    fn a_tar_unpacks_however_it_is_compressed() {
+        let mut builder = tar::Builder::new(Vec::new());
+        for name in ["src/doc.texi", "src/doc.info"] {
             let mut header = tar::Header::new_ustar();
             header.set_size(2);
             header.set_mode(0o644);
-            header.set_mtime(modified);
             builder
                 .append_data(&mut header, name, "hi".as_bytes())
                 .unwrap();
         }
 
-        let directory = tempfile::tempdir().unwrap();
-        let archive = directory.path().join("source.tar.bz2");
-        std::fs::write(&archive, builder.into_inner().unwrap().finish().unwrap()).unwrap();
-        let tree = Tree::new(&directory.path().join("out")).unwrap();
-        tar_bz2(&archive, &tree).unwrap();
-
-        let modified = |name: &str| {
-            std::fs::metadata(directory.path().join("out/src").join(name))
-                .unwrap()
-                .modified()
-                .unwrap()
+        let plain = builder.into_inner().unwrap();
+        let compress = |compression| -> Vec<u8> {
+            use std::io::Write;
+            match compression {
+                Compression::Bzip2 => {
+                    let mut encoder =
+                        bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::fast());
+                    encoder.write_all(&plain).unwrap();
+                    encoder.finish().unwrap()
+                }
+                Compression::Gzip => {
+                    let mut encoder =
+                        flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+                    encoder.write_all(&plain).unwrap();
+                    encoder.finish().unwrap()
+                }
+                Compression::Xz => {
+                    let options = lzma_rust2::XzOptions::with_preset(0);
+                    let mut encoder = lzma_rust2::XzWriter::new(Vec::new(), options).unwrap();
+                    encoder.write_all(&plain).unwrap();
+                    encoder.finish().unwrap()
+                }
+            }
         };
-        assert_eq!(
-            modified("doc.texi"),
-            UNIX_EPOCH + Duration::from_secs(1_000)
-        );
-        assert_eq!(
-            modified("doc.info"),
-            UNIX_EPOCH + Duration::from_secs(2_000)
-        );
+
+        let doc = Kind::File {
+            is_executable: false,
+            attributes: Vec::new(),
+            size: 2,
+        };
+        for compression in [Compression::Bzip2, Compression::Gzip, Compression::Xz] {
+            let mut archive = tempfile::tempfile().unwrap();
+            std::io::Write::write_all(&mut archive, &compress(compression)).unwrap();
+            std::io::Seek::rewind(&mut archive).unwrap();
+            let mut tree = Tree::new().unwrap();
+            tar(archive, compression, &mut tree).unwrap();
+            assert_eq!(
+                entries(&tree),
+                [
+                    ("src".to_string(), Kind::Directory),
+                    ("src/doc.info".to_string(), doc.clone()),
+                    ("src/doc.texi".to_string(), doc.clone()),
+                ]
+            );
+        }
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn a_zips_code_signature_attributes_land_on_their_files() {
         use crate::apple_double::tests::apple_double;
         use zip::write::SimpleFileOptions;
 
-        let directory = tempfile::tempdir().unwrap();
-        let archive = directory.path().join("app.zip");
-        let mut writer = zip::ZipWriter::new(std::fs::File::create(&archive).unwrap());
+        let archive = tempfile::tempfile().unwrap();
+        let mut writer = zip::ZipWriter::new(archive.try_clone().unwrap());
         let options =
             SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
         let signed = apple_double(&[
@@ -202,15 +223,19 @@ mod tests {
         }
         writer.finish().unwrap();
 
-        let out = directory.path().join("out");
-        zip(&archive, &Tree::new(&out).unwrap()).unwrap();
-
-        let jar = out.join("Tool.app/tool.jar");
-        let mut value = [0u8; 16];
-        let size =
-            rustix::fs::getxattr(&jar, "com.apple.cs.CodeSignature", &mut value[..]).unwrap();
-        assert_eq!(value.get(..size), Some(&b"signed"[..]));
-        assert!(rustix::fs::getxattr(&jar, "com.apple.quarantine", &mut value[..]).is_err());
-        assert!(!out.join("__MACOSX").exists());
+        let mut tree = Tree::new().unwrap();
+        zip(archive, &mut tree).unwrap();
+        let jar = Kind::File {
+            is_executable: false,
+            attributes: vec![("com.apple.cs.CodeSignature".to_string(), b"signed".to_vec())],
+            size: 2,
+        };
+        assert_eq!(
+            entries(&tree),
+            [
+                ("Tool.app".to_string(), Kind::Directory),
+                ("Tool.app/tool.jar".to_string(), jar),
+            ]
+        );
     }
 }

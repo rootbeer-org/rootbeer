@@ -2200,6 +2200,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "data-encoding",
+ "flate2",
  "globset",
  "owo-colors",
  "plist",
@@ -2211,12 +2212,14 @@ dependencies = [
  "rootbeer-profile",
  "rootbeer-sandbox",
  "rootbeer-store",
+ "rootbeer-tree",
  "rootbeer-trust",
  "rootbeer-unpack",
  "rustix",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "tar",
  "tempfile",
  "ureq",
 ]
@@ -2287,18 +2290,16 @@ name = "rootbeer-sandbox"
 version = "0.1.0"
 dependencies = [
  "data-encoding",
- "flate2",
  "goblin",
- "lzma-rust2 0.20.1",
  "memchr",
  "rootbeer-drv",
+ "rootbeer-tree",
+ "rootbeer-unpack",
  "rustix",
  "sha2 0.10.9",
- "tar",
  "tempfile",
  "ureq",
  "walkdir",
- "zip",
 ]
 
 [[package]]
@@ -2316,6 +2317,17 @@ dependencies = [
  "tempfile",
  "walkdir",
  "zstd",
+]
+
+[[package]]
+name = "rootbeer-tree"
+version = "0.1.0"
+dependencies = [
+ "data-encoding",
+ "rootbeer-drv",
+ "rustix",
+ "sha2 0.10.9",
+ "tempfile",
 ]
 
 [[package]]
@@ -2344,9 +2356,11 @@ dependencies = [
  "bzip2",
  "flate2",
  "hfsplus",
+ "lzma-rust2 0.20.1",
  "pbzx",
  "quick-xml 0.42.0",
- "rustix",
+ "rootbeer-drv",
+ "rootbeer-tree",
  "tar",
  "tempfile",
  "udif",

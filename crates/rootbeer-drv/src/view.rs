@@ -1,7 +1,7 @@
 //! The human view of a derivation, for diffs and terminals. Keys never read it.
 
 use crate::{
-    Build, Check, Dependency, DependencyKind, Derivation, Fetch, Format, Platform, Unpack,
+    Build, Check, Dependency, DependencyKind, Derivation, Extract, Fetch, Format, Platform, Unpack,
 };
 use std::fmt::{self, Display, Formatter};
 
@@ -12,6 +12,7 @@ impl Display for Derivation {
             Derivation::Fetch(fetch) => fetch.fmt(f),
             Derivation::Check(check) => check.fmt(f),
             Derivation::Unpack(unpack) => unpack.fmt(f),
+            Derivation::Extract(extract) => extract.fmt(f),
         }
     }
 }
@@ -67,6 +68,15 @@ impl Display for Unpack {
         writeln!(f, "source: {}", self.source)?;
         writeln!(f, "format: {}", self.format)?;
         map(f, "bins", self.bins.iter().map(|(n, p)| (n, p.as_str())))
+    }
+}
+
+impl Display for Extract {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        writeln!(f, "kind: extract")?;
+        writeln!(f, "tree: {}", self.tree.as_str())?;
+        writeln!(f, "source: {}", self.source)?;
+        writeln!(f, "format: {}", self.format)
     }
 }
 

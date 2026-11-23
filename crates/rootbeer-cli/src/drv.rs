@@ -17,6 +17,7 @@ pub(crate) mod profile;
 pub(crate) mod run;
 pub(crate) mod search;
 pub(crate) mod setup;
+mod trees;
 mod updates;
 mod version;
 
@@ -24,7 +25,8 @@ pub(crate) use configuration::{check_lock, configure, install_default_apps};
 
 use rootbeer_cache::Cache;
 use rootbeer_drv::{
-    fetch_path, linked_closure, output_path, Build, Derivation, Key, Platform, STORE_ROOT,
+    extract_path, fetch_path, linked_closure, output_path, Build, Derivation, Key, Platform,
+    STORE_ROOT,
 };
 use rootbeer_eval::{Catalog, Graph, Host, Patches, Target};
 use rootbeer_sandbox::Request;
@@ -136,6 +138,9 @@ enum Command {
         #[command(flatten)]
         sources: Sources,
     },
+    /// Record the tree digest of each declared prebuilt archive that lacks
+    /// one
+    Trees(trees::Args),
 }
 
 #[derive(clap::Args, Debug)]
@@ -212,6 +217,7 @@ pub fn run(args: Args) {
         Command::Bump(args) => bump::bump(&args),
         Command::Updates(args) => updates::updates(&args),
         Command::Catalog { source } => catalog::catalog(&source),
+        Command::Trees(args) => trees::trees(&args),
     };
 
     if let Err(error) = result {
@@ -394,6 +400,7 @@ pub(super) fn realize(
         Some(Derivation::Fetch(_)) => fetch_path(key),
         Some(Derivation::Build(build)) => output_path(key, &build.name, &build.version, "out"),
         Some(Derivation::Unpack(unpack)) => output_path(key, &unpack.name, &unpack.version, "out"),
+        Some(Derivation::Extract(_)) => extract_path(key),
         Some(Derivation::Check(_)) | None => return Ok(found),
     };
 
@@ -508,6 +515,7 @@ impl Resolver<'_> {
             }
             Some(Derivation::Check(check)) => (vec![&check.target], check.dependencies.as_slice()),
             Some(Derivation::Unpack(unpack)) => (vec![&unpack.source], [].as_slice()),
+            Some(Derivation::Extract(extract)) => (vec![&extract.source], [].as_slice()),
             Some(Derivation::Fetch(_)) | None => (Vec::new(), [].as_slice()),
         };
 
@@ -555,6 +563,7 @@ fn label(derivation: Option<&Derivation>) -> String {
         Some(Derivation::Build(build)) => format!("{}@{}", build.name, build.version),
         Some(Derivation::Check(check)) => format!("check {}", check.name),
         Some(Derivation::Unpack(unpack)) => format!("{}@{}", unpack.name, unpack.version),
+        Some(Derivation::Extract(_)) => "extract".to_string(),
         Some(Derivation::Fetch(_)) | None => "fetch".to_string(),
     }
 }

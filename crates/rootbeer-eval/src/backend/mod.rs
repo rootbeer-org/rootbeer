@@ -346,6 +346,13 @@ fn seven_zip(archive: &str, directory: &str) -> String {
     format!("7zz x -y -bso0 -bsp0 -spod -sns- -snld20 -o{directory} {archive}")
 }
 
+/// Whether `name` is a package a build extracts archives with. rb extracts a
+/// version that records its tree itself, so the package never reaches that
+/// version's key.
+pub(crate) fn is_unpacker(name: &str) -> bool {
+    [UNPACKER, SEVEN_ZIP].contains(&name)
+}
+
 /// Zips, tar.bz2s, disk images, and packages extract with a catalog
 /// rb-unpack on `PATH`.
 fn unpacker(dependencies: &[Dependency], archive: &str, field: &str) -> Result<Unpacker, String> {

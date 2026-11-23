@@ -30,6 +30,7 @@ pub enum Derivation {
     Fetch(Fetch),
     Check(Check),
     Unpack(Unpack),
+    Extract(Extract),
 }
 
 /// A build that produces outputs from a set of inputs with a script and an
@@ -104,6 +105,17 @@ pub struct Unpack {
     pub bins: BTreeMap<String, String>,
 }
 
+/// An unpacked archive known in advance by the digest of its tree. Like a
+/// fetch's URLs, `source` and `format` say how to produce the tree but not
+/// what it is, so the key covers `tree` alone and the unpacker stays out of it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Extract {
+    pub tree: Sha256,
+    pub source: Key,
+    pub format: Format,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Dependency {
@@ -140,7 +152,8 @@ pub enum Allow {
     Pty,
 }
 
-/// How an unpack reads its source. A binary is the one bin itself.
+/// How an unpack or an extract reads its source. A binary is the one bin
+/// itself, which only an unpack lays out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(into = "&'static str", try_from = "String")]
 pub enum Format {
@@ -148,6 +161,9 @@ pub enum Format {
     TarXz,
     Zip,
     Binary,
+    TarBz2,
+    Dmg,
+    Pkg,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -189,7 +205,15 @@ impl Allow {
 }
 
 impl Format {
-    const ALL: [Format; 4] = [Format::TarGz, Format::TarXz, Format::Zip, Format::Binary];
+    const ALL: [Format; 7] = [
+        Format::TarGz,
+        Format::TarXz,
+        Format::Zip,
+        Format::Binary,
+        Format::TarBz2,
+        Format::Dmg,
+        Format::Pkg,
+    ];
 
     fn as_str(self) -> &'static str {
         match self {
@@ -197,6 +221,9 @@ impl Format {
             Format::TarXz => "tar.xz",
             Format::Zip => "zip",
             Format::Binary => "binary",
+            Format::TarBz2 => "tar.bz2",
+            Format::Dmg => "dmg",
+            Format::Pkg => "pkg",
         }
     }
 }
@@ -292,20 +319,33 @@ impl Derivation {
         Ok(Key::digest(&self.canonical_bytes()?))
     }
 
-    // RFC 8785 JSON of the keyed fields (minus the fetched URLs)
+    // RFC 8785 JSON of the keyed fields (minus the fetched URLs and how an
+    // extract produces its tree)
     fn canonical_bytes(&self) -> Result<Vec<u8>, Error> {
-        let keyed = match self {
-            Derivation::Fetch(fetch) => &Derivation::Fetch(Fetch {
-                urls: Vec::new(),
-                ..fetch.clone()
+        let canonical = match self {
+            Derivation::Fetch(fetch) => {
+                serde_json_canonicalizer::to_vec(&Derivation::Fetch(Fetch {
+                    urls: Vec::new(),
+                    ..fetch.clone()
+                }))
+            }
+            Derivation::Extract(extract) => serde_json_canonicalizer::to_vec(&KeyedExtract {
+                tree: &extract.tree,
             }),
-            _ => self,
+            _ => serde_json_canonicalizer::to_vec(self),
         };
 
-        serde_json_canonicalizer::to_vec(keyed).map_err(|error| {
+        canonical.map_err(|error| {
             Error::invalid("derivation", &error.to_string(), "cannot be canonicalized")
         })
     }
+}
+
+/// The only part of an extract its key covers.
+#[derive(Serialize)]
+#[serde(tag = "kind", rename = "extract")]
+struct KeyedExtract<'a> {
+    tree: &'a Sha256,
 }
 
 /// Every build reachable from `dependencies` through linked edges alone: the
@@ -342,6 +382,12 @@ pub fn output_path(key: &Key, name: &str, version: &str, output: &str) -> PathBu
 /// Store path of a fetched file. Fetches have no name, and their URLs aren't keyed.
 pub fn fetch_path(key: &Key) -> PathBuf {
     format!("{STORE_ROOT}/{key}-fetch").into()
+}
+
+/// Store path of an extracted tree. Like a fetch, it has no name, since the
+/// same tree may come from many archives.
+pub fn extract_path(key: &Key) -> PathBuf {
+    format!("{STORE_ROOT}/{key}-extract").into()
 }
 
 #[cfg(test)]

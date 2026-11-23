@@ -10,7 +10,9 @@ it akin to a dotfile manager like home-manager or chezmoi.
 - `crates/rootbeer-eval`: Evaluates Lua recipes into derivations and package
   metadata
 - `crates/rootbeer-sandbox`: Realizes a derivation into the store, building in a
-  Seatbelt or Bubblewrap sandbox and scanning outputs for references
+  Seatbelt or Bubblewrap sandbox and scanning outputs for references. It also
+  runs rb's tools, like unpacking an archive, as sandboxed rb processes (see
+  `tool.rs`). Never add a CLI command for a tool.
 - `crates/rootbeer-cache`: Moves store outputs to and from an OCI registry
   (`ghcr.io/rootbeer-org/store`)
 - `crates/rootbeer-store`: The shared `/opt/rb` store and its output database
@@ -21,8 +23,12 @@ it akin to a dotfile manager like home-manager or chezmoi.
   `/opt/rb/profiles/<uid>`, `rootbeer.lock`, and GC roots
 - `crates/rootbeer-trust`: Reads the signed package index from a TUF repository
   (through `tough`), so a client believes only what the index's keys signed
-- `crates/rootbeer-unpack`: `rb-unpack`, which prebuilt recipes use to unpack
-  zips, DMGs, and installer packages on any platform without mounting them
+- `crates/rootbeer-unpack`: Unpacks zips, tarballs, DMGs, and installer packages
+  into rootbeer-tree streams on any platform without mounting them. rb runs it
+  as a sandboxed tool, and `rb-unpack` lays a stream out for recipes that still
+  call it
+- `crates/rootbeer-tree`: The canonical encoding of a directory tree, frozen as
+  `rootbeer-tree-v1`, whose digest an extract pins
 - `crates/rootbeer-bootstrap`: The frozen protocol for fetching a verified rb new
   enough to run a command (first installs, and state written by a newer rb). Changes
   are additive only, and it must never depend on another rootbeer crate.
