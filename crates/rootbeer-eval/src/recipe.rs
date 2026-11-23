@@ -2,7 +2,7 @@ use crate::backend::prebuilt;
 use crate::template::Values;
 use crate::{Download, Pinned};
 use mlua::{Lua, LuaOptions, LuaSerdeExt, StdLib, VmState};
-use rootbeer_drv::{Allow, AppSettings, Location, Platform, Sha256, Updates};
+use rootbeer_drv::{Allow, AppSettings, Format, Location, Platform, Sha256, Updates};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde::de::IgnoredAny;
@@ -117,8 +117,8 @@ pub(crate) struct PlatformSpec {
 #[serde(deny_unknown_fields)]
 pub(crate) struct Version {
     pub digests: BTreeMap<Platform, Sha256>,
-    /// The digest of each platform's unpacked prebuilt archive, which pins
-    /// the tree so the unpacker stays out of the build's key.
+    /// The digest of each platform's unpacked archive, prebuilt or source,
+    /// which pins the tree so the unpacker stays out of the build's key.
     #[serde(default)]
     pub trees: BTreeMap<Platform, Sha256>,
     pub commit: Option<String>,
@@ -181,6 +181,18 @@ pub(crate) enum ArchiveFormat {
     TarBz2,
     #[serde(alias = "zip")]
     Zip,
+}
+
+impl ArchiveFormat {
+    /// How an extract reads an archive in this format.
+    pub(crate) fn format(self) -> Format {
+        match self {
+            ArchiveFormat::TarGz => Format::TarGz,
+            ArchiveFormat::TarXz => Format::TarXz,
+            ArchiveFormat::TarBz2 => Format::TarBz2,
+            ArchiveFormat::Zip => Format::Zip,
+        }
+    }
 }
 
 #[derive(Clone, Deserialize)]
@@ -485,7 +497,7 @@ fn locate(spec: &Spec, values: &Values) -> Result<Download, String> {
         (None, Some(source)) => Ok(Download {
             url: values.literal(&source.url)?,
             release: None,
-            extract: None,
+            extract: Some(source.archive.format()),
         }),
         (Some(_), Some(_)) => Err("a platform is prebuilt or built from source, not both".into()),
         (None, None) => Err("a platform needs a prebuilt or a source".into()),

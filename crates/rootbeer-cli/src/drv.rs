@@ -138,8 +138,7 @@ enum Command {
         #[command(flatten)]
         sources: Sources,
     },
-    /// Record the tree digest of each declared prebuilt archive that lacks
-    /// one
+    /// Record the tree digest of each declared archive that lacks one
     Trees(trees::Args),
 }
 

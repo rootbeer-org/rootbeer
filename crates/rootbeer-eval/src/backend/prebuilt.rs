@@ -323,12 +323,7 @@ pub(crate) fn format(install: &Install) -> Format {
     match install {
         Install::Dmg => Format::Dmg,
         Install::Pkg => Format::Pkg,
-        Install::Archive { format, .. } => match format {
-            ArchiveFormat::TarGz => Format::TarGz,
-            ArchiveFormat::TarXz => Format::TarXz,
-            ArchiveFormat::TarBz2 => Format::TarBz2,
-            ArchiveFormat::Zip => Format::Zip,
-        },
+        Install::Archive { format, .. } => format.format(),
     }
 }
 

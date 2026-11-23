@@ -36,11 +36,11 @@ return {
 
 - Use the canonical lowercase name and exact upstream versions.
 - Each version lists its source or asset digest per platform under `digests`.
-- A prebuilt archive's version also records the digest of its unpacked tree
-  per platform under `trees`. rb then unpacks the archive itself in its sandbox
-  and the build copies out of that tree, so no unpacker reaches the key, and a
-  new unpacker rebuilds nothing. `rb drv bump` records trees, and
-  `rb drv trees` fills in versions that lack one.
+- A version of an archive, prebuilt or source, also records the digest of its
+  unpacked tree per platform under `trees`. rb then unpacks the archive itself
+  in its sandbox and the build copies out of that tree, so no unpacker reaches
+  the key, and a new unpacker rebuilds nothing. `rb drv bump` records trees,
+  and `rb drv trees` fills in versions that lack one.
 - Keep older versions, since locks pin them. Shared fields apply to every
   retained version and rekey it, so give a build change to one version as an
   override on that version.
