@@ -2350,7 +2350,7 @@ dependencies = [
 
 [[package]]
 name = "rootbeer-unpack"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "apfs",
  "bzip2",
