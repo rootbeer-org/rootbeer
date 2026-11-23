@@ -3,7 +3,7 @@ use crate::recipe::{ArchiveFormat, Bins, Install, Prebuilt};
 use crate::template::{Values, escape, path, quote};
 use crate::{Download, ReleaseAsset};
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
-use rootbeer_drv::{Build, Dependency, Fetch, Key};
+use rootbeer_drv::{Build, Dependency, Fetch, Format, Key, Platform};
 use std::collections::BTreeMap;
 
 // RFC 3986 unreserved characters stay original in URL encoding
@@ -28,9 +28,12 @@ pub(crate) fn locate(prebuilt: &Prebuilt, values: &Values) -> Result<Download, S
             return Err("a prebuilt downloads from exactly one of github or url".into());
         };
 
+        let url = values.literal(url)?;
+        let install = installed(prebuilt, &url, None);
         return Ok(Download {
-            url: values.literal(url)?,
+            url,
             release: None,
+            extract: install.as_ref().map(format),
         });
     };
 
@@ -60,6 +63,7 @@ pub(crate) fn locate(prebuilt: &Prebuilt, values: &Values) -> Result<Download, S
         utf8_percent_encode(&asset, SEGMENT),
     );
 
+    let install = installed(prebuilt, &url, Some(&asset));
     Ok(Download {
         url,
         release: Some(ReleaseAsset {
@@ -67,23 +71,25 @@ pub(crate) fn locate(prebuilt: &Prebuilt, values: &Values) -> Result<Download, S
             tag,
             asset,
         }),
+        extract: install.as_ref().map(format),
     })
+}
+
+/// How a prebuilt installs, inferred from the file it downloads unless the
+/// recipe says.
+fn installed(prebuilt: &Prebuilt, url: &str, asset: Option<&str>) -> Option<Install> {
+    let file = asset.unwrap_or_else(|| url.rsplit('/').next().unwrap_or_default());
+    prebuilt.install.clone().or_else(|| infer_install(file))
 }
 
 impl Package<'_> {
     pub(crate) fn download(&self, prebuilt: &Prebuilt) -> Result<(Fetch, Option<Install>), String> {
         let download = locate(prebuilt, &self.resolved.values)?;
-        let file = match &download.release {
-            Some(release) => release.asset.clone(),
-            None => download
-                .url
-                .rsplit('/')
-                .next()
-                .unwrap_or_default()
-                .to_string(),
-        };
-
-        let install = prebuilt.install.clone().or_else(|| infer_install(&file));
+        let asset = download
+            .release
+            .as_ref()
+            .map(|release| release.asset.as_str());
+        let install = installed(prebuilt, &download.url, asset);
         Ok((self.fetch(vec![download.url]), install))
     }
 
@@ -171,7 +177,9 @@ impl Package<'_> {
                 });
                 phases.install.push(r#"mkdir -p "${out}""#.into());
                 for app in apps.values() {
-                    phases.install.extend(copy_app(app.path(), "dmg", "DMG"));
+                    phases
+                        .install
+                        .extend(copy_app(app.path(), "${TMPDIR}/dmg", "DMG"));
                 }
             }
             Some(Install::Pkg) => {
@@ -183,7 +191,7 @@ impl Package<'_> {
                 for app in apps.values() {
                     phases
                         .install
-                        .extend(copy_app(app.path(), "pkg", "package"));
+                        .extend(copy_app(app.path(), "${TMPDIR}/pkg", "package"));
                 }
             }
             None => {
@@ -225,12 +233,123 @@ impl Package<'_> {
             ..unpacked
         })
     }
+
+    /// A build that copies apps and bins out of `unpacked`, an extract whose
+    /// tree the recipe records, so it runs no unpacker of its own.
+    pub(crate) fn copy(
+        &self,
+        install: &Install,
+        prebuilt: &Prebuilt,
+        unpacked: Key,
+        dependencies: Vec<Dependency>,
+    ) -> Result<Build, String> {
+        let values = &self.resolved.values;
+        let outputs = &self.resolved.spec.outputs;
+        let steps = &prebuilt.steps;
+        let platform = values.platform;
+
+        let mut phases = Phases::default();
+        match install {
+            Install::Archive { strip_prefix, .. } => {
+                let tree = match strip_prefix {
+                    Some(prefix) => path("unpacked", &values.literal(prefix)?),
+                    None => r#""${unpacked}""#.into(),
+                };
+
+                // Steps before install run in a writable copy that becomes $out.
+                if steps.has_steps_before_install() {
+                    phases
+                        .prepare
+                        .extend(copy_tree(platform, &tree, r#""${TMPDIR}/unpack""#));
+                    phases.prepare.push(r#"cd "${TMPDIR}/unpack""#.into());
+                    phases.install.push(
+                        r#"[ ! -e "${out}" ] || { echo "a step before install created ${out}, where the unpacked tree moves" >&2; exit 1; }"#
+                            .into(),
+                    );
+                    phases
+                        .install
+                        .push(r#"mv "${TMPDIR}/unpack" "${out}""#.into());
+                } else {
+                    phases
+                        .install
+                        .extend(copy_tree(platform, &tree, r#""${out}""#));
+                }
+            }
+            Install::Dmg | Install::Pkg => {
+                let archive = match install {
+                    Install::Dmg => "DMG",
+                    _ => "package",
+                };
+
+                let apps = outputs.apps.as_ref().filter(|apps| !apps.is_empty());
+                let apps = apps.ok_or_else(|| format!("a {archive} needs outputs.apps"))?;
+                phases.install.push(r#"mkdir -p "${out}""#.into());
+                for app in apps.values() {
+                    phases
+                        .install
+                        .extend(copy_app(app.path(), "${unpacked}", archive));
+                }
+
+                phases.install.push(r#"chmod -R u+w "${out}""#.into());
+            }
+        }
+
+        // Install steps run in $out, since the copied tree is there.
+        if !steps.install.is_empty() {
+            phases.install.push(r#"cd "${out}""#.into());
+        }
+
+        let mut lines = phases.run(values, steps)?;
+        lines.extend(link(outputs.bins.as_ref()));
+        lines.extend(discover(outputs.bins.as_ref()));
+
+        let copied = self.build(
+            self.name.to_string(),
+            BTreeMap::from([("unpacked".into(), unpacked)]),
+            dependencies,
+            BTreeMap::new(),
+            lines,
+        );
+
+        Ok(Build {
+            host: self.host_references()?,
+            ..copied
+        })
+    }
+}
+
+/// How an extract reads the archive a prebuilt installs from.
+pub(crate) fn format(install: &Install) -> Format {
+    match install {
+        Install::Dmg => Format::Dmg,
+        Install::Pkg => Format::Pkg,
+        Install::Archive { format, .. } => match format {
+            ArchiveFormat::TarGz => Format::TarGz,
+            ArchiveFormat::TarXz => Format::TarXz,
+            ArchiveFormat::TarBz2 => Format::TarBz2,
+            ArchiveFormat::Zip => Format::Zip,
+        },
+    }
+}
+
+/// Copies an extracted tree to a writable `directory` that doesn't exist yet.
+/// macOS keeps the code signature attributes the tree holds, and both clone
+/// where the filesystem can.
+fn copy_tree(platform: Platform, tree: &str, directory: &str) -> Vec<String> {
+    let copy = match platform {
+        Platform::Aarch64Macos => format!("ditto {tree} {directory}"),
+        Platform::Aarch64Linux | Platform::X86_64Linux => {
+            format!("cp -R --reflink=auto {tree} {directory}")
+        }
+    };
+
+    vec![copy, format!("chmod -R u+w {directory}")]
 }
 
 /// A zip made on macOS can store each file's metadata in an AppleDouble file
 /// beside it. ditto folds those back into attributes, but 7-Zip writes them
-/// out, and inside an app bundle they break the code seal. rb-unpack always
-/// leaves them out.
+/// out, and inside an app bundle they break the code seal. rb-unpack folds
+/// them back into code signature attributes, as ditto does.
 fn unarchive(format: ArchiveFormat, directory: &str, has_apps: bool, unpacker: Unpacker) -> String {
     match (format, unpacker) {
         (ArchiveFormat::Zip, Unpacker::SevenZip) if has_apps => {
@@ -270,15 +389,14 @@ fn infer_install(file: &str) -> Option<Install> {
     })
 }
 
-// 7-Zip extracts an HFS+ image into a volume directory, whose name can carry
-// a version, and a package's apps land in the directory it installs into.
+// An HFS+ image unpacks into a volume directory, whose name can carry a
+// version, and a package's apps land in the directory it installs into.
+// `directory` is expanded inside double quotes.
 fn copy_app(app: &str, directory: &str, archive: &str) -> Vec<String> {
     let name = escape(app);
     vec![
         "set --".into(),
-        format!(
-            r#"for app in "${{TMPDIR}}/{directory}/{name}" "${{TMPDIR}}/{directory}"/*/"{name}"; do"#
-        ),
+        format!(r#"for app in "{directory}/{name}" "{directory}"/*/"{name}"; do"#),
         r#"  if [ -e "$app" ] || [ -L "$app" ]; then set -- "$@" "$app"; fi"#.into(),
         "done".into(),
         format!(

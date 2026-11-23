@@ -3,14 +3,13 @@ use crate::tree::Tree;
 use crate::xar::Xar;
 use flate2::read::GzDecoder;
 use quick_xml::events::Event;
-use std::fs::{self, File};
+use std::fs::File;
 use std::io::{self, BufReader, Read, Seek, SeekFrom};
-use std::path::{Path, PathBuf};
 
 /// Unpacks each component's payload where the installer would put it, so
 /// `/Applications/Tool.app` lands at `Applications/Tool.app`. Scripts never
 /// run.
-pub(crate) fn unpack(archive: &Path, tree: &Tree) -> Result<(), String> {
+pub(crate) fn unpack(archive: File, tree: &mut Tree) -> Result<(), String> {
     let mut package = Xar::open(archive)?;
 
     // A product package holds a directory per component, and a component
@@ -63,26 +62,6 @@ pub(crate) fn unpack(archive: &Path, tree: &Tree) -> Result<(), String> {
     }
 
     Ok(())
-}
-
-/// The one package at the top of an unpacked disk image.
-pub(crate) fn only(image: &Path) -> Result<PathBuf, String> {
-    let packages = fs::read_dir(image)
-        .map_err(|error| format!("{}: {error}", image.display()))?
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.extension().is_some_and(|extension| extension == "pkg") && path.is_file()
-        })
-        .collect::<Vec<_>>();
-
-    match packages.as_slice() {
-        [package] => Ok(package.clone()),
-        _ => Err(format!(
-            "expected one package in the image, found {}",
-            packages.len()
-        )),
-    }
 }
 
 /// A payload is a cpio archive, compressed with pbzx in newer packages and

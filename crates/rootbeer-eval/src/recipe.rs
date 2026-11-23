@@ -1,6 +1,6 @@
-use crate::Download;
 use crate::backend::prebuilt;
 use crate::template::Values;
+use crate::{Download, Pinned};
 use mlua::{Lua, LuaOptions, LuaSerdeExt, StdLib, VmState};
 use rootbeer_drv::{Allow, AppSettings, Location, Platform, Sha256, Updates};
 use serde::Deserialize;
@@ -117,6 +117,10 @@ pub(crate) struct PlatformSpec {
 #[serde(deny_unknown_fields)]
 pub(crate) struct Version {
     pub digests: BTreeMap<Platform, Sha256>,
+    /// The digest of each platform's unpacked prebuilt archive, which pins
+    /// the tree so the unpacker stays out of the build's key.
+    #[serde(default)]
+    pub trees: BTreeMap<Platform, Sha256>,
     pub commit: Option<String>,
     pub serial: Option<u64>,
     pub license: Option<String>,
@@ -339,6 +343,7 @@ pub(crate) struct Resolved<'a> {
     pub spec: Spec,
     pub values: Values<'a>,
     pub sha256: &'a Sha256,
+    pub tree: Option<&'a Sha256>,
     pub license: &'a str,
 }
 
@@ -387,6 +392,7 @@ impl Recipe {
             spec,
             values,
             sha256,
+            tree: entry.trees.get(&platform),
             license,
         })
     }
@@ -402,17 +408,28 @@ impl Recipe {
     ) -> Result<Download, String> {
         let entry = Version::undeclared(commit, serial);
         let (spec, values) = self.layer(version, &entry, platform)?;
-        match (&spec.prebuilt, &spec.source) {
-            (Some(prebuilt), None) => prebuilt::locate(prebuilt, &values),
-            (None, Some(source)) => Ok(Download {
-                url: values.literal(&source.url)?,
-                release: None,
-            }),
-            (Some(_), Some(_)) => {
-                Err("a platform is prebuilt or built from source, not both".into())
-            }
-            (None, None) => Err("a platform needs a prebuilt or a source".into()),
-        }
+        locate(&spec, &values)
+    }
+
+    /// Where a declared version downloads from on `platform`, with the
+    /// digests it records there.
+    pub(crate) fn pinned(&self, version: &str, platform: Platform) -> Result<Pinned, String> {
+        let (version, entry) = self
+            .versions
+            .get_key_value(version)
+            .ok_or_else(|| format!("{} has no version {version}", self.name))?;
+
+        let (spec, values) = self.layer(version, entry, platform)?;
+        let sha256 = entry
+            .digests
+            .get(&platform)
+            .ok_or("the version has no digest for this platform")?;
+
+        Ok(Pinned {
+            download: locate(&spec, &values)?,
+            sha256: sha256.clone(),
+            tree: entry.trees.get(&platform).cloned(),
+        })
     }
 
     /// The paths of the app bundles a version exports on a platform.
@@ -459,6 +476,19 @@ impl Recipe {
         };
 
         Ok((spec, values))
+    }
+}
+
+fn locate(spec: &Spec, values: &Values) -> Result<Download, String> {
+    match (&spec.prebuilt, &spec.source) {
+        (Some(prebuilt), None) => prebuilt::locate(prebuilt, values),
+        (None, Some(source)) => Ok(Download {
+            url: values.literal(&source.url)?,
+            release: None,
+            extract: None,
+        }),
+        (Some(_), Some(_)) => Err("a platform is prebuilt or built from source, not both".into()),
+        (None, None) => Err("a platform needs a prebuilt or a source".into()),
     }
 }
 
@@ -581,6 +611,7 @@ impl Version {
     fn undeclared(commit: Option<String>, serial: Option<u64>) -> Version {
         Version {
             digests: BTreeMap::new(),
+            trees: BTreeMap::new(),
             commit,
             serial,
             license: None,

@@ -16,7 +16,7 @@ const LONGEST_NAME: u64 = 64 * 1024;
 
 /// Unpacks a POSIX portable (odc) cpio archive, the format of a package's
 /// payload, under `prefix` in `tree`.
-pub(crate) fn unpack(mut archive: impl Read, tree: &Tree, prefix: &str) -> Result<(), String> {
+pub(crate) fn unpack(mut archive: impl Read, tree: &mut Tree, prefix: &str) -> Result<(), String> {
     let mut seen: BTreeMap<(u64, u64), String> = BTreeMap::new();
     loop {
         let mut header = [0u8; HEADER];
@@ -48,7 +48,7 @@ pub(crate) fn unpack(mut archive: impl Read, tree: &Tree, prefix: &str) -> Resul
         let mode = u32::try_from(mode).map_err(|_| format!("{name} has mode {mode}"))?;
         let mut contents = (&mut archive).take(size);
         match mode & KIND {
-            DIRECTORY => tree.directory(&path, mode)?,
+            DIRECTORY => tree.directory(&path)?,
             SYMLINK => {
                 let target = read(&mut contents, size)?;
                 let target = String::from_utf8(target)
@@ -109,8 +109,8 @@ fn read(reader: &mut impl Read, size: u64) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use std::fs;
-    use std::os::unix::fs::MetadataExt;
+    use crate::tree::tests::entries;
+    use rootbeer_tree::Kind;
 
     pub(crate) fn entry(
         archive: &mut Vec<u8>,
@@ -152,27 +152,32 @@ pub(crate) mod tests {
 
     #[test]
     fn a_payload_unpacks_with_its_links() {
-        let directory = tempfile::tempdir().unwrap();
-        let tree = Tree::new(directory.path()).unwrap();
-        unpack(payload().as_slice(), &tree, "Applications").unwrap();
+        let mut tree = Tree::new().unwrap();
+        unpack(payload().as_slice(), &mut tree, "Applications").unwrap();
 
-        let app = directory.path().join("Applications/Tool.app");
-        assert_eq!(fs::read(app.join("tool")).unwrap(), b"#!");
+        let tool = Kind::File {
+            is_executable: true,
+            attributes: Vec::new(),
+            size: 2,
+        };
+        let current = Kind::Symlink {
+            target: b"tool".to_vec(),
+        };
         assert_eq!(
-            fs::metadata(app.join("tool")).unwrap().ino(),
-            fs::metadata(app.join("again")).unwrap().ino()
-        );
-        assert_eq!(
-            fs::read_link(app.join("Current")).unwrap().to_str(),
-            Some("tool")
+            entries(&tree),
+            [
+                ("Applications".to_string(), Kind::Directory),
+                ("Applications/Tool.app".to_string(), Kind::Directory),
+                ("Applications/Tool.app/Current".to_string(), current),
+                ("Applications/Tool.app/again".to_string(), tool.clone()),
+                ("Applications/Tool.app/tool".to_string(), tool),
+            ]
         );
 
         let truncated = payload();
         let truncated = truncated
             .get(..truncated.len().saturating_sub(100))
             .unwrap();
-        let directory = tempfile::tempdir().unwrap();
-        let tree = Tree::new(directory.path()).unwrap();
-        assert!(unpack(truncated, &tree, "").is_err());
+        assert!(unpack(truncated, &mut Tree::new().unwrap(), "").is_err());
     }
 }

@@ -210,6 +210,7 @@ impl Planner<'_, '_> {
                     .collect()
             }
             Some(Derivation::Unpack(unpack)) => vec![&unpack.source],
+            Some(Derivation::Extract(extract)) => vec![&extract.source],
             Some(Derivation::Check(check)) => {
                 indirect = linked_closure(&graph.derivations, &check.dependencies);
                 std::iter::once(&check.target)

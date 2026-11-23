@@ -109,6 +109,11 @@ impl Commands {
 }
 
 fn main() {
+    // rb runs its own sandboxed tools as fresh rb processes.
+    if let Some(code) = rootbeer_sandbox::tool::dispatch() {
+        std::process::exit(code);
+    }
+
     let cli = Cli::parse();
     if cli.command.can_relaunch() {
         newer::allow();

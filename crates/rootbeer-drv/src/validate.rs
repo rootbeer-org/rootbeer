@@ -1,4 +1,4 @@
-use crate::{Build, Check, Dependency, Derivation, Error, Fetch, Format, Unpack};
+use crate::{Build, Check, Dependency, Derivation, Error, Extract, Fetch, Format, Unpack};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path};
 
@@ -116,6 +116,7 @@ impl Derivation {
             Derivation::Fetch(fetch) => fetch.validate(),
             Derivation::Check(check) => check.validate(),
             Derivation::Unpack(unpack) => unpack.validate(),
+            Derivation::Extract(extract) => extract.validate(),
         }
     }
 }
@@ -219,6 +220,20 @@ impl Unpack {
                 )),
             }
         })
+    }
+}
+
+impl Extract {
+    fn validate(&self) -> Result<(), Error> {
+        if self.format == Format::Binary {
+            return Err(Error::invalid(
+                "format",
+                self.format.as_str(),
+                "is a file, not an archive with a tree",
+            ));
+        }
+
+        Ok(())
     }
 }
 

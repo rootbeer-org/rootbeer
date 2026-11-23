@@ -1,6 +1,6 @@
 use crate::tree::Tree;
+use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
-use std::path::Path;
 
 // Bookkeeping the filesystem keeps at the root of a volume, which no app
 // ships.
@@ -29,18 +29,20 @@ trait Volume {
     fn write(&mut self, path: &str, to: &mut dyn Write) -> Result<u64, String>;
 }
 
-/// Whether `archive` is a disk image, which ends in a koly trailer.
-pub(crate) fn is_image(archive: &Path) -> Result<bool, String> {
-    let at = |error: std::io::Error| format!("{}: {error}", archive.display());
-    let mut file = std::fs::File::open(archive).map_err(at)?;
-    if file.seek(SeekFrom::End(0)).map_err(at)? < 512 {
-        return Ok(false);
+/// Whether `archive` is a disk image, which ends in a koly trailer. It's left
+/// rewound.
+pub(crate) fn is_image(mut archive: &File) -> Result<bool, String> {
+    let at = |error: std::io::Error| format!("the archive: {error}");
+    let is_long_enough = archive.seek(SeekFrom::End(0)).map_err(at)? >= 512;
+    let mut magic = [0u8; 4];
+    if is_long_enough {
+        archive
+            .seek(SeekFrom::End(-512))
+            .and_then(|_| archive.read_exact(&mut magic))
+            .map_err(at)?;
     }
 
-    let mut magic = [0u8; 4];
-    file.seek(SeekFrom::End(-512))
-        .and_then(|_| file.read_exact(&mut magic))
-        .map_err(at)?;
+    archive.rewind().map_err(at)?;
     Ok(&magic == b"koly")
 }
 
@@ -52,8 +54,9 @@ enum Filesystem {
 
 /// Unpacks the filesystem in a disk image, HFS+ or APFS, with the volume's
 /// contents at the top of `tree`.
-pub(crate) fn unpack(archive: &Path, tree: &Tree) -> Result<(), String> {
-    let mut image = udif::DmgReader::open(archive).map_err(|error| error.to_string())?;
+pub(crate) fn unpack(archive: File, tree: &mut Tree) -> Result<(), String> {
+    let mut image =
+        udif::DmgReader::new(BufReader::new(archive)).map_err(|error| error.to_string())?;
 
     // The tool that made the image names its partitions, and some name the
     // filesystem only "disk image", so each one is checked for a volume.
@@ -114,7 +117,7 @@ fn filesystem(raw: &mut std::fs::File) -> Result<Option<Filesystem>, String> {
     })
 }
 
-fn copy(mut volume: impl Volume, tree: &Tree) -> Result<(), String> {
+fn copy(mut volume: impl Volume, tree: &mut Tree) -> Result<(), String> {
     for (path, kind) in volume.entries()? {
         let top = path
             .trim_start_matches('/')
@@ -142,7 +145,7 @@ fn copy(mut volume: impl Volume, tree: &Tree) -> Result<(), String> {
         };
 
         match kind {
-            Kind::Directory => tree.directory(&path, mode)?,
+            Kind::Directory => tree.directory(&path)?,
             Kind::Symlink => {
                 let mut target = Vec::new();
                 volume.write(&path, &mut target)?;
@@ -151,8 +154,8 @@ fn copy(mut volume: impl Volume, tree: &Tree) -> Result<(), String> {
                 tree.symlink(&path, &target)?;
             }
             Kind::File => {
-                let mut file = tree.create(&path, mode)?;
-                let written = volume.write(&path, &mut file)?;
+                let written =
+                    tree.file_with(&path, mode, |file| volume.write(&path, file).map(drop))?;
                 if written != size {
                     return Err(format!(
                         "{path} holds {size} bytes but {written} could be read"

@@ -964,3 +964,148 @@ fn metadata_says_where_an_output_comes_from_and_what_it_needs() {
     assert_eq!(gopher.build, "go");
     assert!(gopher.runtime_dependencies.is_empty());
 }
+
+const SLIDES: (&str, &str) = ("slides.lua", include_str!("fixtures/slides.lua"));
+const RB_UNPACK: (&str, &str) = ("rb-unpack.lua", include_str!("fixtures/rb-unpack.lua"));
+
+fn evaluated(fixtures: &[(&str, &str)]) -> rootbeer_eval::Graph {
+    let catalog = Catalog::parse(fixtures.iter().copied()).unwrap();
+    catalog.evaluate(&hosts("a"), &catalog.targets()).unwrap()
+}
+
+fn built<'a>(
+    graph: &'a rootbeer_eval::Graph,
+    label: &str,
+) -> (&'a rootbeer_drv::Key, &'a rootbeer_drv::Build) {
+    let (_, package) = graph
+        .packages
+        .iter()
+        .find(|(target, _)| self::label(target) == label)
+        .unwrap();
+    let Some(Derivation::Build(build)) = graph.derivations.get(&package.build) else {
+        panic!("{label} has no build");
+    };
+
+    (&package.build, build)
+}
+
+// The rule UNPACK.md holds rb-unpack to. A version that records its tree is
+// extracted by rb, so no unpacker reaches its key, even one the recipe still
+// declares for its other versions.
+#[test]
+fn an_extracted_version_never_keys_its_unpacker() {
+    let graph = evaluated(&[SLIDES, RB_UNPACK]);
+    let (key, build) = built(&graph, "slides@2.0-aarch64-macos");
+    assert!(build.dependencies.is_empty(), "{build}");
+    assert!(!build.script.contains("rb-unpack"), "{build}");
+    assert_eq!(build.inputs.keys().collect::<Vec<_>>(), ["unpacked"]);
+    let Some(Derivation::Extract(extract)) = graph.derivations.get(&build.inputs["unpacked"])
+    else {
+        panic!("{build}");
+    };
+    assert_eq!(extract.tree.as_str(), "c".repeat(64));
+    assert_eq!(extract.format, rootbeer_drv::Format::Zip);
+
+    let (old, unextracted) = built(&graph, "slides@1.0-aarch64-macos");
+    assert!(
+        unextracted.script.contains("rb-unpack zip"),
+        "{unextracted}"
+    );
+
+    let snapshot = graph
+        .derivations_of(
+            &graph.packages[&Target {
+                name: "slides".into(),
+                version: "2.0".into(),
+                platform: Platform::Aarch64Macos,
+            }],
+        )
+        .into_iter()
+        .map(|(key, derivation)| format!("\n# {key}\n{derivation}"))
+        .collect::<String>();
+    insta::with_settings!({
+        omit_expression => true,
+        prepend_module_to_snapshot => false
+    }, {
+        insta::assert_snapshot!("slides@2.0-aarch64-macos", snapshot);
+    });
+
+    // A new rb-unpack rekeys only the version it still unpacks.
+    let released = RB_UNPACK.1.replace(&"d".repeat(64), &"f".repeat(64));
+    let graph = evaluated(&[SLIDES, ("rb-unpack.lua", &released)]);
+    assert_eq!(built(&graph, "slides@2.0-aarch64-macos").0, key);
+    assert_ne!(built(&graph, "slides@1.0-aarch64-macos").0, old);
+
+    // Only the tree vouches for the output, so a rehosted or recompressed
+    // archive with the same tree keeps the key, and a new tree doesn't.
+    let rehosted = SLIDES
+        .1
+        .replace("example.com/Slides", "mirror.example.org/Slides")
+        .replace(&"2".repeat(64), &"3".repeat(64));
+    let graph = evaluated(&[("slides.lua", &rehosted), RB_UNPACK]);
+    assert_eq!(built(&graph, "slides@2.0-aarch64-macos").0, key);
+
+    let changed = SLIDES.1.replace(&"c".repeat(64), &"b".repeat(64));
+    let graph = evaluated(&[("slides.lua", &changed), RB_UNPACK]);
+    assert_ne!(built(&graph, "slides@2.0-aarch64-macos").0, key);
+}
+
+#[test]
+fn an_extracted_build_copies_out_of_the_tree() {
+    let graph = evaluated(&[SLIDES, RB_UNPACK]);
+    let (_, linux) = built(&graph, "slides@2.0-x86_64-linux");
+    assert!(
+        linux.script.contains(
+            "cp -R --reflink=auto \"${unpacked}/slides-2.0\" \"${out}\"\nchmod -R u+w \"${out}\"\n"
+        ),
+        "{linux}"
+    );
+    assert!(linux.dependencies.is_empty(), "{linux}");
+
+    let image = SLIDES
+        .1
+        .replace("Slides-{version}.zip", "Slides-{version}.dmg");
+    let graph = evaluated(&[("slides.lua", &image), RB_UNPACK]);
+    let (_, viewer) = built(&graph, "slides@2.0-aarch64-macos");
+    let Some(Derivation::Extract(extract)) = graph.derivations.get(&viewer.inputs["unpacked"])
+    else {
+        panic!("{viewer}");
+    };
+    assert_eq!(extract.format, rootbeer_drv::Format::Dmg);
+    assert!(
+        viewer
+            .script
+            .contains(r#"for app in "${unpacked}/Slides.app" "${unpacked}"/*/"Slides.app"; do"#),
+        "{viewer}"
+    );
+    assert!(
+        viewer.script.contains(r#"ditto "$1" "${out}/Slides.app""#),
+        "{viewer}"
+    );
+
+    let stepped = SLIDES.1.replacen(
+        "\t\tdependencies = {",
+        "\t\tsteps = { prepare = { { \"touch\", \"x\" } } },\n\t\tdependencies = {",
+        1,
+    );
+    let graph = evaluated(&[("slides.lua", &stepped), RB_UNPACK]);
+    let (_, stepped) = built(&graph, "slides@2.0-aarch64-macos");
+    assert!(
+        stepped.script.contains(
+            "ditto \"${unpacked}\" \"${TMPDIR}/unpack\"\nchmod -R u+w \"${TMPDIR}/unpack\"\ncd \"${TMPDIR}/unpack\"\ntouch x\n"
+        ),
+        "{stepped}"
+    );
+    assert!(
+        stepped.script.contains(r#"mv "${TMPDIR}/unpack" "${out}""#),
+        "{stepped}"
+    );
+
+    let binary = SLIDES.1.replace("Slides-{version}.zip", "slides-{version}");
+    let catalog = Catalog::parse([("slides.lua", binary.as_str()), RB_UNPACK]).unwrap();
+    let error = catalog
+        .evaluate(&hosts("a"), &catalog.targets())
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("a raw binary has no tree"), "{error}");
+}

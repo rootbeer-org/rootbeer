@@ -9,6 +9,7 @@ use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use sha2::Digest;
 use std::collections::BTreeMap;
+use std::fs;
 use std::io;
 use std::path::Path;
 use std::time::Duration;
@@ -381,6 +382,21 @@ pub(super) fn asset_digest(repository: &str, tag: &str, name: &str) -> Result<Sh
         Some(digest) => Sha256::try_from(digest.to_string()).map_err(|error| error.to_string()),
         None => download_digest(&asset.browser_download_url),
     }
+}
+
+/// Downloads `url` into `file`, returning the hash of what it wrote.
+pub(super) fn download_to(url: &str, file: &mut fs::File) -> Result<Sha256, String> {
+    let at = |error: io::Error| format!("{url}: {error}");
+    let response = agent(DOWNLOAD)
+        .get(url)
+        .call()
+        .map_err(|error| format!("{url}: {error}"))?;
+    io::copy(&mut response.into_body().into_reader(), file).map_err(at)?;
+
+    let mut hasher = sha2::Sha256::new();
+    io::Seek::rewind(file).map_err(at)?;
+    io::copy(file, &mut hasher).map_err(at)?;
+    Sha256::try_from(HEXLOWER.encode(&hasher.finalize())).map_err(|error| error.to_string())
 }
 
 pub(super) fn download_digest(url: &str) -> Result<Sha256, String> {

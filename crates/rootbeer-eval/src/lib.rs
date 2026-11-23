@@ -12,7 +12,8 @@ mod template;
 use recipe::{DependencyKind as RecipeKind, Recipe};
 pub use recipe::{LineBy, Lines, Rolling, Upstream};
 use rootbeer_drv::{
-    AppSettings, Dependency, DependencyKind, Derivation, Key, Platform, output_path,
+    AppSettings, Dependency, DependencyKind, Derivation, Extract, Format, Key, Platform, Sha256,
+    output_path,
 };
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -32,6 +33,18 @@ pub struct Download {
     pub url: String,
     /// The GitHub release asset `url` names, whose digest GitHub publishes
     pub release: Option<ReleaseAsset>,
+    /// How an extract reads a prebuilt archive, whose tree a version can
+    /// record. A source or a raw binary has none.
+    pub extract: Option<Format>,
+}
+
+/// What a declared version records for one platform.
+#[derive(Debug)]
+pub struct Pinned {
+    pub download: Download,
+    pub sha256: Sha256,
+    /// The digest of the unpacked archive, once recorded.
+    pub tree: Option<Sha256>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -133,10 +146,14 @@ impl Graph {
             return;
         }
 
-        if let Some(Derivation::Build(build)) = self.derivations.get(key) {
-            for input in build.inputs.values() {
-                self.inputs_first(input, keys);
+        match self.derivations.get(key) {
+            Some(Derivation::Build(build)) => {
+                for input in build.inputs.values() {
+                    self.inputs_first(input, keys);
+                }
             }
+            Some(Derivation::Extract(extract)) => self.inputs_first(&extract.source, keys),
+            _ => {}
         }
 
         keys.push(key);
@@ -260,6 +277,17 @@ impl Catalog {
             .ok_or_else(|| format!("{name} isn't in the catalog"))?;
 
         recipe.download(version, commit.map(str::to_string), serial, platform)
+    }
+
+    /// Where a declared version downloads from on a platform, with the
+    /// digests it records there.
+    pub fn pinned(&self, name: &str, version: &str, platform: Platform) -> Result<Pinned, String> {
+        let recipe = self
+            .recipes
+            .get(name)
+            .ok_or_else(|| format!("{name} isn't in the catalog"))?;
+
+        recipe.pinned(version, platform)
     }
 
     /// The paths of the app bundles a version exports on a platform.
@@ -437,6 +465,16 @@ impl<'a> Evaluation<'a> {
             (None, None) => &[],
         };
 
+        // A prebuilt version that records its tree is extracted by rb, so an
+        // unpacker the recipe still declares for its other versions is left
+        // out of this one's key.
+        let is_extracted = resolved.spec.prebuilt.is_some() && resolved.tree.is_some();
+        let declared = declared.iter().filter(|declared| {
+            let is_unpacker = matches!(declared.kind, RecipeKind::Build)
+                && backend::is_unpacker(&declared.package);
+            !(is_extracted && is_unpacker)
+        });
+
         let mut dependencies = Vec::new();
         let mut linked = Vec::new();
         for declared in declared {
@@ -520,7 +558,20 @@ impl<'a> Evaluation<'a> {
             (Some(prebuilt), None, _) => {
                 let (fetch, install) = package.download(prebuilt)?;
                 let source = self.insert(Derivation::Fetch(fetch))?;
-                let build = package.unpack(install, prebuilt, source, dependencies)?;
+                let build = match (package.resolved.tree, install) {
+                    (Some(tree), Some(install)) => {
+                        let unpacked = self.insert(Derivation::Extract(Extract {
+                            tree: tree.clone(),
+                            source,
+                            format: backend::prebuilt::format(&install),
+                        }))?;
+                        package.copy(&install, prebuilt, unpacked, dependencies)?
+                    }
+                    (Some(_), None) => {
+                        return Err("a raw binary has no tree, so it records no trees".into());
+                    }
+                    (None, install) => package.unpack(install, prebuilt, source, dependencies)?,
+                };
                 (build, "prebuilt")
             }
             (None, Some(source), Some(build)) => {

@@ -1,3 +1,5 @@
+use rootbeer_tree::KEPT;
+
 // The entry in an AppleDouble file that holds the Finder's info, which macOS
 // follows with the file's extended attributes.
 const FINDER_INFO: u32 = 9;
@@ -5,11 +7,6 @@ const FINDER_INFO_SIZE: usize = 32;
 
 const MAGIC: &[u8] = &[0x00, 0x05, 0x16, 0x07];
 const ATTRIBUTES_MAGIC: &[u8] = b"ATTR";
-
-// A signed file with nowhere to hold its signature, like a jar in an app
-// bundle, keeps it in these. No others are kept, since the store holds only
-// these.
-const KEPT: &str = "com.apple.cs.";
 
 /// The extended attributes an AppleDouble file records for the file beside
 /// it, keeping only code signatures.

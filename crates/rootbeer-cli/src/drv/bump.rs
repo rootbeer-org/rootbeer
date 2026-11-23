@@ -1,4 +1,4 @@
-use super::{github, load, parse_platform, version, Sources};
+use super::{github, load, parse_platform, trees, version, Sources};
 use rootbeer_drv::{is_version, Platform, Sha256};
 use rootbeer_eval::{Lines, Target};
 use serde::Serialize;
@@ -41,6 +41,8 @@ struct Bumped<'a> {
     added: bool,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     digests: BTreeMap<Platform, Sha256>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    trees: BTreeMap<Platform, Sha256>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     dropped: Vec<String>,
 }
@@ -126,34 +128,61 @@ pub(super) fn bump(args: &Args) -> Result<(), String> {
             version,
             added: false,
             digests: BTreeMap::new(),
+            trees: BTreeMap::new(),
             dropped: Vec::new(),
         });
     }
 
+    // A tree needs the download itself, so a platform that records one
+    // downloads it even when GitHub publishes its digest.
     let mut digests = BTreeMap::new();
-    let mut by_url = BTreeMap::<String, Sha256>::new();
+    let mut trees = BTreeMap::new();
+    let mut by_url = BTreeMap::<String, (Sha256, Option<Sha256>)>::new();
     for &platform in &missing {
         let at = |error: String| format!("{name}@{version} on {platform}: {error}");
         let download = catalog
             .download(name, version, commit, args.serial, platform)
             .map_err(at)?;
 
-        let digest = match (by_url.get(&download.url), &download.release) {
-            (Some(digest), _) => digest.clone(),
-            (None, Some(release)) => {
-                github::asset_digest(&release.repository, &release.tag, &release.asset)
-                    .map_err(at)?
+        let format = download.extract;
+        let published = || match &download.release {
+            Some(release) => {
+                github::asset_digest(&release.repository, &release.tag, &release.asset).map(Some)
             }
-            (None, None) => github::download_digest(&download.url).map_err(at)?,
+            None => Ok(None),
         };
 
-        by_url.insert(download.url, digest.clone());
+        let (digest, tree) = match (by_url.get(&download.url).cloned(), format) {
+            (Some((digest, _)), None) => (digest, None),
+            (Some((digest, Some(tree))), Some(_)) => (digest, Some(tree)),
+            (Some((digest, None)), Some(format)) => {
+                let (_, tree) =
+                    trees::download(&download.url, Some(&digest), format).map_err(at)?;
+                (digest, Some(tree))
+            }
+            (None, Some(format)) => {
+                let published = published().map_err(at)?;
+                let (digest, tree) =
+                    trees::download(&download.url, published.as_ref(), format).map_err(at)?;
+                (digest, Some(tree))
+            }
+            (None, None) => match published().map_err(at)? {
+                Some(digest) => (digest, None),
+                None => (github::download_digest(&download.url).map_err(at)?, None),
+            },
+        };
+
+        by_url.insert(download.url, (digest.clone(), tree.clone()));
         digests.insert(platform, digest);
+        if let Some(tree) = tree {
+            trees.insert(platform, tree);
+        }
     }
 
     let entry = Entry {
         version,
         digests: &digests,
+        trees: &trees,
         commit,
         serial: args.serial,
     };
@@ -198,6 +227,7 @@ pub(super) fn bump(args: &Args) -> Result<(), String> {
         version,
         added: true,
         digests,
+        trees,
         dropped,
     })
 }
@@ -261,13 +291,14 @@ enum Keep<'a> {
 struct Entry<'a> {
     version: &'a str,
     digests: &'a BTreeMap<Platform, Sha256>,
+    trees: &'a BTreeMap<Platform, Sha256>,
     commit: Option<&'a str>,
     serial: Option<u64>,
 }
 
 /// A recipe file in the layout pdr writes, with the spans `bump` edits. Text
 /// edits keep every comment and line `bump` doesn't touch.
-struct Recipe<'a> {
+pub(super) struct Recipe<'a> {
     text: &'a str,
     unit: &'a str,
     versions: Entries,
@@ -278,7 +309,7 @@ struct Recipe<'a> {
 type Entries = Vec<(String, Range<usize>)>;
 
 impl<'a> Recipe<'a> {
-    fn read(text: &'a str) -> Result<Recipe<'a>, String> {
+    pub(super) fn read(text: &'a str) -> Result<Recipe<'a>, String> {
         if text.contains('\r') {
             return Err("rb can't edit CRLF line endings".into());
         }
@@ -354,7 +385,10 @@ impl<'a> Recipe<'a> {
             .map(|(version, span)| (version.clone(), self.text[span.clone()].to_string()))
             .collect();
         let block = match blocks.get(entry.version) {
-            Some(block) => self.extend(block, entry.digests)?,
+            Some(block) => {
+                let block = self.merge(block, "digests", entry.digests)?;
+                self.merge(&block, "trees", entry.trees)?
+            }
             None => self.render(entry),
         };
         blocks.insert(entry.version.to_string(), block);
@@ -375,22 +409,54 @@ impl<'a> Recipe<'a> {
         Ok((text, dropped))
     }
 
-    /// A declared version's block with digests added for platforms it lacks.
-    fn extend(&self, block: &str, digests: &BTreeMap<Platform, Sha256>) -> Result<String, String> {
+    /// The recipe with `trees` added to the versions they name, beside each
+    /// one's digests. A tree a version already records stays.
+    pub(super) fn with_trees(
+        &self,
+        trees: &BTreeMap<String, BTreeMap<Platform, Sha256>>,
+    ) -> Result<String, String> {
+        let mut text = self.text.to_string();
+        for (version, span) in self.versions.iter().rev() {
+            let Some(trees) = trees.get(version) else {
+                continue;
+            };
+
+            let block = self.merge(&self.text[span.clone()], "trees", trees)?;
+            text.replace_range(span.clone(), &block);
+        }
+
+        Ok(text)
+    }
+
+    /// A version's block with `entries` added to its `table` for the
+    /// platforms it lacks. A missing trees table is made after digests.
+    fn merge(
+        &self,
+        block: &str,
+        table: &str,
+        entries: &BTreeMap<Platform, Sha256>,
+    ) -> Result<String, String> {
         let [three, four] = [3, 4].map(|depth| self.unit.repeat(depth));
-        let open = format!("\n{three}digests = {{\n");
-        let close = format!("\n{three}}},\n");
-        let start = block
-            .find(&open)
-            .map(|at| at + open.len())
-            .ok_or("its version has no digests table")?;
-        let end = block[start - 1..]
-            .find(&close)
-            .map(|at| start + at)
-            .ok_or("its version's digests table never closes")?;
+        let close = format!("{three}}},\n");
+        let span = match self.span(block, table)? {
+            Some(span) => span,
+            None if entries.is_empty() => return Ok(block.to_string()),
+            None => {
+                let digests = self
+                    .span(block, "digests")?
+                    .ok_or("its version has no digests table")?;
+                let at = digests.end + close.len();
+                let opened = format!(
+                    "{}{three}{table} = {{\n{close}{}",
+                    &block[..at],
+                    &block[at..]
+                );
+                return self.merge(&opened, table, entries);
+            }
+        };
 
         let mut lines = BTreeMap::new();
-        for line in block[start..end].lines() {
+        for line in block[span.clone()].lines() {
             let platform = line
                 .strip_prefix(&format!("{four}[\""))
                 .and_then(|rest| rest.split_once("\"] = \""))
@@ -399,13 +465,33 @@ impl<'a> Recipe<'a> {
             lines.insert(platform, format!("{line}\n"));
         }
 
-        for (platform, digest) in digests {
+        for (platform, digest) in entries {
             let line = format!("{four}[\"{platform}\"] = \"{}\",\n", digest.as_str());
             lines.entry(platform.to_string()).or_insert(line);
         }
 
-        let table = lines.into_values().collect::<String>();
-        Ok(format!("{}{table}{}", &block[..start], &block[end..]))
+        let lines = lines.into_values().collect::<String>();
+        Ok(format!(
+            "{}{lines}{}",
+            &block[..span.start],
+            &block[span.end..]
+        ))
+    }
+
+    /// The span of the lines inside a version's `table`, when it has one.
+    fn span(&self, block: &str, table: &str) -> Result<Option<Range<usize>>, String> {
+        let three = self.unit.repeat(3);
+        let open = format!("\n{three}{table} = {{\n");
+        let close = format!("\n{three}}},\n");
+        let Some(start) = block.find(&open).map(|at| at + open.len()) else {
+            return Ok(None);
+        };
+
+        let end = block[start - 1..]
+            .find(&close)
+            .map(|at| start + at)
+            .ok_or_else(|| format!("its version's {table} table never closes"))?;
+        Ok(Some(start..end))
     }
 
     fn has_digest(&self, block: &str, platform: Platform) -> bool {
@@ -433,6 +519,20 @@ impl<'a> Recipe<'a> {
         }
 
         block += &format!("{three}}},\n");
+        if !entry.trees.is_empty() {
+            block += &format!("{three}trees = {{\n");
+            let trees: BTreeMap<String, &Sha256> = entry
+                .trees
+                .iter()
+                .map(|(platform, tree)| (platform.to_string(), tree))
+                .collect();
+            for (platform, tree) in trees {
+                block += &format!("{four}[\"{platform}\"] = \"{}\",\n", tree.as_str());
+            }
+
+            block += &format!("{three}}},\n");
+        }
+
         if let Some(commit) = entry.commit {
             block += &format!("{three}commit = \"{commit}\",\n");
         }
@@ -615,6 +715,7 @@ mod tests {
         let entry = Entry {
             version: "1.11.0",
             digests: &digests,
+            trees: &BTreeMap::new(),
             commit: Some("abc"),
             serial: None,
         };
@@ -639,6 +740,7 @@ mod tests {
         let entry = Entry {
             version: "1.11.0",
             digests: &digests,
+            trees: &BTreeMap::new(),
             commit: None,
             serial: None,
         };
@@ -671,6 +773,7 @@ mod tests {
         let entry = Entry {
             version: "1.10.0",
             digests: &digests,
+            trees: &BTreeMap::new(),
             commit: None,
             serial: None,
         };
@@ -684,6 +787,58 @@ mod tests {
         assert!(text.contains(r#"default_version = "1.10.0","#));
         assert!(text.contains(r#"default_version = "1.9.0","#));
         assert_eq!(recipe.commit_of(block), None);
+    }
+
+    #[test]
+    fn trees_sit_beside_digests_and_never_replace_one() {
+        let recipe = Recipe::read(RECIPE).unwrap();
+        let both = [Platform::Aarch64Macos, Platform::X86_64Linux];
+        let digests = digests(&both);
+        let trees = BTreeMap::from([(Platform::X86_64Linux, "e".repeat(64).try_into().unwrap())]);
+        let entry = Entry {
+            version: "1.11.0",
+            digests: &digests,
+            trees: &trees,
+            commit: Some("abc"),
+            serial: None,
+        };
+
+        let (text, _) = recipe.with(&entry, &both, None, &BTreeSet::new()).unwrap();
+        assert!(text.contains(&format!(
+            "            }},\n            trees = {{\n                [\"x86_64-linux\"] = \"{}\",\n            }},\n            commit = \"abc\",\n",
+            "e".repeat(64)
+        )));
+        assert!(Recipe::read(&text).is_ok());
+
+        // A declared version gains a trees table after its digests, then
+        // only the trees it lacks.
+        let tree = |c: &str| -> Sha256 { c.repeat(64).try_into().unwrap() };
+        let recorded = BTreeMap::from([(
+            "1.9.0".to_string(),
+            BTreeMap::from([(Platform::X86_64Linux, tree("e"))]),
+        )]);
+        let text = recipe.with_trees(&recorded).unwrap();
+        let expected = format!(
+            "                [\"x86_64-linux\"] = \"bb\",\n            }},\n            trees = {{\n                [\"x86_64-linux\"] = \"{}\",\n            }},\n            revision = 2,\n",
+            "e".repeat(64)
+        );
+        assert!(text.contains(&expected), "{text}");
+
+        let again = Recipe::read(&text).unwrap();
+        let recorded = BTreeMap::from([(
+            "1.9.0".to_string(),
+            BTreeMap::from([
+                (Platform::X86_64Linux, tree("f")),
+                (Platform::Aarch64Macos, tree("a")),
+            ]),
+        )]);
+        let text = again.with_trees(&recorded).unwrap();
+        assert!(text.contains(&format!(
+            "            trees = {{\n                [\"aarch64-macos\"] = \"{}\",\n                [\"x86_64-linux\"] = \"{}\",\n            }},\n",
+            "a".repeat(64),
+            "e".repeat(64)
+        )), "{text}");
+        assert!(text.contains("[\"1.10.0\"] = {\n            digests = {\n                [\"aarch64-macos\"] = \"aa\",\n            },\n        },\n"));
     }
 
     #[test]
@@ -725,6 +880,7 @@ mod tests {
         let entry = Entry {
             version: "1.8.5",
             digests: &digests,
+            trees: &BTreeMap::new(),
             commit: None,
             serial: None,
         };

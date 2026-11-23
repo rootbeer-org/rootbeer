@@ -163,6 +163,49 @@ fn fetch_key_covers_hash_not_urls() {
     assert_ne!(Derivation::Fetch(changed).key().unwrap(), base);
 }
 
+fn extract() -> Extract {
+    Extract {
+        tree: SHA256.replace('0', "8").try_into().unwrap(),
+        source: SOURCE_KEY.parse().unwrap(),
+        format: Format::Dmg,
+    }
+}
+
+// The rule UNPACK.md holds rb-unpack to. Only the tree vouches for an
+// extract's output, so neither the archive nor how it is read reaches the key.
+#[test]
+fn extract_key_covers_tree_not_source_or_format() {
+    let key = |extract: Extract| Derivation::Extract(extract).key().unwrap();
+    let base = key(extract());
+
+    let mut rehosted = extract();
+    rehosted.source = DEPENDENCY_KEY.parse().unwrap();
+    assert_eq!(key(rehosted), base);
+
+    let mut repacked = extract();
+    repacked.format = Format::Zip;
+    assert_eq!(key(repacked), base);
+
+    let mut changed = extract();
+    changed.tree = SHA256.to_string().try_into().unwrap();
+    assert_ne!(key(changed), base);
+
+    let bytes = Derivation::Extract(extract()).canonical_bytes().unwrap();
+    let expected = concat!(
+        r#"{"kind":"extract","#,
+        r#""tree":"8888888888888888888888888888888888888888888888888888888888888888"}"#,
+    );
+    assert_eq!(String::from_utf8(bytes).unwrap(), expected);
+}
+
+#[test]
+fn an_extract_reads_an_archive_not_a_binary() {
+    let mut binary = extract();
+    binary.format = Format::Binary;
+    let error = Derivation::Extract(binary).key().unwrap_err();
+    assert_eq!(error.field, "format", "{error}");
+}
+
 #[test]
 fn unknown_fields_are_rejected() {
     let top_level = serde_json::from_value::<Derivation>(json!({
@@ -285,6 +328,10 @@ fn store_paths_follow_the_schema_layout() {
     assert_eq!(
         fetch_path(&key),
         PathBuf::from(format!("/opt/rb/store/{DEPENDENCY_KEY}-fetch"))
+    );
+    assert_eq!(
+        extract_path(&key),
+        PathBuf::from(format!("/opt/rb/store/{DEPENDENCY_KEY}-extract"))
     );
 }
 
